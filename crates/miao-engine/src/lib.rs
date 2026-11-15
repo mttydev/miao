@@ -41,6 +41,7 @@ pub mod host;
 pub mod http;
 mod jobs;
 pub mod knowledge;
+pub mod memory;
 pub mod lsp;
 pub mod mcp;
 mod media;
