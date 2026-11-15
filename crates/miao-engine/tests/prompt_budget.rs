@@ -308,9 +308,16 @@ async fn a_billed_allowance_pause_prints_the_window_beside_the_tally() {
         text.contains("the context window carries"),
         "the window's own occupancy must ride beside the tally: {text}"
     );
+    // The threshold is armed at the input ceiling, not the raw window: a 1M
+    // window reserves a quarter for the turn's own output, so the trigger fires
+    // at 900000 *the same way* it always did — 0.9 of what a request can send.
     assert!(
-        text.contains("against a compaction threshold of 900000 tokens"),
+        text.contains("against a compaction threshold of 675000 tokens"),
         "{text}"
+    );
+    assert!(
+        !text.contains("threshold of 900000 tokens"),
+        "the raw window is not what a request can send: {text}"
     );
     runtime.shutdown().await;
 }

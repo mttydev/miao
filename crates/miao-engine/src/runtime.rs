@@ -372,6 +372,22 @@ enum Command {
 /// The automatic-compaction budget for one window: the same shape the product
 /// derives for its default model, so a Session whose window came from its own
 /// route, or from an endpoint that stated it, plans the way the product would.
+/// Output capacity assumed when a route declares none: a quarter of the window.
+/// The old zero meant "no reserve", which armed compaction too late to matter.
+const DEFAULT_OUTPUT_RESERVE_RATIO: f64 = 0.25;
+
+/// The input a turn may actually send: the window minus the output it must
+/// keep free. A route that declares no capacity is not unlimited — it is
+/// unknown, and unknown gets a conservative quarter — and no declaration may
+/// reserve more than half the window.
+fn input_ceiling(window: u64, declared: Option<u64>) -> u64 {
+    let reserve = declared
+        .filter(|at| *at > 0)
+        .unwrap_or((window as f64 * DEFAULT_OUTPUT_RESERVE_RATIO) as u64)
+        .min(window / 2);
+    window.saturating_sub(reserve)
+}
+
 fn window_limits(window: u64) -> ContextLimits {
     ContextLimits {
         window,
@@ -3974,15 +3990,21 @@ async fn execute(
         // spends a billing allowance prints it beside the window's own figures, so
         // that tally cannot be read as context occupancy (#2870).
         let mut compaction_threshold = None;
-        let output_reserve = inner
+        let declared_reserve = inner
             .route_limits
             .lock()
             .await
-            .output_for(model.as_deref().unwrap_or_default())
-            .unwrap_or(0);
+            .output_for(model.as_deref().unwrap_or_default());
         let bound = match resolve_limits(configured, declared, learned).map(|limits| {
             let mut limits = limits;
-            limits.window = limits.window.saturating_sub(output_reserve);
+            // A turn has to leave room for its own output, so the trigger and
+            // the request bound plan against the input ceiling, never the raw
+            // window. `unwrap_or(0)` used to make "this route declares no
+            // capacity" read as "the whole window may be input": a 1M window
+            // then armed compaction at 880K while the dashboard divided by the
+            // 616K ceiling, so a session could sit above what a request can
+            // actually send and still be told `under_threshold`.
+            limits.window = input_ceiling(limits.window, declared_reserve);
             limits
         }) {
             Some(limits) => {
@@ -9740,5 +9762,35 @@ mod window_tests {
     fn a_trimmed_request_lands_below_the_window_that_refused_it() {
         assert!(request_budget(1_048_576, 62_048) < 1_048_576);
         assert_eq!(request_budget(1_000, 5_000), 1);
+    }
+}
+
+#[cfg(test)]
+mod input_ceiling_tests {
+    use super::{input_ceiling, DEFAULT_OUTPUT_RESERVE_RATIO};
+
+    /// The session that started this: a 1M window with no declared output
+    /// capacity must not arm compaction at 880K while requests can only send
+    /// 616K.
+    #[test]
+    fn an_undeclared_reserve_is_not_unlimited() {
+        let window = 1_048_576;
+        let ceiling = input_ceiling(window, None);
+        assert_eq!(
+            ceiling,
+            window - (window as f64 * DEFAULT_OUTPUT_RESERVE_RATIO) as u64
+        );
+        assert!(ceiling < 880_000, "compaction must arm below the raw ratio");
+    }
+
+    #[test]
+    fn a_declared_reserve_is_honoured() {
+        assert_eq!(input_ceiling(1_048_576, Some(393_216)), 655_360);
+    }
+
+    #[test]
+    fn an_absurd_declaration_cannot_erase_the_budget() {
+        assert_eq!(input_ceiling(1_000, Some(900)), 500);
+        assert_eq!(input_ceiling(0, Some(10)), 0);
     }
 }
