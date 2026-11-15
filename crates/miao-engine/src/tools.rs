@@ -226,7 +226,7 @@ impl Gates {
 /// `canonicalize` on Windows yields a verbatim path (`\\?\C:\...`) that never
 /// prefix-matches the plain workspace root spelling. Strip it so containment
 /// comparisons see one spelling on every platform.
-fn canonical_plain(path: std::path::PathBuf) -> std::path::PathBuf {
+pub(crate) fn canonical_plain(path: std::path::PathBuf) -> std::path::PathBuf {
     // String-level strip: `Path::strip_prefix` matches by components and can
     // never match the verbatim prefix, which lives inside the first component.
     #[cfg(windows)]
