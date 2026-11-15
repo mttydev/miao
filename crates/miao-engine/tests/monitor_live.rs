@@ -118,7 +118,11 @@ async fn settled(store: &Store) -> Value {
 
 fn watching_command() -> &'static str {
     if cfg!(windows) {
-        "echo READY-line & echo noise-line & echo READY-final & powershell -NoProfile -Command \"Start-Sleep -Seconds 60\""
+        // `ping` is the portable delay that survives cmd quoting; the same
+        // chain with `powershell -Command "Start-Sleep"` returned in under a
+        // second because the nested quotes did not survive, so the monitor test
+        // asserted a timeout that had already finished.
+        "echo READY-line & echo noise-line & echo READY-final & ping -n 61 127.0.0.1 >nul"
     } else {
         "echo READY-line; echo noise-line; echo READY-final; sleep 60"
     }
