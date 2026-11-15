@@ -916,20 +916,6 @@ pub struct Composer {
     mode: Mode,
     pub completion: Completion,
     pub notice: Option<String>,
-    /// Prompts durably admitted but not yet promoted into a turn. They are
-    /// re-read from the snapshot every frame, so this is display state rather
-    /// than a durable count the composer owns.
-    pub queued: usize,
-    /// What the active run is doing, re-read from the snapshot every frame. It
-    /// rides the composer title so the phase is visible where the operator is
-    /// typing.
-    pub phase: Option<String>,
-    /// How long the current phase has run, spelled for the right-aligned slot
-    /// of the TS compact activity row. `None` clears the slot.
-    pub phase_elapsed: Option<String>,
-    /// The wait has gone long enough that the TS row turns its spinner
-    /// warning-colored (30s while waiting for the model).
-    pub phase_alert: bool,
     /// Which placeholder example the empty composer shows. The TS prompt picks
     /// one at random when it mounts and re-rolls on a Session change, so this
     /// is a stored index rather than a clock drift.
@@ -978,10 +964,6 @@ impl Composer {
             mode: Mode::Normal,
             completion: Completion::default(),
             notice: None,
-            queued: 0,
-            phase: None,
-            phase_elapsed: None,
-            phase_alert: false,
             placeholder: random_pick(),
             suggestion: None,
             attachments: Vec::new(),
@@ -1821,10 +1803,6 @@ mod tests {
             mode: Mode::Normal,
             completion: Completion::default(),
             notice: None,
-            queued: 0,
-            phase: None,
-            phase_elapsed: None,
-            phase_alert: false,
             placeholder: 0,
             suggestion: None,
             attachments: Vec::new(),

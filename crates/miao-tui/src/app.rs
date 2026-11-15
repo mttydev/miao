@@ -891,20 +891,15 @@ impl App {
         self.shell.set_leader_hint(leader_hint);
         match self.screen {
             Screen::Home => {
-                // The launcher fills the window above the status strip: the
-                // strip keeps naming the model and the run state here, the
-                // same way it does on a Session screen.
-                let [home_area, status_area] = ratatui::layout::Layout::vertical([
-                    ratatui::layout::Constraint::Min(1),
-                    ratatui::layout::Constraint::Length(1),
-                ])
-                .areas(frame.area());
-                self.home.render(frame, home_area, &mut self.shell.composer);
-                crate::pane::render_status(
+                // The launcher fills the window and carries its own state row
+                // under the prompt, so the screen reserves no row for a strip:
+                // the landing prompt's footer is where the model is named, the
+                // same way it is under a Session's box.
+                self.home.render(
                     frame,
-                    status_area,
+                    frame.area(),
+                    &mut self.shell.composer,
                     &self.shell.status,
-                    &self.shell.theme().clone(),
                 );
             }
             Screen::Session => {
@@ -4423,16 +4418,18 @@ impl App {
     }
 
     fn update_status(&mut self) {
-        // The composer mirrors the durable queue every frame so the count stays
-        // live without the composer owning it.
-        self.shell.composer.queued = self.state.pending;
         self.mtty_state
             .set_session(self.session.as_ref().map(|session| session.id.as_str()));
         if self.screen != Screen::Session {
             self.shell.title.set_status(None);
             self.shell.title.set_status_alert(false);
-            self.shell.composer.queued = 0;
-            self.shell.composer.phase = None;
+            // The launcher has no run to report, so its row names the model and
+            // nothing else: an "Idle" here would claim a state before a Session
+            // exists.
+            self.shell.status.phase = None;
+            self.shell.status.phase_elapsed = None;
+            self.shell.status.phase_running = false;
+            self.shell.status.phase_alert = false;
             // The launcher names the model the next prompt would run on: the
             // operator's last choice, labelled from the catalog. Nothing else
             // is in play before a Session exists, and the product's home status
@@ -4608,20 +4605,15 @@ impl App {
         self.shell
             .title
             .set_status_alert(phase_needs_operator || live.is_some_and(|live| live.silent(now)));
-        // The same phase rides the composer title, so the operator does not
-        // have to look away from the input to learn the run is working rather
-        // than waiting on them. An idle Session says nothing there.
-        self.shell.composer.phase =
-            match self.state.active_run.is_some() || self.state.pending > 0 || phase_needs_operator
-            {
-                true => Some(phase.clone()),
-                false => None,
-            };
-        self.shell.composer.phase_elapsed = match self.shell.composer.phase.is_some() {
-            true => elapsed,
-            false => None,
-        };
-        self.shell.composer.phase_alert = alert && self.shell.composer.phase.is_some();
+        // The state leads the row under the input, the same one line that names
+        // the model: Idle when nothing is admitted, else the phase a live run
+        // announced, with its clock, its alert tone, and the spinner a run in
+        // flight carries. It was the composer title's job before, which said the
+        // run twice in the one area the operator is looking at.
+        self.shell.status.phase = Some(phase.clone());
+        self.shell.status.phase_elapsed = elapsed;
+        self.shell.status.phase_running = self.state.active_run.is_some();
+        self.shell.status.phase_alert = alert || phase_needs_operator;
         // Which model answers, and what the Session has cost so far. A pin on
         // the Session wins, then the model the newest assistant message ran on,
         // labelled with the catalog's protocol so the strip names the provider
@@ -4678,23 +4670,10 @@ impl App {
                         compact_tokens(usage.output_tokens)
                     )
                 });
-        // The state leads the strip: it is the one fact that is never absent.
-        // The composer title goes quiet on an idle Session and every hint below
-        // is conditional, so the row could render as a blank line — which is
-        // what a TUI that stopped painting looks like. The words carry the same
-        // judgement mtty's tab badge gets.
-        let mut hints = vec![StatusHint {
-            text: match crate::mtty_state::State::of(
-                phase_needs_operator,
-                self.state.active_run.is_some(),
-            ) {
-                crate::mtty_state::State::Idle => "idle",
-                crate::mtty_state::State::Processing => "working",
-                crate::mtty_state::State::Awaiting => "needs you",
-            }
-            .to_string(),
-            warning: false,
-        }];
+        // The state is not a hint: `phase` leads the row and is never absent, so
+        // the conditional facts below follow it and an idle Session still reads
+        // as `Idle` rather than as a TUI that stopped painting.
+        let mut hints = Vec::new();
         if let Some(installed) = &self.pending_update {
             hints.push(StatusHint {
                 text: format!("{installed} installed · restart to apply"),
@@ -7013,7 +6992,7 @@ mod tests {
         });
         app.update_status();
         assert_eq!(app.shell.title.status(), Some("needs an answer"));
-        assert_eq!(app.shell.composer.phase.as_deref(), Some("needs an answer"));
+        assert_eq!(app.shell.status.phase.as_deref(), Some("needs an answer"));
     }
 
     #[test]
@@ -7379,7 +7358,7 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_mirrors_the_queued_count_every_frame() {
+    fn the_state_row_mirrors_the_queued_count_every_frame() {
         let mut app = session_app();
         let state = SessionState {
             active_run: Some("run-1".into()),
@@ -7390,17 +7369,20 @@ mod tests {
             transcript: Box::new(Transcript::default()),
             state: Box::new(state),
         });
-        assert_eq!(app.shell.composer.queued, 0);
+        assert_eq!(strip_hints(&app), vec!["esc interrupt"]);
         app.state.pending = 3;
         app.update_status();
-        assert_eq!(app.shell.composer.queued, 3);
+        assert_eq!(
+            strip_hints(&app),
+            vec!["queued (3)", "esc interrupt and send"]
+        );
         app.state.pending = 0;
         app.update_status();
-        assert_eq!(app.shell.composer.queued, 0);
+        assert_eq!(strip_hints(&app), vec!["esc interrupt"]);
     }
 
     #[test]
-    fn the_composer_shows_the_run_phase_beside_the_input() {
+    fn the_state_row_shows_the_run_phase_beside_the_input() {
         let mut app = session_app();
         let state = SessionState {
             active_run: Some("run-1".into()),
@@ -7411,28 +7393,31 @@ mod tests {
             transcript: Box::new(Transcript::default()),
             state: Box::new(state),
         });
-        assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
+        assert_eq!(app.shell.status.phase.as_deref(), Some("Working"));
         app.state.active_run = None;
         app.update_status();
-        assert!(
-            app.shell.composer.phase.is_none(),
-            "an idle Session keeps the composer title quiet"
-        );
+        // An idle Session still says so: a blank row under the input reads the
+        // same as a TUI that stopped painting.
+        assert_eq!(app.shell.status.phase.as_deref(), Some("Idle"));
+        assert!(!app.shell.status.phase_running, "nothing is in flight");
     }
 
-    /// The strip is what still says what the Session is doing once the composer
-    /// title goes quiet, and every other hint is conditional: an idle Session
-    /// with nothing queued and the sidebar showing used to paint a blank row,
-    /// which is what a TUI that stopped painting looks like.
+    /// The state leads the row under the input and is never absent: an idle
+    /// Session with nothing queued and the sidebar showing used to paint a blank
+    /// row, which is what a TUI that stopped painting looks like.
     #[test]
-    fn the_strip_names_the_session_state_instead_of_going_blank() {
+    fn the_state_row_names_the_session_state_instead_of_going_blank() {
         let mut app = session_app();
         app.update_status();
-        assert_eq!(strip_hints(&app), vec!["idle"]);
+        assert_eq!(state_line(&app), vec!["Idle"]);
+        assert!(
+            strip_hints(&app).is_empty(),
+            "no conditional hint is set either"
+        );
 
         app.state.active_run = Some("run-1".into());
         app.update_status();
-        assert_eq!(strip_hints(&app), vec!["working", "esc interrupt"]);
+        assert_eq!(state_line(&app), vec!["Working", "esc interrupt"]);
 
         app.state.active_run = None;
         app.state.approvals.push(crate::session::ApprovalView {
@@ -7446,7 +7431,19 @@ mod tests {
             expires_at_ms: None,
         });
         app.update_status();
-        assert_eq!(strip_hints(&app), vec!["needs you"]);
+        assert_eq!(state_line(&app), vec!["needs approval · bash"]);
+    }
+
+    /// What the row under the input reads, left to right: the state, then the
+    /// conditional hints.
+    fn state_line(app: &App) -> Vec<&str> {
+        app.shell
+            .status
+            .phase
+            .iter()
+            .map(String::as_str)
+            .chain(strip_hints(app))
+            .collect()
     }
 
     fn strip_hints(app: &App) -> Vec<&str> {
@@ -7574,26 +7571,23 @@ mod tests {
                 ..SessionState::default()
             }),
         });
-        assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
+        assert_eq!(app.shell.status.phase.as_deref(), Some("Working"));
         // The very first status frame anchors the clock, so the elapsed value
         // starts at zero rather than staying absent.
         assert!(
-            app.shell.composer.phase_elapsed.is_some(),
+            app.shell.status.phase_elapsed.is_some(),
             "a run with no frame yet still has a clock: {:?}",
-            app.shell.composer.phase
+            app.shell.status.phase
         );
-        assert!(
-            !app.shell.composer.phase_alert,
-            "a fresh run is not alerting"
-        );
+        assert!(!app.shell.status.phase_alert, "a fresh run is not alerting");
 
         // The clock is re-read on every frame, so a wait that crosses the
-        // half-minute mark turns the title warning-colored even though the
+        // half-minute mark turns the row warning-colored even though the
         // engine has still said nothing.
         app.run_since = Some(("run-1".into(), Instant::now() - Duration::from_secs(31)));
         app.update_status();
         assert!(
-            app.shell.composer.phase_alert,
+            app.shell.status.phase_alert,
             "a silent 31-second run is alerting"
         );
 
@@ -7601,9 +7595,9 @@ mod tests {
         app.state.active_run = Some("run-2".into());
         app.update_status();
         assert!(
-            !app.shell.composer.phase_alert,
+            !app.shell.status.phase_alert,
             "a new run starts its own clock: {:?}",
-            app.shell.composer.phase_elapsed
+            app.shell.status.phase_elapsed
         );
     }
 
@@ -7654,9 +7648,9 @@ mod tests {
         app.state.approvals.clear();
         app.state.active_run = None;
         app.update_status();
-        // Idle still names itself: a blank strip is indistinguishable from one
+        // Idle still names itself: a blank row is indistinguishable from one
         // that stopped painting.
-        assert_eq!(strip_hints(&app), vec!["idle"]);
+        assert_eq!(state_line(&app), vec!["Idle"]);
     }
 
     /// `--auto` widens what runs without asking. A Session that stops
@@ -8639,7 +8633,7 @@ mod tests {
             app.shell.title.status(),
             Some("Running bash · Esc interrupt")
         );
-        assert_eq!(app.shell.composer.phase.as_deref(), Some("Running bash"));
+        assert_eq!(app.shell.status.phase.as_deref(), Some("Running bash"));
     }
 
     #[test]
@@ -9035,7 +9029,7 @@ mod tests {
         );
         app.handle(opened(Transcript::default(), None));
         assert!(app.tool_running.is_none(), "no tool is still running");
-        assert_eq!(strip_hints(&app), vec!["idle"]);
+        assert_eq!(state_line(&app), vec!["Idle"]);
         assert_eq!(app.shell.title.status(), Some("Idle"));
     }
 
