@@ -85,6 +85,23 @@ describe("engine reader", () => {
     }
   })
 
+  test("sends pin, archive and remove as their engine methods", async () => {
+    const { fake, calls } = transport({ pin: { accepted: true, pinned: true }, archive: { accepted: true, archived: true }, remove: { accepted: true } })
+    const reader = createEngineReader({ url: "http://127.0.0.1:4096", token: "t", transport: fake })
+    try {
+      await reader.pin("ses_b", true)
+      await reader.archive("ses_b", true)
+      await reader.remove("ses_b")
+      expect(calls).toEqual([
+        { method: "pin", params: { session_id: "ses_b", pinned: true } },
+        { method: "archive", params: { session_id: "ses_b", archived: true } },
+        { method: "remove", params: { session_id: "ses_b" } },
+      ])
+    } finally {
+      await reader.close()
+    }
+  })
+
   test("opens one stream per Session and fans events out to its subscribers", async () => {
     const { fake, subscribed, emit } = transport({})
     const reader = createEngineReader({ url: "http://127.0.0.1:4096", token: "t", transport: fake })

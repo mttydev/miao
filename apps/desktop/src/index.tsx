@@ -31,16 +31,46 @@ function awaitInitialization() {
 }
 
 function Desktop() {
-  const [ready] = createResource(awaitInitialization)
+  const [ready, { refetch }] = createResource(awaitInitialization)
+  const failure = () => {
+    const cause = ready.error
+    return cause instanceof Error ? cause.message : String(cause ?? "")
+  }
 
   return (
-    <Show when={ready.latest} fallback={<div class="h-dvh bg-v2-background-bg-deep" />}>
+    <Show
+      when={ready.latest}
+      fallback={
+        <Show
+          when={!ready.error}
+          fallback={<StartupError message={failure()} onRetry={() => void refetch()} />}
+        >
+          <div class="h-dvh bg-v2-background-bg-deep" />
+        </Show>
+      }
+    >
       {(data) => (
         <PlatformProvider value={platform}>
           <SessionSurface url={data().url} token={data().password ?? ""} />
         </PlatformProvider>
       )}
     </Show>
+  )
+}
+
+function StartupError(props: { message: string; onRetry: () => void }) {
+  return (
+    <div class="flex h-dvh flex-col items-center justify-center gap-4 bg-v2-background-bg-deep px-8 text-center text-v2-text-text-base">
+      <h1 class="text-15-medium">miao 没能启动本地引擎</h1>
+      <p class="max-w-md text-12-regular text-v2-text-text-weak break-words">{props.message}</p>
+      <button
+        type="button"
+        class="rounded-full bg-v2-text-text-base px-4 py-1.5 text-12-medium text-v2-background-bg-deep"
+        onClick={props.onRetry}
+      >
+        重试
+      </button>
+    </div>
   )
 }
 

@@ -5,7 +5,7 @@ import {
   type EngineSessionSummary,
 } from "@miao/app"
 import { Markdown } from "@miao/session-ui/markdown"
-import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 
 /**
  * One local engine's Sessions and the conversation on the selected one, with
@@ -20,6 +20,25 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid
 type Turn = { role: "user" | "assistant" | "tool"; text: string }
 
 const SUGGESTIONS = ["分析一份调查数据", "创作一篇产品文档", "做一份深度研究", "写一份周报", "审查一段代码", "策划一个方案"]
+
+/** Copies one message's text; the label flips to a confirmation for a moment. */
+function CopyButton(props: { text: string }) {
+  const [copied, setCopied] = createSignal(false)
+  return (
+    <button
+      type="button"
+      class="mt-1 text-11-regular text-v2-text-text-muted opacity-0 transition-opacity hover:text-v2-text-text-base group-hover:opacity-100 focus:opacity-100"
+      onClick={() => {
+        void navigator.clipboard.writeText(props.text).then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        })
+      }}
+    >
+      {copied() ? "已复制" : "复制"}
+    </button>
+  )
+}
 
 const isToday = (updatedAt: number) => {
   if (updatedAt === 0) return true
@@ -153,6 +172,23 @@ export function SessionSurface(props: { url: string; token: string }) {
   const [draft, setDraft] = createSignal("")
   const [attached, setAttached] = createSignal<Array<{ name: string; data: string; mime: string }>>([])
   const [busy, setBusy] = createSignal(false)
+  const [query, setQuery] = createSignal("")
+  const [menu, setMenu] = createSignal<{ session: EngineSessionSummary; x: number; y: number }>()
+  const [dialog, setDialog] = createSignal<{ kind: "rename" | "delete"; session: EngineSessionSummary; title: string }>()
+
+  // Pinned rows float above the time buckets, the same order the TUI sidebar keeps.
+  // The filter runs on title only: that is the one field every row always has.
+  const groups = createMemo(() => {
+    const needle = query().trim().toLowerCase()
+    const rows = sessions().filter((row) => !needle || row.title.toLowerCase().includes(needle))
+    const pinned = rows.filter((row) => row.pinned)
+    const others = rows.filter((row) => !row.pinned)
+    return [
+      { label: "置顶", rows: pinned },
+      { label: "今天", rows: others.filter((row) => isToday(row.updatedAt)) },
+      { label: "更早", rows: others.filter((row) => !isToday(row.updatedAt)) },
+    ]
+  })
 
   let detach: (() => void) | undefined
   let composer: HTMLTextAreaElement | undefined
@@ -275,20 +311,75 @@ export function SessionSurface(props: { url: string; token: string }) {
     if (next.length > 0) setAttached((current) => [...current, ...next])
   }
 
-  const renameSession = async (session: EngineSessionSummary) => {
-    const title = window.prompt("重命名任务", session.title)
-    if (!title || title.trim() === session.title) return
+  const refreshSessions = async () => {
+    const list = await reader.sessions({ includeArchived: false })
+    setSessions(list)
+    return list
+  }
+
+  const togglePin = async (session: EngineSessionSummary) => {
+    setMenu(undefined)
     try {
-      await reader.rename(session.id, title.trim())
-      const list = await reader.sessions()
-      setSessions(list)
-      if (state()?.title !== undefined && session.id === selected()) {
-        const current = list.find((row) => row.id === session.id)
-        if (current) setState((previous) => (previous ? { ...previous, title: current.title } : previous))
-      }
+      await reader.pin(session.id, !session.pinned)
+      await refreshSessions()
     } catch (cause) {
       fail(cause)
     }
+  }
+
+  const toggleArchive = async (session: EngineSessionSummary) => {
+    setMenu(undefined)
+    try {
+      await reader.archive(session.id, !session.archived)
+      await refreshSessions()
+      if (session.id === selected()) closeSelected()
+    } catch (cause) {
+      fail(cause)
+    }
+  }
+
+  const closeSelected = () => {
+    detach?.()
+    detach = undefined
+    setSelected(undefined)
+    setState(undefined)
+    setEvents([])
+  }
+
+  const confirmDialog = async () => {
+    const current = dialog()
+    if (!current) return
+    setDialog(undefined)
+    if (current.kind === "rename") {
+      const title = current.title.trim()
+      if (!title || title === current.session.title) return
+      try {
+        await reader.rename(current.session.id, title)
+        await refreshSessions()
+        if (current.session.id === selected()) setState((previous) => (previous ? { ...previous, title } : previous))
+      } catch (cause) {
+        fail(cause)
+      }
+      return
+    }
+    try {
+      await reader.remove(current.session.id)
+      if (current.session.id === selected()) {
+        detach?.()
+        detach = undefined
+        setSelected(undefined)
+        setState(undefined)
+        setEvents([])
+      }
+      await refreshSessions()
+    } catch (cause) {
+      fail(cause)
+    }
+  }
+
+  const renameSession = (session: EngineSessionSummary) => {
+    setMenu(undefined)
+    setDialog({ kind: "rename", session, title: session.title })
   }
 
   const submit = async (text: string) => {
@@ -320,10 +411,12 @@ export function SessionSurface(props: { url: string; token: string }) {
     if (!selected()) await newSession()
     const sessionID = selected()
     if (!sessionID) return
-    setDraft("")
     setBusy(true)
     try {
       await reader.admit(sessionID, trimmed, attached().map(({ data, mime }) => ({ data, mime })))
+      // Clear only after the engine has durably admitted the prompt, so a
+      // failed send keeps the text and attachments for a retry.
+      setDraft("")
       setAttached([])
     } catch (cause) {
       fail(cause)
@@ -357,11 +450,20 @@ export function SessionSurface(props: { url: string; token: string }) {
     !state()?.hasMessages
 
   return (
-    <div class="flex h-dvh bg-v2-background-bg-deep text-v2-text-text-base">
+    <div
+      class="flex h-dvh bg-v2-background-bg-deep text-v2-text-text-base"
+      onKeyDown={(event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
+          event.preventDefault()
+          void newSession()
+        }
+      }}
+      onClick={() => setMenu(undefined)}
+    >
       <aside class="flex w-64 shrink-0 flex-col border-r border-v2-border-border-weak">
         <div class="px-4 pb-2 pt-4">
           <div class="text-15-medium">miao</div>
-          <div class="text-11-regular text-v2-text-text-weak">local engine</div>
+          <div class="text-11-regular text-v2-text-text-muted">local engine</div>
         </div>
         <div class="px-3">
           <button
@@ -371,37 +473,49 @@ export function SessionSurface(props: { url: string; token: string }) {
           >
             + 新的任务
           </button>
-        </div>
-        <div class="px-4 pb-1 pt-4 text-11-medium text-v2-text-text-weak">
-          任务 · {sessions().length}
+          <input
+            type="search"
+            class="mt-2 w-full rounded bg-v2-background-bg-layer-01 px-3 py-1.5 text-12-regular outline-none placeholder:text-v2-text-text-muted"
+            placeholder="搜索任务"
+            value={query()}
+            onInput={(event) => setQuery(event.currentTarget.value)}
+          />
         </div>
         <div class="flex-1 overflow-y-auto pb-2">
-          <For each={[{ label: "今天", rows: sessions().filter((row) => isToday(row.updatedAt)) }, { label: "更早", rows: sessions().filter((row) => !isToday(row.updatedAt)) }]}>
+          <For each={groups()}>
             {(group) => (
               <Show when={group.rows.length > 0}>
-                <div class="px-4 pb-1 pt-3 text-10-medium tracking-wide text-v2-text-text-weak">{group.label}</div>
+                <div class="px-4 pb-1 pt-3 text-10-medium tracking-wide text-v2-text-text-muted">{group.label}</div>
                 <For each={group.rows}>
                   {(session) => (
                     <button
                       type="button"
-                      class="mx-1 flex w-[calc(100%-0.5rem)] items-center justify-between gap-2 rounded px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-01"
+                      class="group mx-1 flex w-[calc(100%-0.5rem)] items-center justify-between gap-2 rounded px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-01"
                       classList={{ "bg-v2-background-bg-layer-01": session.id === selected() }}
-                      onDblClick={() => void renameSession(session)}
                       onClick={() => void open(session)}
+                      onContextMenu={(event) => {
+                        event.preventDefault()
+                        setMenu({ session, x: event.clientX, y: event.clientY })
+                      }}
                     >
-                      <span class="min-w-0 flex-1 truncate text-12-regular">{session.title}</span>
-                      <span class="shrink-0 text-10-regular text-v2-text-text-weak">{dayLabel(session.updatedAt)}</span>
+                      <span class="flex min-w-0 flex-1 items-center gap-1.5">
+                        <Show when={session.pinned}>
+                          <span class="shrink-0 text-10-regular text-v2-text-text-muted">置顶</span>
+                        </Show>
+                        <span class="min-w-0 flex-1 truncate text-12-regular">{session.title}</span>
+                      </span>
+                      <span class="shrink-0 text-10-regular text-v2-text-text-muted">{dayLabel(session.updatedAt)}</span>
                     </button>
                   )}
                 </For>
               </Show>
             )}
           </For>
-          <Show when={sessions().length === 0}>
-            <p class="px-4 py-2 text-11-regular text-v2-text-text-weak">暂无任务</p>
+          <Show when={groups().every((group) => group.rows.length === 0)}>
+            <p class="px-4 py-2 text-11-regular text-v2-text-text-muted">{query() ? "没有匹配的任务" : "暂无任务"}</p>
           </Show>
         </div>
-        <div class="border-t border-v2-border-border-weak px-4 py-3 text-11-regular text-v2-text-text-weak">
+        <div class="border-t border-v2-border-border-weak px-4 py-3 text-11-regular text-v2-text-text-muted">
           由本机 miao 引擎驱动
         </div>
       </aside>
@@ -411,8 +525,8 @@ export function SessionSurface(props: { url: string; token: string }) {
           fallback={
             <div class="flex flex-1 flex-col items-center justify-center px-8 pb-10">
               <h1 class="text-32-medium">miao，我帮你</h1>
-              <p class="mt-2 text-13-regular text-v2-text-text-weak">一句话交代任务，剩下的交给我</p>
-              <div class="mt-8 flex w-full max-w-3xl flex-col rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 shadow-sm transition-shadow focus-within:border-v2-text-text-weak focus-within:shadow-md">
+              <p class="mt-2 text-13-regular text-v2-text-text-muted">一句话交代任务，剩下的交给我</p>
+              <div class="mt-8 flex w-full max-w-3xl flex-col rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 shadow-sm transition-shadow focus-within:border-v2-text-text-muted focus-within:shadow-md">
                 <textarea
                   ref={composer}
                   class="max-h-48 min-h-24 w-full resize-none bg-transparent px-4 pt-3 text-13-regular outline-none"
@@ -435,7 +549,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                   }}
                 />
                 <div class="flex items-center justify-between px-3 pb-3">
-                  <span class="text-11-regular text-v2-text-text-weak">Enter 发送 · Shift+Enter 换行</span>
+                  <span class="text-11-regular text-v2-text-text-muted">Enter 发送 · Shift+Enter 换行</span>
                   <button
                     type="button"
                     class="rounded-full bg-v2-text-text-base px-4 py-1.5 text-12-medium text-v2-background-bg-deep disabled:opacity-40"
@@ -451,7 +565,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                   {(suggestion) => (
                     <button
                       type="button"
-                      class="rounded-full border border-v2-border-border-weak px-3.5 py-1.5 text-12-regular transition-colors hover:border-v2-text-text-weak hover:bg-v2-background-bg-layer-01"
+                      class="rounded-full border border-v2-border-border-weak px-3.5 py-1.5 text-12-regular transition-colors hover:border-v2-text-text-muted hover:bg-v2-background-bg-layer-01"
                       onClick={() => void submit(suggestion)}
                     >
                       {suggestion}
@@ -459,16 +573,16 @@ export function SessionSurface(props: { url: string; token: string }) {
                   )}
                 </For>
               </div>
-              <div class="mt-auto pt-8 text-11-regular text-v2-text-text-weak">内容由 AI 生成，请核对重要信息</div>
+              <div class="mt-auto pt-8 text-11-regular text-v2-text-text-muted">内容由 AI 生成，请核对重要信息</div>
             </div>
           }
         >
           <header class="border-b border-v2-border-border-weak px-4 py-2">
-            <Show when={state()} fallback={<span class="text-12-regular text-v2-text-text-weak">选择一个任务</span>}>
+            <Show when={state()} fallback={<span class="text-12-regular text-v2-text-text-muted">选择一个任务</span>}>
               {(current) => (
                 <div class="flex items-baseline gap-3">
                   <h1 class="truncate text-13-medium">{current().title}</h1>
-                  <span class="text-11-regular text-v2-text-text-weak">
+                  <span class="text-11-regular text-v2-text-text-muted">
                     {identity(events()).model ? `${identity(events()).model} · ` : ""}
                     {identity(events()).agent ? `${identity(events()).agent} · ` : ""}
                     {current().visibleMessages} messages
@@ -489,28 +603,30 @@ export function SessionSurface(props: { url: string; token: string }) {
                     <Show
                       when={turn.role === "assistant"}
                       fallback={
-                        <div class="py-1 pl-1 text-11-regular text-v2-text-text-weak">
+                        <div class="py-1 pl-1 text-11-regular text-v2-text-text-muted">
                           <Markdown text={turn.text} />
                         </div>
                       }
                     >
-                      <div class="py-2 pr-8 text-13-regular">
+                      <div class="group py-2 pr-8 text-13-regular">
                         <Markdown text={turn.text} />
+                        <CopyButton text={turn.text} />
                       </div>
                     </Show>
                   }
                 >
-                  <div class="flex justify-end py-2">
+                  <div class="group flex flex-col items-end py-2">
                     <div class="max-w-[80%] rounded-2xl bg-v2-background-bg-layer-01 px-4 py-2 text-13-regular whitespace-pre-wrap">
                       {turn.text}
                     </div>
+                    <CopyButton text={turn.text} />
                   </div>
                 </Show>
               )}
             </For>
             <For each={toolRows(events())}>
               {(row) => (
-                <div class="flex items-center gap-2 py-1 pl-1 text-11-regular text-v2-text-text-weak">
+                <div class="flex items-center gap-2 py-1 pl-1 text-11-regular text-v2-text-text-muted">
                   <span class="rounded border border-v2-border-border-weak px-1.5 py-0.5">tool</span>
                   <span class="truncate">{row.tool}</span>
                   <span class="min-w-0 flex-1 truncate opacity-70">{row.resource}</span>
@@ -526,17 +642,20 @@ export function SessionSurface(props: { url: string; token: string }) {
             </Show>
             <For each={failures(events())}>
               {(reason) => (
-                <div class="py-1 pl-1 text-11-regular text-v2-text-text-critical">运行失败：{reason}</div>
+                <div class="py-1 pl-1 text-11-regular text-v2-state-fg-danger">运行失败：{reason}</div>
               )}
             </For>
             <Show when={running(events()) && !streamingText(events())}>
-              <div class="py-2 text-12-regular text-v2-text-text-weak">thinking…</div>
+              <div class="py-2 text-12-regular text-v2-text-text-muted">thinking…</div>
             </Show>
           </div>
           <Show when={error()}>
             {(message) => (
-              <div class="border-t border-v2-border-border-weak px-4 py-2 text-11-regular text-v2-text-text-critical">
-                {message()}
+              <div class="flex items-start gap-2 border-t border-v2-border-border-weak px-4 py-2 text-11-regular text-v2-state-fg-danger">
+                <span class="min-w-0 flex-1 break-words" role="alert">{message()}</span>
+                <button type="button" class="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭" onClick={() => setError(undefined)}>
+                  ×
+                </button>
               </div>
             )}
           </Show>
@@ -580,9 +699,92 @@ export function SessionSurface(props: { url: string; token: string }) {
               {running(events()) ? "停止" : busy() ? "发送中" : "发送"}
             </button>
           </div>
-          <div class="px-4 pb-2 text-right text-10-regular text-v2-text-text-weak">内容由 AI 生成，请核对重要信息</div>
+          <div class="px-4 pb-2 text-right text-10-regular text-v2-text-text-muted">内容由 AI 生成，请核对重要信息</div>
         </Show>
       </main>
+      <Show when={menu()}>
+        {(current) => (
+          <div
+            role="menu"
+            class="fixed z-50 min-w-40 rounded-lg border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1 text-12-regular shadow-md"
+            style={{ left: `${current().x}px`, top: `${current().y}px` }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button type="button" role="menuitem" class="block w-full px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02" onClick={() => void togglePin(current().session)}>
+              {current().session.pinned ? "取消置顶" : "置顶"}
+            </button>
+            <button type="button" role="menuitem" class="block w-full px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02" onClick={() => renameSession(current().session)}>
+              重命名
+            </button>
+            <button type="button" role="menuitem" class="block w-full px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02" onClick={() => void toggleArchive(current().session)}>
+              {current().session.archived ? "恢复" : "归档"}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="block w-full px-3 py-1.5 text-left text-v2-state-fg-danger hover:bg-v2-background-bg-layer-02"
+              onClick={() => {
+                setMenu(undefined)
+                setDialog({ kind: "delete", session: current().session, title: current().session.title })
+              }}
+            >
+              删除
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show when={dialog()}>
+        {(current) => (
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setDialog(undefined)}>
+            <form
+              class="w-full max-w-sm rounded-xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 p-5 shadow-lg"
+              onClick={(event) => event.stopPropagation()}
+              onSubmit={(event) => {
+                event.preventDefault()
+                void confirmDialog()
+              }}
+            >
+              <Show
+                when={current().kind === "rename"}
+                fallback={
+                  <>
+                    <h2 class="text-14-medium">删除任务</h2>
+                    <p class="mt-2 text-12-regular text-v2-text-text-muted">
+                      「{current().title}」及其全部消息、运行记录将被永久删除，且无法恢复。
+                    </p>
+                  </>
+                }
+              >
+                <h2 class="text-14-medium">重命名任务</h2>
+                <input
+                  class="mt-3 w-full rounded bg-v2-background-bg-deep px-3 py-2 text-13-regular outline-none"
+                  value={current().title}
+                  autofocus
+                  onInput={(event) => {
+                    const title = event.currentTarget.value
+                    setDialog((previous) => (previous ? { ...previous, title } : previous))
+                  }}
+                />
+              </Show>
+              <div class="mt-5 flex justify-end gap-2">
+                <button type="button" class="rounded-full px-4 py-1.5 text-12-medium hover:bg-v2-background-bg-layer-02" onClick={() => setDialog(undefined)}>
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  class="rounded-full px-4 py-1.5 text-12-medium"
+                  classList={{
+                    "bg-v2-state-fg-danger text-v2-background-bg-deep": current().kind === "delete",
+                    "bg-v2-text-text-base text-v2-background-bg-deep": current().kind === "rename",
+                  }}
+                >
+                  {current().kind === "delete" ? "删除" : "保存"}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </Show>
     </div>
   )
 }
