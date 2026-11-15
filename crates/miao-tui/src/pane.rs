@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -523,21 +523,23 @@ impl Shell {
         // and below, so a spare row on either side was a second gap for a
         // boundary the border already marks — three rows of dead space between
         // the transcript, the input, and the status strip on a short window.
-        // The status strip is one row and sits straight under the box.
         // Prompts the engine still holds un-promoted sit straight above the
         // input: the queue depth in the title says how many, these rows say
         // what they are, where the operator typed them.
         // The sidebar owns the right column for the window's whole height, so its
         // rule runs to the last row. The conversation is the other column, and
-        // the queue, the box and the status strip are laid out inside it: they
-        // used to be laid out across the window and painted inside the column,
-        // which left the rule stopping where the footer band started.
+        // the queue and the box are laid out inside it: they used to be laid
+        // out across the window and painted inside the column, which left the
+        // rule stopping where the footer band started. The status strip was
+        // that footer band until the box absorbed it: its model, usage and
+        // hints now ride the box's bottom border, and the conversation keeps
+        // the row the strip used to spend.
         let (conversation_area, sidebar_area) = match self.sidebar_hidden {
             true => (frame.area(), None),
             false => body_columns(frame.area()),
         };
         let queued_height = queued_rows(&self.transcript.pending_prompts) as u16;
-        let [body_area, panel_area, queued_area, composer_area, status_area] = Layout::vertical([
+        let [body_area, panel_area, queued_area, composer_area] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(panel_height),
             Constraint::Length(queued_height),
@@ -546,7 +548,6 @@ impl Shell {
                 composer_column(conversation_area.width),
                 frame.area().height,
             )),
-            Constraint::Length(1),
         ])
         .areas(conversation_area);
         self.transcript.render(frame, body_area);
@@ -573,18 +574,18 @@ impl Shell {
             self.queued.snapshot(frame, queued_area);
             self.queued.paint(frame);
         }
-        self.composer_text =
-            render_composer(frame, composer_area, &self.composer, &self.transcript.theme);
-        match &self.leader_hint {
-            Some(menu) => frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    fit_chords(menu, status_area.width as usize),
-                    Style::new().fg(self.transcript.theme.palette.primary),
-                ))),
-                status_area,
-            ),
-            None => render_status(frame, status_area, &self.status, &self.transcript.theme),
-        }
+        // A leader that is still waiting takes the border row over: the chords
+        // are discoverable exactly where the facts they replace usually sit.
+        self.composer_text = render_composer(
+            frame,
+            composer_area,
+            &self.composer,
+            &self.transcript.theme,
+            Some(&ComposerFooter {
+                status: &self.status,
+                leader: self.leader_hint.as_deref(),
+            }),
+        );
     }
 }
 
@@ -1578,7 +1579,13 @@ impl Home {
     /// banner and the version centred in the vertical leftover, the prompt
     /// beneath, and any notice under that. There is no session list here —
     /// history lives in the session dialog, reachable from the prompt.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, composer: &mut Composer) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        composer: &mut Composer,
+        status: &StatusStrip,
+    ) {
         let palette = self.theme.palette;
         let width = area.width as usize;
         // The page ground: every other row is painted by something, and the
@@ -1675,7 +1682,16 @@ impl Home {
             // an empty row under a one-line prompt.
             height: prompt_h,
         };
-        self.composer_text = render_home_composer(frame, prompt_area, composer, &self.theme);
+        self.composer_text = render_home_composer(
+            frame,
+            prompt_area,
+            composer,
+            &self.theme,
+            Some(&ComposerFooter {
+                status,
+                leader: None,
+            }),
+        );
         for (offset, (notice, ink)) in notices.iter().enumerate() {
             frame.render_widget(
                 Paragraph::new(Span::styled(notice.clone(), Style::new().fg(*ink))),
@@ -2184,11 +2200,19 @@ pub struct StatusHint {
     pub warning: bool,
 }
 
-pub fn render_status(frame: &mut Frame, area: Rect, status: &StatusStrip, theme: &Theme) {
+/// What the Session composer's bottom border carries: the facts the status
+/// strip used to spend the window's last row on — what the run waits on, what
+/// it runs on, what it has cost. A leader that is still waiting takes the row
+/// over with its chord menu, exactly as it took the strip over.
+pub struct ComposerFooter<'a> {
+    pub status: &'a StatusStrip,
+    pub leader: Option<&'a str>,
+}
+
+/// The run's hints, then the model, then what the session has cost: the order
+/// the strip painted, minus the version, which keeps the row's right edge.
+fn footer_status_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
     let palette = theme.palette;
-    // The TS status line is one left-aligned row two cells in from the edge:
-    // the run's hints first, then the model, then what the session has cost.
-    // Nothing paints a surface behind it; the bar look was this pane's own.
     let muted = Style::new().fg(palette.text_muted);
     let mut spans: Vec<Span<'static>> = Vec::new();
     for hint in &status.hints {
@@ -2227,28 +2251,44 @@ pub fn render_status(frame: &mut Frame, area: Rect, status: &StatusStrip, theme:
         }
         spans.push(Span::styled(usage.clone(), muted));
     }
-    // The strip carries the page background across its whole width, empty or
-    // not: this row is the window's last, and a paragraph that paints only its
-    // text — or returns early with no text at all — leaves the rest of the row
-    // at the terminal's default colour, a band that matches nothing above it.
-    frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::new().bg(palette.background))
-            .block(Block::new().padding(ratatui::widgets::Padding::left(2))),
-        area,
-    );
-    // The running build sits at the row's right edge: an operator verifying an
-    // upgrade reads it without leaving the TUI for `miao --version`.
-    let version = format!("miao {}", crate::VERSION);
-    let version_width = version.chars().count() as u16;
-    if area.width > version_width {
-        let cell = version_width + 2;
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(version, muted)))
-                .style(Style::new().bg(palette.background)),
-            Rect::new(area.x + area.width - cell, area.y, cell, 1),
-        );
-    }
+    spans
+}
+
+/// The border row the box sits on: the status facts at its left, the running
+/// build at its right, so an operator verifying an upgrade still reads the
+/// version without leaving the TUI for `miao --version`.
+fn composer_bottom_titles(
+    footer: &ComposerFooter,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let palette = theme.palette;
+    let muted = Style::new().fg(palette.text_muted);
+    let version = format!(" miao {} ", crate::VERSION);
+    let inner = width.saturating_sub(2) as usize;
+    let left = match footer.leader {
+        Some(menu) => Line::from(Span::styled(
+            format!(
+                " {} ",
+                fit_chords(menu, inner.saturating_sub(version.width()))
+            ),
+            Style::new().fg(palette.primary),
+        )),
+        None => {
+            let mut spans = footer_status_spans(footer.status, theme);
+            match spans.is_empty() {
+                true => Line::from(String::new()),
+                false => {
+                    spans.insert(0, Span::raw(" "));
+                    Line::from(spans)
+                }
+            }
+        }
+    };
+    vec![
+        left,
+        Line::from(Span::styled(version, muted)).alignment(Alignment::Right),
+    ]
 }
 
 const COMPOSER_COMPLETION_ROWS: usize = 6;
@@ -2353,6 +2393,7 @@ fn render_home_composer(
     area: Rect,
     composer: &Composer,
     theme: &Theme,
+    footer: Option<&ComposerFooter>,
 ) -> Option<ComposerText> {
     let palette = theme.palette;
     if area.width < 5 || area.height < 2 {
@@ -2375,6 +2416,31 @@ fn render_home_composer(
                 ..area
             },
         );
+    }
+    // The landing prompt absorbs the status strip the same way the Session
+    // box does: its facts sit on the bottom rule. The running build keeps the
+    // banner's own `v` line as its home here — the landing screen is where an
+    // operator verifies an upgrade before any Session exists, and a caption
+    // that eats into the rule would leave the band's own width unmeasurable.
+    if let Some(footer) = footer {
+        let row = area.y + area.height - 1;
+        let mut spans = footer_status_spans(footer.status, theme);
+        if !spans.is_empty() {
+            let text: usize = spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            spans.insert(0, Span::raw(" "));
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)).style(Style::new().bg(palette.background)),
+                Rect {
+                    x: area.x + 1,
+                    y: row,
+                    width: (text as u16).min(area.width.saturating_sub(2)) + 1,
+                    height: 1,
+                },
+            );
+        }
     }
     let body = Rect {
         y: area.y + 1,
@@ -2539,8 +2605,16 @@ fn render_composer(
     area: Rect,
     composer: &Composer,
     theme: &Theme,
+    footer: Option<&ComposerFooter>,
 ) -> Option<ComposerText> {
-    render_composer_in(frame, area, composer, theme, composer_column(area.width))
+    render_composer_in(
+        frame,
+        area,
+        composer,
+        theme,
+        composer_column(area.width),
+        footer,
+    )
 }
 
 fn render_composer_in(
@@ -2549,6 +2623,7 @@ fn render_composer_in(
     composer: &Composer,
     theme: &Theme,
     column: u16,
+    footer: Option<&ComposerFooter>,
 ) -> Option<ComposerText> {
     let palette = theme.palette;
     let column = column.min(area.width);
@@ -2627,6 +2702,16 @@ fn render_composer_in(
         .title(Line::from(title))
         .border_style(Style::new().fg(border))
         .style(Style::new().bg(palette.background));
+    // The bottom border carries what the status strip used to spend the
+    // window's last row on: the run's facts at the left, the running build at
+    // the right. An absent footer keeps the row bare, the way the landing
+    // prompt drew plain rules.
+    let block = match footer {
+        Some(footer) => composer_bottom_titles(footer, theme, area.width)
+            .into_iter()
+            .fold(block, Block::title_bottom),
+        None => block,
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -5160,7 +5245,7 @@ mod tests {
                 .expect("terminal");
             terminal
                 .draw(|frame| {
-                    let _ = render_composer(frame, frame.area(), &composer, &theme);
+                    let _ = render_composer(frame, frame.area(), &composer, &theme, None);
                 })
                 .expect("draw");
             let text = terminal
@@ -5280,14 +5365,6 @@ mod tests {
         // operator carries a glyph, so it still reads on a monochrome terminal
         // or in a low-colour profile. The TS order keeps the hints at the left
         // of the row, ahead of the model.
-        let theme = Theme {
-            name: crate::theme::DEFAULT_THEME.to_string(),
-            palette: crate::theme::builtin(
-                crate::theme::DEFAULT_THEME,
-                crate::theme::ThemeMode::Dark,
-            )
-            .expect("theme"),
-        };
         let status = StatusStrip {
             model: Some("fake/model".into()),
             usage: None,
@@ -5302,18 +5379,7 @@ mod tests {
                 },
             ],
         };
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 1)).expect("terminal");
-        terminal
-            .draw(|frame| render_status(frame, frame.area(), &status, &theme))
-            .expect("draw");
-        let painted = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
+        let painted = paint_composer_footer(&status, None, 80);
         assert!(painted.contains("! approve or deny"), "{painted}");
         assert!(!painted.contains("! ctrl+c"), "{painted}");
         assert!(painted.contains("ctrl+c to interrupt"), "{painted}");
@@ -5449,22 +5515,41 @@ mod tests {
     #[test]
     fn the_status_strip_marks_the_model_the_window_runs_on() {
         let theme = home_theme();
-        let status = super::StatusStrip {
+        let status = StatusStrip {
             model: Some("glm-5.3-flash".into()),
             ..Default::default()
         };
+        let composer = crate::editor::Composer::new(Path::new("."));
+        let footer = ComposerFooter {
+            status: &status,
+            leader: None,
+        };
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 3)).expect("terminal");
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 5)).expect("terminal");
         terminal
-            .draw(|frame| super::render_status(frame, Rect::new(0, 0, 60, 1), &status, &theme))
+            .draw(|frame| {
+                let _ = render_composer(frame, frame.area(), &composer, &theme, Some(&footer));
+            })
             .expect("draw");
         let buffer = terminal.backend().buffer();
         let painted: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         assert!(painted.contains("glm-5.3-flash"), "{painted}");
+        // The placeholder text carries its own `g`s, so the search anchors on
+        // the model's own name, read straight off the cells.
         let started = buffer
             .content
             .iter()
-            .position(|cell| cell.symbol() == "g")
+            .enumerate()
+            .filter(|(_, cell)| cell.symbol() == "g")
+            .find(|(index, _)| {
+                buffer.content[*index..]
+                    .iter()
+                    .take(13)
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    == "glm-5.3-flash"
+            })
+            .map(|(index, _)| index)
             .expect("the model's first glyph");
         assert_eq!(
             buffer.content[started].style().fg,
@@ -5498,6 +5583,7 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
+                    None,
                 );
             })
             .expect("draw");
@@ -5515,6 +5601,7 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
+                    None,
                 );
             })
             .expect("draw");
@@ -5538,6 +5625,7 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
+                    None,
                 );
             })
             .expect("draw");
@@ -5559,6 +5647,7 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
+                    None,
                 );
             })
             .expect("draw");
@@ -6198,7 +6287,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme);
+                let _ = render_composer(frame, frame.area(), &composer, &theme, None);
             })
             .expect("draw");
         let warning = theme.palette.warning;
@@ -6220,7 +6309,7 @@ mod tests {
         };
         let mut composer = crate::editor::Composer::new(Path::new("."));
         composer.editor.set_text(&"abcdefghij".repeat(8));
-        let rows = paint_composer(&composer, &theme, 40, 8);
+        let rows = paint_composer(&composer, &theme, 40, 8, None);
         assert!(rows[2].contains("abcdefghij"), "the head stays visible");
         assert!(
             rows[3].trim_end().chars().count() > 2,
@@ -6259,7 +6348,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer))
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let row = |y: u16| {
@@ -6316,7 +6405,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer))
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let row = |y: u16| {
@@ -6439,13 +6528,14 @@ mod tests {
         theme: &Theme,
         width: u16,
         height: u16,
+        footer: Option<&ComposerFooter>,
     ) -> Vec<String> {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
                 .expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), composer, theme);
+                let _ = render_composer(frame, frame.area(), composer, theme, footer);
             })
             .expect("draw");
         terminal
@@ -6455,6 +6545,29 @@ mod tests {
             .chunks(width as usize)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect()
+    }
+
+    /// Paint the Session composer with a footer and return its bottom border
+    /// row: the row the status strip used to spend.
+    fn paint_composer_footer(status: &StatusStrip, leader: Option<&str>, width: u16) -> String {
+        let theme = home_theme();
+        let composer = crate::editor::Composer::new(Path::new("."));
+        let footer = ComposerFooter { status, leader };
+        let height = 5u16;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render_composer(frame, frame.area(), &composer, &theme, Some(&footer));
+            })
+            .expect("draw");
+        let last = height - 1;
+        (0..width)
+            .map(|x| terminal.backend().buffer()[(x, last)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
     }
 
     /// Paint the composer at a fixed width and return its top border row,
@@ -6467,7 +6580,7 @@ mod tests {
                 .expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), composer, theme);
+                let _ = render_composer(frame, frame.area(), composer, theme, None);
             })
             .expect("draw");
         (0..width)
@@ -6479,13 +6592,6 @@ mod tests {
 
     #[test]
     fn the_status_strip_carries_the_queued_count_like_the_typescript_hints() {
-        let palette =
-            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
-                .expect("theme");
-        let theme = Theme {
-            name: crate::theme::DEFAULT_THEME.to_string(),
-            palette,
-        };
         let mut status = StatusStrip {
             model: Some("glm-5".into()),
             ..StatusStrip::default()
@@ -6494,58 +6600,145 @@ mod tests {
             text: "queued (2)".to_string(),
             warning: false,
         });
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 1)).expect("terminal");
-        terminal
-            .draw(|frame| render_status(frame, frame.area(), &status, &theme))
-            .expect("draw");
-        let text: String = (0..80)
-            .map(|x| {
-                terminal
-                    .backend()
-                    .buffer()
-                    .cell(ratatui::prelude::Position::new(x, 0))
-                    .map(|cell| cell.symbol().to_string())
-                    .unwrap_or_default()
-            })
-            .collect();
-        assert!(text.contains("queued (2)"), "{text}");
-        assert!(text.contains("glm-5"), "{text}");
+        let painted = paint_composer_footer(&status, None, 80);
+        assert!(painted.contains("queued (2)"), "{painted}");
+        assert!(painted.contains("glm-5"), "{painted}");
     }
 
     #[test]
     fn the_status_strip_pins_the_running_build_at_its_right_edge() {
-        let palette =
-            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
-                .expect("theme");
-        let theme = Theme {
-            name: crate::theme::DEFAULT_THEME.to_string(),
-            palette,
-        };
         let status = StatusStrip {
             model: Some("glm-5".into()),
             ..StatusStrip::default()
         };
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 1)).expect("terminal");
-        terminal
-            .draw(|frame| render_status(frame, frame.area(), &status, &theme))
-            .expect("draw");
-        let text: String = (0..80)
-            .map(|x| {
-                terminal
-                    .backend()
-                    .buffer()
-                    .cell(ratatui::prelude::Position::new(x, 0))
-                    .map(|cell| cell.symbol().to_string())
-                    .unwrap_or_default()
-            })
-            .collect();
+        let painted = paint_composer_footer(&status, None, 80);
         let version = format!("miao {}", crate::VERSION);
-        assert!(text.contains(&version), "the strip names the build: {text}");
         assert!(
-            text.trim_end().ends_with(&version),
-            "the build sits at the right edge: {text}"
+            painted.contains(&version),
+            "the border names the build: {painted}"
+        );
+        // The border's corner closes the row after the build's own cell.
+        assert!(
+            painted
+                .trim_end()
+                .trim_end_matches('┘')
+                .trim_end()
+                .ends_with(version.trim()),
+            "the build sits at the right edge: {painted}"
+        );
+    }
+
+    /// A leader that is still waiting takes the border row over with its
+    /// chords, the way it took the strip over.
+    #[test]
+    fn an_armed_leader_takes_the_border_row_over() {
+        let status = StatusStrip {
+            model: Some("glm-5".into()),
+            ..StatusStrip::default()
+        };
+        let painted = paint_composer_footer(&status, Some("ctrl+x · q app exit"), 80);
+        assert!(
+            painted.contains("ctrl+x · q app exit"),
+            "the chords paint on the border: {painted}"
+        );
+        assert!(
+            !painted.contains("glm-5"),
+            "the chords replace the facts while armed: {painted}"
+        );
+    }
+
+    /// The fold itself: the box's bottom border is the window's last row, so
+    /// the strip no longer holds a row of its own above the box.
+    #[test]
+    fn the_session_screen_spends_no_row_on_the_strip() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let mut shell = Shell::new(
+            Path::new("."),
+            Theme {
+                name: crate::theme::DEFAULT_THEME.to_string(),
+                palette,
+            },
+        );
+        let transcript = Transcript {
+            entries: vec![Entry::User {
+                text: "question".into(),
+                seq: 1,
+            }],
+            ..Transcript::default()
+        };
+        shell.set_transcript(&transcript);
+        shell.status.model = Some("glm-5".into());
+        let height = 12u16;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
+            .expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let row = |y: u16| {
+            (0..60u16)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let last = row(height - 1);
+        assert!(
+            last.contains("glm-5"),
+            "the box's border carries the model on the last row: {last:?}"
+        );
+        assert!(
+            !last.contains('│'),
+            "the last row is the box's bottom border, not a strip band: {last:?}"
+        );
+    }
+
+    /// The landing prompt carries the facts on its bottom rule when it has
+    /// them, and keeps the rule whole when it does not — the banner's own `v`
+    /// line is the landing screen's build marker.
+    #[test]
+    fn the_landing_prompt_carries_the_run_facts_on_its_rule() {
+        let theme = home_theme();
+        let mut home = Home::new(theme.clone());
+        home.set_prompt_width(crate::config::PromptWidth::Fixed(40));
+        let mut composer = crate::editor::Composer::new(Path::new("."));
+        let status = StatusStrip {
+            model: Some("glm-5".into()),
+            ..StatusStrip::default()
+        };
+        let height = 24u16;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
+            .expect("terminal");
+        terminal
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &status))
+            .expect("draw");
+        let row = |y: u16| {
+            (0..60u16)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let rule_row = (0..height)
+            .position(|y| row(y).contains("glm-5") && row(y).contains('─'))
+            .expect("the facts paint on the bottom rule") as u16;
+        assert!(
+            !row(rule_row - 1).contains("glm-5"),
+            "no strip row above the rule: {:?}",
+            row(rule_row - 1)
+        );
+
+        // An empty strip keeps the rule whole.
+        let empty = StatusStrip::default();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
+            .expect("terminal");
+        terminal
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &empty))
+            .expect("draw");
+        let empty_row = |y: u16| {
+            (0..60u16)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let full_rule = "─".repeat(30);
+        assert!(
+            (0..height).any(|y| empty_row(y).contains(&full_rule)),
+            "the rule stays measurable without facts"
         );
     }
 
@@ -6846,11 +7039,21 @@ mod tests {
             .chunks(area.width as usize)
             .last()
             .expect("the status row");
-        let first = status
+        let border = status
+            .iter()
+            .position(|cell| cell.symbol() == "└")
+            .expect("the composer's bottom border closes the row");
+        let first = status[border + 1..]
             .iter()
             .position(|cell| !cell.symbol().trim().is_empty())
-            .expect("the model is painted");
-        assert_eq!(first, 2, "the row starts two cells in, as the TS one does");
+            .expect("the model is painted")
+            + border
+            + 1;
+        assert_eq!(
+            first,
+            border + 2,
+            "the row starts two cells in from the box, as the TS one does"
+        );
         assert!(
             status
                 .iter()
@@ -7358,7 +7561,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 8)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme);
+                let _ = render_composer(frame, frame.area(), &composer, &theme, None);
             })
             .expect("draw");
         let visible = terminal
@@ -7431,7 +7634,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 16)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer))
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
             .expect("draw");
         let draft = home.composer_text.expect("the prompt painted its draft");
         assert!(home.begin_selection(

@@ -891,20 +891,15 @@ impl App {
         self.shell.set_leader_hint(leader_hint);
         match self.screen {
             Screen::Home => {
-                // The launcher fills the window above the status strip: the
-                // strip keeps naming the model and the run state here, the
-                // same way it does on a Session screen.
-                let [home_area, status_area] = ratatui::layout::Layout::vertical([
-                    ratatui::layout::Constraint::Min(1),
-                    ratatui::layout::Constraint::Length(1),
-                ])
-                .areas(frame.area());
-                self.home.render(frame, home_area, &mut self.shell.composer);
-                crate::pane::render_status(
+                // The launcher fills the window: the strip's facts ride the
+                // landing prompt's bottom rule now, the same way the Session
+                // box carries them on its border, so the row the strip spent
+                // stays with the page.
+                self.home.render(
                     frame,
-                    status_area,
+                    frame.area(),
+                    &mut self.shell.composer,
                     &self.shell.status,
-                    &self.shell.theme().clone(),
                 );
             }
             Screen::Session => {
@@ -4737,14 +4732,9 @@ impl App {
         }
         // A blocking approval or question is already the phase line, so
         // repeating it here would say the same thing twice in the one strip the
-        // operator scans. The queued count rides the strip, like the TS status
-        // line's `queued (n)` segment.
-        if self.state.pending > 0 {
-            hints.push(StatusHint {
-                text: format!("queued ({})", self.state.pending),
-                warning: false,
-            });
-        }
+        // operator scans. The queued count no longer rides these hints either:
+        // the composer box's title carries it now, and the facts below the
+        // draft would read the same number twice in the one box.
         if self.state.active_run.is_some() {
             hints.push(StatusHint {
                 text: if self.state.pending > 0 {
