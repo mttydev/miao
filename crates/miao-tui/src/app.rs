@@ -941,15 +941,14 @@ impl App {
         // The Sessions dialog left open is the one-screen agent view: frames
         // flowing for any Session re-arm the catalog ask (at most every two
         // seconds) so live state keeps moving while it watches.
-        if matches!(self.dialog, Some(Dialog::Sessions(_))) {
-            if self
+        if matches!(self.dialog, Some(Dialog::Sessions(_)))
+            && self
                 .last_catalog_ask
                 .is_none_or(|at| at.elapsed() >= AGENT_VIEW_REFRESH)
-            {
-                self.last_catalog_ask = Some(Instant::now());
-                if let Some(engine) = self.engine.as_ref() {
-                    engine.catalog();
-                }
+        {
+            self.last_catalog_ask = Some(Instant::now());
+            if let Some(engine) = self.engine.as_ref() {
+                engine.catalog();
             }
         }
         // Any input restarts the landing banner's idle light, the way a key or
