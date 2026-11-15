@@ -647,7 +647,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                   <Show when={catalog().length > 0}>
                     <button
                       type="button"
-                      class="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-11-regular text-v2-text-text-muted transition-colors hover:bg-v2-background-bg-layer-01"
+                      class="inline-flex shrink-0 items-center gap-1 rounded-full border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-2.5 py-0.5 text-11-regular text-v2-text-text-muted transition-colors hover:bg-v2-background-bg-layer-02"
                       onClick={(event) => {
                         const rect = event.currentTarget.getBoundingClientRect()
                         setModelMenu({ x: rect.left, y: rect.bottom + 4 })
@@ -677,8 +677,8 @@ export function SessionSurface(props: { url: string; token: string }) {
               )}
             </Show>
           </header>
-          <div ref={scroller} class="min-h-0 flex-1 overflow-y-auto">
-            <div class="mx-auto w-full max-w-3xl px-6 py-4">
+          <div ref={scroller} class="min-h-0 flex-1 overflow-y-auto bg-v2-background-bg-base">
+            <div class="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6">
               <For each={conversation()}>
                 {(turn) => (
                   <Show
@@ -687,20 +687,25 @@ export function SessionSurface(props: { url: string; token: string }) {
                       <Show
                         when={turn.role === "assistant"}
                         fallback={
-                          <div class="py-1.5 text-11-regular text-v2-text-text-faint">
+                          <div class="py-1 pl-1 text-11-regular text-v2-text-text-faint">
                             <Markdown text={turn.text} />
                           </div>
                         }
                       >
-                        <div class="group py-2 pr-6 text-13-regular leading-relaxed">
-                          <Markdown text={turn.text} />
-                          <CopyButton text={turn.text} />
+                        <div class="group flex gap-3">
+                          <span class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-v2-background-bg-accent text-v2-text-text-inverse">
+                            <SparklesIcon class="size-3.5" />
+                          </span>
+                          <div class="min-w-0 flex-1 text-13-regular leading-relaxed">
+                            <Markdown text={turn.text} />
+                            <CopyButton text={turn.text} />
+                          </div>
                         </div>
                       </Show>
                     }
                   >
-                    <div class="group flex flex-col items-end py-2">
-                      <div class="max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-v2-background-bg-layer-01 px-4 py-2.5 text-13-regular">
+                    <div class="group flex flex-col items-end">
+                      <div class="max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-v2-background-bg-layer-02 px-4 py-2.5 text-13-regular leading-relaxed">
                         {turn.text}
                       </div>
                       <CopyButton text={turn.text} />
@@ -710,7 +715,7 @@ export function SessionSurface(props: { url: string; token: string }) {
               </For>
               <For each={toolRows(events())}>
                 {(row) => (
-                  <div class="py-0.5">
+                  <div class="-ml-1 py-0.5">
                     <span class="inline-flex max-w-full items-center gap-1.5 rounded-md bg-v2-background-bg-layer-01 px-2 py-1 text-10-regular text-v2-text-text-muted">
                       <span class="font-medium">{row.tool}</span>
                       <span class="min-w-0 truncate opacity-70">{row.resource}</span>
@@ -756,12 +761,12 @@ export function SessionSurface(props: { url: string; token: string }) {
             )}
           </Show>
           <div class="shrink-0 px-4 pb-1">
-            <div class="flex items-end gap-2 rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-3 py-2 transition-colors focus-within:border-v2-border-border-muted">
+            <div class="mx-auto flex w-full max-w-3xl flex-col rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-3.5 py-2 shadow-sm transition-colors focus-within:border-v2-border-border-muted">
               <textarea
                 class="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-1.5 text-13-regular outline-none placeholder:text-v2-text-text-faint"
                 placeholder={language.t("desktop.surface.composer.placeholder")}
                 value={draft()}
-                rows={2}
+                rows={1}
                 onInput={(event) => setDraft(event.currentTarget.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
@@ -776,9 +781,11 @@ export function SessionSurface(props: { url: string; token: string }) {
                   }
                 }}
               />
-              <button
+              <div class="flex items-center justify-between gap-2 pt-1">
+                <span />
+                <button
                 type="button"
-                class="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-12-medium transition-opacity hover:opacity-90 disabled:opacity-40"
+                class="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-4 text-12-medium transition-opacity hover:opacity-90 disabled:opacity-40"
                 classList={{
                   "bg-v2-background-bg-accent text-v2-text-text-inverse": !running(events()),
                   "border border-v2-border-border-weak text-v2-state-fg-danger": running(events()),
@@ -807,7 +814,8 @@ export function SessionSurface(props: { url: string; token: string }) {
                     <SendIcon class="size-3.5" />
                   </>
                 </Show>
-              </button>
+                </button>
+              </div>
             </div>
           </div>
           <div class="shrink-0 pb-2 pt-1 text-center text-10-regular text-v2-text-text-faint">
