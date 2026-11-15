@@ -5303,6 +5303,10 @@ mod tests {
             .expect("theme"),
         };
         let status = StatusStrip {
+            phase: None,
+            phase_elapsed: None,
+            phase_running: false,
+            phase_alert: false,
             model: Some("fake/model".into()),
             usage: None,
             hints: vec![
@@ -6273,7 +6277,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer))
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let row = |y: u16| {
@@ -6330,7 +6334,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer))
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let row = |y: u16| {
@@ -7445,7 +7449,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 16)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer))
+            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
             .expect("draw");
         let draft = home.composer_text.expect("the prompt painted its draft");
         assert!(home.begin_selection(
