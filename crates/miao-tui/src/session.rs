@@ -29,6 +29,14 @@ pub struct SessionSummary {
     /// The engine's bounded "what this conversation last said", for the list
     /// preview. `None` when the Session has no readable text yet.
     pub preview: Option<String>,
+    /// The run still going in this Session, straight from the catalog. `Some`
+    /// is the one-screen agent view's "this row is alive" marker.
+    pub active_run: Option<String>,
+    /// Todo entries that are neither completed nor cancelled. `None` when the
+    /// catalog ran before this field existed.
+    pub todos_open: Option<u64>,
+    /// Whether the Session's goal is still armed.
+    pub goal_armed: Option<bool>,
 }
 
 /// The model a Session is pinned to, kept in the parts the engine reports
@@ -105,6 +113,12 @@ impl SessionSummary {
                 .and_then(|preview| preview.get("text"))
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            active_run: snapshot
+                .get("active_run")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            todos_open: snapshot.get("todos_open").and_then(Value::as_u64),
+            goal_armed: snapshot.get("goal_armed").and_then(Value::as_bool),
         })
     }
 

@@ -3,6 +3,7 @@ use miao_engine::{
     protocol::{Delivery, Input},
     store::Store,
 };
+use rusqlite;
 use serde_json::json;
 use std::{
     io::Write,
@@ -306,4 +307,58 @@ async fn one_catalog_reply_beats_a_snapshot_per_session() {
     );
     assert_eq!(rows.len(), ids.len());
     store.close().await.unwrap();
+}
+
+/// The Session dialog reads the catalog as a one-screen agent view: a run
+/// still going marks the row alive, and the todo/goal state rides the row so
+/// an operator sees a running Session without opening it.
+#[tokio::test]
+async fn a_catalog_row_carries_the_live_state_the_agent_view_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("engine.db");
+    let store = Store::open(&path).await.unwrap();
+    store
+        .initialize("ses_live", "Live", "/work/live")
+        .await
+        .unwrap();
+    // A run is going: the durable marker the dialog's ● chip reads.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO engine_run(id,session_id,state,lease_epoch) VALUES('run-1','ses_live','running',0)",
+            [],
+        )
+        .unwrap();
+    }
+    // Todo state: one entry left open, one already finished.
+    store
+        .record_at(
+            "ses_live",
+            "session.state.updated",
+            json!({"operation_id":"t1","kind":"todos","value":{"todos":[
+                {"content":"left","status":"in_progress","priority":"high"},
+                {"content":"done","status":"completed","priority":"high"}
+            ]}}),
+            1,
+        )
+        .await
+        .unwrap();
+    store
+        .record_at(
+            "ses_live",
+            "session.state.updated",
+            json!({"operation_id":"g1","kind":"goal","value":{"objective":"ship","status":"active"}}),
+            2,
+        )
+        .await
+        .unwrap();
+
+    let catalog = store.session_catalog().await.unwrap();
+    let row = catalog
+        .iter()
+        .find(|row| row["session_id"] == "ses_live")
+        .expect("ses_live is listed");
+    assert_eq!(row["active_run"], "run-1", "the row is marked alive");
+    assert_eq!(row["todos_open"], 1, "only the open todo counts");
+    assert_eq!(row["goal_armed"], true, "the armed goal rides the row");
 }

@@ -1427,6 +1427,51 @@ impl Store {
                     |row| row.get(0),
                 )
                 .optional()?;
+            // The live rows the Session dialog reads as a one-screen agent
+            // monitor: is a run still going, how much todo work is left, is
+            // the goal still armed. All three are cheap reads on the same
+            // transaction as the catalog fold.
+            let active_run: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM engine_run WHERE session_id=?1 AND state='running'",
+                    [&session],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let todos_value: Option<String> = tx
+                .query_row(
+                    "SELECT json_extract(data,'$.value') FROM engine_event \
+                     WHERE session_id=?1 AND kind='session.state.updated' \
+                       AND json_extract(data,'$.kind')='todos' ORDER BY seq DESC LIMIT 1",
+                    [&session],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let todos_open = todos_value
+                .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+                .and_then(|value| value.get("todos").and_then(Value::as_array).cloned())
+                .map(|todos| {
+                    todos
+                        .iter()
+                        .filter(|todo| {
+                            !matches!(
+                                todo["status"].as_str(),
+                                Some("completed") | Some("cancelled")
+                            )
+                        })
+                        .count()
+                })
+                .unwrap_or(0) as u64;
+            let goal_armed = tx
+                .query_row(
+                    "SELECT json_extract(data,'$.value.status')='active' FROM engine_event \
+                     WHERE session_id=?1 AND kind='session.state.updated' \
+                       AND json_extract(data,'$.kind')='goal' ORDER BY seq DESC LIMIT 1",
+                    [&session],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
             catalog.push(json!({
                 "session_id": session,
                 "parent_session_id": parent,
@@ -1438,6 +1483,9 @@ impl Store {
                 "preview": metadata_preview(&tx, &session)?,
                 "model_selection": crate::session_model::selected(&tx, &session)?,
                 "account_selection": crate::session_account::selected_at(&tx, &session, i64::MAX as u64)?,
+                "active_run": active_run,
+                "todos_open": todos_open,
+                "goal_armed": goal_armed,
             }));
         }
         tx.commit()?;

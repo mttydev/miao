@@ -1314,10 +1314,27 @@ impl Dialog {
                         label.push_str(" — ");
                         label.push_str(preview);
                     }
+                    // The Session dialog doubles as the one-screen agent
+                    // view: live state rides the detail line, so an operator
+                    // watching the list sees a running Session without
+                    // opening it.
+                    let mut detail = row.directory.clone().unwrap_or_default();
+                    if row.active_run.is_some() {
+                        if !detail.is_empty() {
+                            detail.push_str(" · ");
+                        }
+                        detail.push_str("● running");
+                    }
+                    if let Some(open) = row.todos_open.filter(|open| *open > 0) {
+                        if !detail.is_empty() {
+                            detail.push_str(" · ");
+                        }
+                        detail.push_str(format!("todo {open}").as_str());
+                    }
                     Row {
                         id: row.id.clone(),
                         label,
-                        detail: row.directory.clone().unwrap_or_default(),
+                        detail,
                     }
                 })
                 .collect(),
@@ -3077,10 +3094,10 @@ mod tests {
                 model: None,
                 credential_id: None,
                 preview: None,
+                active_run: None,
+                todos_open: None,
+                goal_armed: None,
             },
-            SessionSummary {
-                id: "ses_b".into(),
-                title: Some("B".into()),
                 parent_id: None,
                 updated_at_ms: None,
                 archived_at_ms: None,
@@ -3112,10 +3129,10 @@ mod tests {
             model: None,
             credential_id: None,
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         };
-        let mut dialog = Dialog::sessions(&[row]);
-        assert_eq!(dialog.list().expect("list").rows[0].label, "A");
-        assert!(matches!(
             dialog.handle_key(key(KeyCode::Char('r'))),
             Action::Rename(id) if id == "ses_a"
         ));
@@ -3509,11 +3526,11 @@ mod tests {
             model: None,
             credential_id: None,
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         }
     }
-
-    #[test]
-    fn a_session_row_shows_what_the_conversation_last_said() {
         let mut row = summary("ses_a", None, "/repo");
         row.preview = Some("we moved the parser into the engine".into());
         let dialog = Dialog::sessions(&[row]);
