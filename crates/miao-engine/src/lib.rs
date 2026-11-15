@@ -44,6 +44,7 @@ pub mod knowledge;
 pub mod lsp;
 pub mod mcp;
 mod media;
+pub mod memory;
 pub mod openai_chat;
 pub mod openai_responses;
 pub mod optimization;
