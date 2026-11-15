@@ -1712,7 +1712,15 @@ impl Tools {
             // named.
             let text = path.to_string_lossy();
             let text = text.strip_prefix(crate::runtime::VERBATIM).unwrap_or(&text);
-            format!("@reference{}", text.replace('\\', "/"))
+            // The separator is part of the name. A Unix path starts with `/`, so
+            // the old form happened to read `@reference/tmp/…`; a Windows path
+            // starts with its drive and read `@referenceC:/…`, which no rule
+            // written as `@reference/**` can match, so a deny silently did not
+            // apply.
+            format!(
+                "@reference/{}",
+                text.trim_start_matches(['/', '\\']).replace('\\', "/")
+            )
         } else if name == "cron_create" || name == "cron_list" {
             "@session/cron".into()
         } else if name == "cron_delete" {
