@@ -68,6 +68,9 @@ Guidance for agents working in this repository.
 /// settles the panel: asking on every one would spend the engine's time
 /// redrawing a figure that moved by a single turn.
 const USAGE_REFRESH: Duration = Duration::from_secs(5);
+/// A Sessions dialog left open reads live state as the agent view; the
+/// catalog re-ask is throttled to this cadence while frames keep flowing.
+const AGENT_VIEW_REFRESH: Duration = Duration::from_secs(2);
 
 /// Whether the sidebar's usage report is worth asking for.
 fn usage_due(force: bool, last_requested: Option<Instant>) -> bool {
@@ -515,6 +518,8 @@ pub struct App {
     history_index: usize,
     /// Every root Session, archived included, for the Session dialog.
     catalog: Vec<SessionSummary>,
+    /// The last time the open Sessions dialog asked the catalog to refresh.
+    last_catalog_ask: Option<Instant>,
     /// MCP servers the host exported for this workspace (name, transport).
     mcp: Vec<(String, String)>,
     /// Every provider the engine's catalog names, ready ones first.
@@ -728,6 +733,7 @@ impl App {
             drafts: HashMap::new(),
             history_index: 0,
             catalog: Vec::new(),
+            last_catalog_ask: None,
             pending_models: false,
             models_filter: None,
             accounts_filter: None,
@@ -932,6 +938,19 @@ impl App {
     }
 
     pub fn handle(&mut self, event: AppEvent) {
+        // The Sessions dialog left open is the one-screen agent view: frames
+        // flowing for any Session re-arm the catalog ask (at most every two
+        // seconds) so live state keeps moving while it watches.
+        if matches!(self.dialog, Some(Dialog::Sessions(_)))
+            && self
+                .last_catalog_ask
+                .is_none_or(|at| at.elapsed() >= AGENT_VIEW_REFRESH)
+        {
+            self.last_catalog_ask = Some(Instant::now());
+            if let Some(engine) = self.engine.as_ref() {
+                engine.catalog();
+            }
+        }
         // Any input restarts the landing banner's idle light, the way a key or
         // a click wakes the product's logo.
         if matches!(
@@ -5535,6 +5554,9 @@ mod tests {
             model: None,
             credential_id: None,
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         }
     }
 
@@ -7255,6 +7277,9 @@ mod tests {
             directory: None,
             credential_id: None,
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         }];
         app.update_status();
         assert_eq!(
@@ -7295,6 +7320,9 @@ mod tests {
             }),
             credential_id: Some("cred_a".into()),
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         });
         let model = app
             .status_rows()

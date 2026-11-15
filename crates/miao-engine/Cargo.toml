@@ -60,7 +60,8 @@ uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 
 [dev-dependencies]
-crc32fast = "1"
+crc32fast
+rusqlite = { workspace = true } = "1"
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }
 chrono-tz = "0.10"

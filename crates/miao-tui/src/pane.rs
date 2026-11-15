@@ -5152,6 +5152,9 @@ mod tests {
             model: None,
             credential_id: None,
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         }));
         shell.set_goal(Some(&crate::session::GoalView {
             objective: "ship the offset reporting".into(),
@@ -5218,6 +5221,9 @@ mod tests {
             model: None,
             credential_id: None,
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         }));
         shell.set_goal(Some(&crate::session::GoalView {
             objective: "ship the offset reporting".into(),
@@ -5421,6 +5427,9 @@ mod tests {
             model: None,
             credential_id: None,
             preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         }));
         shell.set_todos(&[
             crate::session::TodoView {
@@ -8873,6 +8882,9 @@ mod tests {
             model: None,
             credential_id: None,
             preview: preview.map(str::to_string),
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
         }
     }
 
