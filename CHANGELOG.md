@@ -11,6 +11,22 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.73] - 2026-11-15
+
+### Fixed
+- **tui**: keep the footer band inside the conversation column (#3040) (`e34a5f2afb`)
+- **tui**: deliver clipboard results even when the event queue is full (#3039) (`6aeab00923`)
+- **engine**: give a summarizer pass the time its slice needs (#3038) (`0f7f5d313a`)
+- **engine**: never settle a shell action by classification on Windows (#3037) (`3fc520b7ad`)
+- **desktop**: attach after an explicit clear's checkpoint (#3036) (`9797580c50`)
+- **tui**: honour an explicit clear in every projection (#3035) (`82405e5d49`)
+- **engine**: arm compaction at the ceiling a request can actually send (#3034) (`3ec94cc6c3`)
+- **engine**: keep the separator in an @reference resource name (#3033) (`a572496d60`)
+- **tui**: paint one context percentage, and name every pasted image (#3032) (`1143a78d22`)
+- **engine**: classify product paths in one spelling (#3031) (`6b593cd6b7`)
+- **engine**: name and format on Windows the way the platform expects (#3030) (`6b1edbcc0f`)
+- **engine**: give each monitor finish delivery its own input id (#3028) (`ef59cd7977`)
+
 ## [0.3.72] - 2026-11-14
 
 ### Added
