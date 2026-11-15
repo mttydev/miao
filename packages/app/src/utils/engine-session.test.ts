@@ -137,7 +137,50 @@ describe("snapshotToState", () => {
       hasMessages: false,
       pending: 0,
       approvals: 0,
+      visibleMessages: 0,
+      clearedThrough: 0,
     })
+  })
+
+  // `session_clear` deletes nothing: it checkpoints the history with an empty
+  // summary so the next provider prefix starts fresh. A viewer that attaches at
+  // zero replaying the journal re-rendered every cleared turn, and the header
+  // kept counting them, so the cut has to come from the snapshot.
+  test("follows an explicit clear's cut instead of replaying the cleared turns", () => {
+    const state = snapshotToState({
+      ...liveSnapshot,
+      has_messages: true,
+      message_count: 3,
+      selection: { through_seq: 4, summary: "", seq: 9, recorded_at_ms: 1794232836295 },
+      messages: [
+        { seq: 2, role: "user", content: "cleared ask" },
+        { seq: 4, role: "assistant", content: [{ type: "text", text: "cleared answer" }] },
+        { seq: 6, role: "user", content: "after the clear" },
+      ],
+    })
+    expect(state).toMatchObject({
+      clearedThrough: 4,
+      visibleMessages: 1,
+      messageCount: 3,
+      hasMessages: true,
+    })
+  })
+
+  test("hides nothing behind a summarising checkpoint", () => {
+    const state = snapshotToState({
+      ...liveSnapshot,
+      selection: { through_seq: 4, summary: "earlier work", seq: 9 },
+      messages: [
+        { seq: 2, role: "user", content: "compacted ask" },
+        { seq: 6, role: "user", content: "after it" },
+      ],
+    })
+    expect(state).toMatchObject({ clearedThrough: 0, visibleMessages: 2 })
+  })
+
+  test("falls back to the durable count when the snapshot carries no messages", () => {
+    const state = snapshotToState({ ...liveSnapshot, messages: undefined, message_count: 7 })
+    expect(state.visibleMessages).toBe(7)
   })
 
   test("counts pending inputs and approvals, and does not invent a cursor", () => {

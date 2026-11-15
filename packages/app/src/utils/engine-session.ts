@@ -75,6 +75,8 @@ export type EngineSnapshot = {
   has_messages?: unknown
   pending?: unknown
   approvals?: unknown
+  messages?: unknown
+  selection?: unknown
 }
 
 export type EngineSessionState = {
@@ -83,9 +85,37 @@ export type EngineSessionState = {
   /** Last committed event cursor the snapshot was taken at. */
   cursor: number
   messageCount: number
+  /** Messages a viewer should render, which is fewer after an explicit clear. */
+  visibleMessages: number
+  /**
+   * The sequence an explicit `/clear` cut the history at, or 0 while nothing
+   * has been cleared. A viewer attaches to the event stream after it.
+   */
+  clearedThrough: number
   hasMessages: boolean
   pending: number
   approvals: number
+}
+
+/**
+ * The sequence an explicit `/clear` cut the history at, or 0.
+ *
+ * The engine deletes nothing: it writes a compaction checkpoint so the next
+ * provider prefix starts empty. A summarising checkpoint carries text and hides
+ * nothing from the reader, so only an empty summary is a cut a viewer follows.
+ */
+function clearCut(selection: unknown) {
+  if (typeof selection !== "object" || selection === null) return 0
+  if (Reflect.get(selection, "summary") !== "") return 0
+  const through = Reflect.get(selection, "through_seq")
+  return typeof through === "number" && Number.isSafeInteger(through) ? through : 0
+}
+
+/** One snapshot message's sequence, or 0 when it carries none. */
+function messageSeq(message: unknown) {
+  if (typeof message !== "object" || message === null) return 0
+  const seq = Reflect.get(message, "seq")
+  return typeof seq === "number" ? seq : 0
 }
 
 /**
@@ -98,11 +128,19 @@ export function snapshotToState(snapshot: EngineSnapshot): EngineSessionState {
     throw new EngineSessionShapeError("session_id")
   if (typeof snapshot.title !== "string") throw new EngineSessionShapeError("title")
   const count = (value: unknown) => (Array.isArray(value) ? value.length : 0)
+  const clearedThrough = clearCut(snapshot.selection)
+  const messages = Array.isArray(snapshot.messages) ? snapshot.messages : undefined
   return {
     id: snapshot.session_id,
     title: snapshot.title,
     cursor: typeof snapshot.cursor === "number" ? snapshot.cursor : 0,
     messageCount: typeof snapshot.message_count === "number" ? snapshot.message_count : 0,
+    visibleMessages: messages
+      ? messages.filter((message) => messageSeq(message) > clearedThrough).length
+      : typeof snapshot.message_count === "number"
+        ? snapshot.message_count
+        : 0,
+    clearedThrough,
     hasMessages: snapshot.has_messages === true,
     pending: count(snapshot.pending),
     approvals: count(snapshot.approvals),

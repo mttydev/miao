@@ -207,11 +207,29 @@ export function SessionSurface(props: { url: string; token: string }) {
     setEvents([])
     setLive(false)
     setError(undefined)
+    // `/clear` keeps its rows for audit behind an empty-summary checkpoint, and
+    // the snapshot names the cut. Attaching after it is what keeps a reopened
+    // window from replaying the cleared turns; `0` is a Session nobody cleared.
+    const opened = await reader
+      .snapshot(session.id)
+      .catch((cause: unknown) => {
+        fail(cause)
+        return undefined
+      })
+    if (opened) setState(opened)
+    const after = opened?.clearedThrough ?? 0
+    const merge = (incoming: EngineEvent[]) =>
+      setEvents((current) => {
+        const seen = new Set(current.map((event) => event.seq))
+        return [...current, ...incoming.filter((event) => !seen.has(event.seq))]
+      })
     const unsubscribe = await reader
-      .subscribe(session.id, (event) =>
-        setEvents((current) =>
-          current.some((seen) => seen.seq === event.seq) ? current : [...current, event],
-        ),
+      .subscribe(
+        session.id,
+        (event) => {
+          if (event.seq > after) merge([event])
+        },
+        after,
       )
       .catch((cause: unknown) => {
         fail(cause)
@@ -219,12 +237,8 @@ export function SessionSurface(props: { url: string; token: string }) {
       })
     detach = unsubscribe
     await reader
-      .snapshot(session.id)
-      .then(setState)
-      .catch(fail)
-    await reader
-      .events(session.id)
-      .then((paged) => setEvents((current) => [...current, ...paged]))
+      .events(session.id, after)
+      .then(merge)
       .catch(fail)
     setLive(true)
   }
@@ -293,7 +307,11 @@ export function SessionSurface(props: { url: string; token: string }) {
       setDraft("")
       try {
         await reader.clear(sessionID)
+        // The engine checkpoints the history and keeps every row; the next
+        // snapshot carries the cut at which the pane has to attach again, so the
+        // transcript empties now and stays empty when the Session reopens.
         setEvents([])
+        await reader.snapshot(sessionID).then(setState).catch(fail)
       } catch (cause) {
         fail(cause)
       }
@@ -329,7 +347,14 @@ export function SessionSurface(props: { url: string; token: string }) {
   })
 
   const conversation = () => turns(events())
-  const welcome = () => selected() !== undefined && conversation().length === 0 && !running(events())
+  // A Session that was cleared holds no turns but still holds a durable
+  // history, so it keeps the conversation screen instead of falling back to
+  // the first-run welcome — the same screen the TUI leaves after `/clear`.
+  const welcome = () =>
+    selected() !== undefined &&
+    conversation().length === 0 &&
+    !running(events()) &&
+    !state()?.hasMessages
 
   return (
     <div class="flex h-dvh bg-v2-background-bg-deep text-v2-text-text-base">
@@ -446,7 +471,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                   <span class="text-11-regular text-v2-text-text-weak">
                     {identity(events()).model ? `${identity(events()).model} · ` : ""}
                     {identity(events()).agent ? `${identity(events()).agent} · ` : ""}
-                    {current().messageCount} messages
+                    {current().visibleMessages} messages
                     {current().pending ? ` · ${current().pending} pending` : ""}
                     {current().approvals ? ` · ${current().approvals} approvals` : ""}
                     {live() ? " · live" : ""}
