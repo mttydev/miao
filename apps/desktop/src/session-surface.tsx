@@ -8,8 +8,10 @@ import {
 } from "@miao/app"
 import { Markdown } from "@miao/session-ui/markdown"
 import { Icon } from "@miao/ui/v2/icon"
+import { MenuV2 } from "@miao/ui/v2/menu-v2"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { PinIcon, SendIcon, SparklesIcon, StopIcon, TrashIcon } from "./icons"
+import { createImeGuard } from "./ime"
 
 /**
  * One local engine's Sessions and the conversation on the selected one, with a
@@ -175,10 +177,10 @@ export function SessionSurface(props: { url: string; token: string }) {
   const [attached, setAttached] = createSignal<Array<{ name: string; data: string; mime: string }>>([])
   const [busy, setBusy] = createSignal(false)
   const [query, setQuery] = createSignal("")
-  const [menu, setMenu] = createSignal<{ session: EngineSessionSummary; x: number; y: number }>()
   const [dialog, setDialog] = createSignal<{ kind: "rename" | "delete"; session: EngineSessionSummary; title: string }>()
   const [catalog, setCatalog] = createSignal<EngineModelRow[]>([])
-  const [modelMenu, setModelMenu] = createSignal<{ x: number; y: number }>()
+  const welcomeIme = createImeGuard()
+  const composerIme = createImeGuard()
   const language = useLanguage()
 
   // Pinned rows float above the time buckets, the same order the TUI sidebar keeps.
@@ -348,7 +350,6 @@ export function SessionSurface(props: { url: string; token: string }) {
   }
 
   const togglePin = async (session: EngineSessionSummary) => {
-    setMenu(undefined)
     try {
       await reader.pin(session.id, !session.pinned)
       await refreshSessions()
@@ -358,7 +359,6 @@ export function SessionSurface(props: { url: string; token: string }) {
   }
 
   const toggleArchive = async (session: EngineSessionSummary) => {
-    setMenu(undefined)
     try {
       await reader.archive(session.id, !session.archived)
       await refreshSessions()
@@ -393,13 +393,21 @@ export function SessionSurface(props: { url: string; token: string }) {
     }
   }
 
-  const pickModel = async (row: EngineModelRow) => {
-    setModelMenu(undefined)
+  const rowValue = (row: EngineModelRow) =>
+    `${String(row.protocol ?? "")}|${String(row.model ?? "")}|${String(row.route_id ?? "")}`
+
+  const modelValue = () => {
+    const current = state()?.modelSelection
+    if (!current) return ""
+    return rowValue(catalog().find((row) => row.model === current.model && row.protocol === current.protocol) ?? {})
+  }
+
+  const pickModelValue = async (value: string) => {
+    const [protocol, model, route] = value.split("|")
     const sessionID = selected()
-    if (!sessionID || typeof row.protocol !== "string" || typeof row.model !== "string") return
-    const route = typeof row.route_id === "string" ? row.route_id : undefined
+    if (!sessionID || !protocol || !model) return
     try {
-      await reader.selectModel(sessionID, { protocol: row.protocol, model: row.model, route_id: route })
+      await reader.selectModel(sessionID, { protocol, model, route_id: route || undefined })
       await reader.snapshot(sessionID).then(setState).catch(fail)
     } catch (cause) {
       fail(cause)
@@ -407,7 +415,6 @@ export function SessionSurface(props: { url: string; token: string }) {
   }
 
   const renameSession = (session: EngineSessionSummary) => {
-    setMenu(undefined)
     setDialog({ kind: "rename", session, title: session.title })
   }
 
@@ -490,11 +497,7 @@ export function SessionSurface(props: { url: string; token: string }) {
           void newSession()
         }
       }}
-      onClick={() => {
-        setMenu(undefined)
-        setModelMenu(undefined)
-      }}
-    >
+>
       <aside class={`flex w-[264px] shrink-0 flex-col border-r border-v2-border-border-weak ${titlebarInset}`}>
         <div class="flex items-center gap-2.5 px-4 pb-3" data-tauri-drag-region={isMac}>
           <span class="flex size-7 items-center justify-center rounded-lg bg-v2-background-bg-accent text-v2-text-text-inverse">
@@ -534,24 +537,44 @@ export function SessionSurface(props: { url: string; token: string }) {
                 <div class="px-4 pb-1 pt-4 text-10-medium tracking-wide text-v2-text-text-faint">{group.label}</div>
                 <For each={group.rows}>
                   {(session) => (
-                    <button
-                      type="button"
-                      class="mx-2 flex w-[calc(100%-1rem)] items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-v2-background-bg-layer-01"
-                      classList={{ "bg-v2-background-bg-layer-01": session.id === selected() }}
-                      onClick={() => void open(session)}
-                      onContextMenu={(event) => {
-                        event.preventDefault()
-                        setMenu({ session, x: event.clientX, y: event.clientY })
-                      }}
-                    >
-                      <span class="flex min-w-0 flex-1 items-center gap-1.5">
-                        <Show when={session.pinned}>
-                          <PinIcon class="size-3 shrink-0 text-v2-icon-icon-muted" />
-                        </Show>
-                        <span class="min-w-0 flex-1 truncate text-12-regular">{session.title}</span>
-                      </span>
-                      <span class="shrink-0 text-10-regular text-v2-text-text-faint">{dayLabel(session.updatedAt, language.t("desktop.surface.group.justNow"))}</span>
-                    </button>
+                    <MenuV2.Context>
+                      <MenuV2.Context.Trigger
+                        as="div"
+                        class="contents"
+                      >
+                        <button
+                          type="button"
+                          class="mx-2 flex w-[calc(100%-1rem)] items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-v2-background-bg-layer-01"
+                          classList={{ "bg-v2-background-bg-layer-01": session.id === selected() }}
+                          onClick={() => void open(session)}
+                        >
+                          <span class="flex min-w-0 flex-1 items-center gap-1.5">
+                            <Show when={session.pinned}>
+                              <PinIcon class="size-3 shrink-0 text-v2-icon-icon-muted" />
+                            </Show>
+                            <span class="min-w-0 flex-1 truncate text-12-regular">{session.title}</span>
+                          </span>
+                          <span class="shrink-0 text-10-regular text-v2-text-text-faint">{dayLabel(session.updatedAt, language.t("desktop.surface.group.justNow"))}</span>
+                        </button>
+                      </MenuV2.Context.Trigger>
+                      <MenuV2.Context.Portal>
+                        <MenuV2.Context.Content>
+                          <MenuV2.Item onSelect={() => void togglePin(session)}>
+                            {session.pinned ? language.t("desktop.surface.action.unpin") : language.t("desktop.surface.action.pin")}
+                          </MenuV2.Item>
+                          <MenuV2.Item onSelect={() => renameSession(session)}>
+                            {language.t("desktop.surface.action.rename")}
+                          </MenuV2.Item>
+                          <MenuV2.Item onSelect={() => void toggleArchive(session)}>
+                            {session.archived ? language.t("desktop.surface.action.restore") : language.t("desktop.surface.action.archive")}
+                          </MenuV2.Item>
+                          <MenuV2.Separator />
+                          <MenuV2.Item class="text-v2-state-fg-danger" onSelect={() => setDialog({ kind: "delete", session, title: session.title })}>
+                            {language.t("desktop.surface.action.delete")}
+                          </MenuV2.Item>
+                        </MenuV2.Context.Content>
+                      </MenuV2.Context.Portal>
+                    </MenuV2.Context>
                   )}
                 </For>
               </Show>
@@ -584,6 +607,10 @@ export function SessionSurface(props: { url: string; token: string }) {
                   value={draft()}
                   rows={4}
                   onInput={(event) => setDraft(event.currentTarget.value)}
+                  onCompositionStart={welcomeIme.onCompositionStart}
+                  onCompositionUpdate={welcomeIme.onCompositionUpdate}
+                  onCompositionEnd={welcomeIme.onCompositionEnd}
+                  onBlur={welcomeIme.onBlur}
                   onPaste={(event) => {
                     if (event.clipboardData?.files.length) {
                       event.preventDefault()
@@ -591,6 +618,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                     }
                   }}
                   onKeyDown={(event) => {
+                    if (welcomeIme.isImeComposing(event)) return
                     if (event.key === "Escape") event.currentTarget.blur()
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault()
@@ -645,17 +673,28 @@ export function SessionSurface(props: { url: string; token: string }) {
                     </span>
                   </Show>
                   <Show when={catalog().length > 0}>
-                    <button
-                      type="button"
-                      class="inline-flex shrink-0 items-center gap-1 rounded-full border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-2.5 py-0.5 text-11-regular text-v2-text-text-muted transition-colors hover:bg-v2-background-bg-layer-02"
-                      onClick={(event) => {
-                        const rect = event.currentTarget.getBoundingClientRect()
-                        setModelMenu({ x: rect.left, y: rect.bottom + 4 })
-                      }}
-                    >
-                      {state()?.modelSelection?.model ?? language.t("desktop.surface.header.pickModel")}
-                      <Icon name="chevron-down" size="small" />
-                    </button>
+                    <MenuV2>
+                      <MenuV2.Trigger
+                        as="button"
+                        class="inline-flex shrink-0 items-center gap-1 rounded-full border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-2.5 py-0.5 text-11-regular text-v2-text-text-muted transition-colors hover:bg-v2-background-bg-layer-02"
+                      >
+                        {state()?.modelSelection?.model ?? language.t("desktop.surface.header.pickModel")}
+                        <Icon name="chevron-down" size="small" />
+                      </MenuV2.Trigger>
+                      <MenuV2.Portal>
+                        <MenuV2.Content>
+                          <MenuV2.RadioGroup value={modelValue()} onChange={(value) => void pickModelValue(value)}>
+                            <For each={catalog()}>
+                              {(row) => (
+                                <MenuV2.RadioItem value={rowValue(row)}>
+                                  <span class="min-w-0 flex-1 truncate">{String(row.model_key ?? row.model ?? "")}</span>
+                                </MenuV2.RadioItem>
+                              )}
+                            </For>
+                          </MenuV2.RadioGroup>
+                        </MenuV2.Content>
+                      </MenuV2.Portal>
+                    </MenuV2>
                   </Show>
                   <Show when={current().pending > 0}>
                     <span class="inline-flex shrink-0 items-center rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
@@ -773,7 +812,18 @@ export function SessionSurface(props: { url: string; token: string }) {
                 value={draft()}
                 rows={1}
                 onInput={(event) => setDraft(event.currentTarget.value)}
+                onCompositionStart={composerIme.onCompositionStart}
+                onCompositionUpdate={composerIme.onCompositionUpdate}
+                onCompositionEnd={composerIme.onCompositionEnd}
+                onBlur={composerIme.onBlur}
+                onPaste={(event) => {
+                  if (event.clipboardData?.files.length) {
+                    event.preventDefault()
+                    void attach(event.clipboardData.files)
+                  }
+                }}
                 onKeyDown={(event) => {
+                  if (composerIme.isImeComposing(event)) return
                   if (event.key === "Escape") {
                     event.preventDefault()
                     const sessionID = selected()
@@ -828,80 +878,6 @@ export function SessionSurface(props: { url: string; token: string }) {
           </div>
         </Show>
       </main>
-      <Show when={menu()}>
-        {(current) => (
-          <div
-            role="menu"
-            class="fixed z-50 min-w-44 rounded-xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1 text-12-regular shadow-lg"
-            style={{ left: `${current().x}px`, top: `${current().y}px` }}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <button
-              type="button"
-              role="menuitem"
-              class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
-              onClick={() => void togglePin(current().session)}
-            >
-              <PinIcon class="size-3.5 text-v2-icon-icon-muted" />
-              {current().session.pinned ? language.t("desktop.surface.action.unpin") : language.t("desktop.surface.action.pin")}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
-              onClick={() => renameSession(current().session)}
-            >
-              <Icon name="edit" size="small" />
-              {language.t("desktop.surface.action.rename")}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
-              onClick={() => void toggleArchive(current().session)}
-            >
-              <Icon name="archive" size="small" />
-              {current().session.archived ? language.t("desktop.surface.action.restore") : language.t("desktop.surface.action.archive")}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-v2-state-fg-danger hover:bg-v2-background-bg-layer-02"
-              onClick={() => {
-                setMenu(undefined)
-                setDialog({ kind: "delete", session: current().session, title: current().session.title })
-              }}
-            >
-              <TrashIcon class="size-3.5" />
-              {language.t("desktop.surface.action.delete")}
-            </button>
-          </div>
-        )}
-      </Show>
-      <Show when={modelMenu()}>
-        {(at) => (
-          <div
-            class="fixed z-50 max-h-80 min-w-72 overflow-y-auto rounded-xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1 text-12-regular shadow-lg"
-            style={{ left: `${at().x}px`, top: `${at().y}px` }}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <For each={catalog()}>
-              {(row) => (
-                <button
-                  type="button"
-                  class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
-                  onClick={() => void pickModel(row)}
-                >
-                  <Show when={state()?.modelSelection?.model === row.model && state()?.modelSelection?.protocol === row.protocol} fallback={<span class="w-4" />}>
-                    <Icon name="check" size="small" />
-                  </Show>
-                  <span class="min-w-0 flex-1 truncate">{String(row.model_key ?? row.model ?? "")}</span>
-                </button>
-              )}
-            </For>
-          </div>
-        )}
-      </Show>
       <Show when={dialog()}>
         {(current) => (
           <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDialog(undefined)}>
