@@ -3312,11 +3312,6 @@ async fn record_promotions(
     Ok(())
 }
 
-/// Inputs the engine admits on its own behalf. They are loop bookkeeping, so
-/// they never re-arm a blocked loop: the pause notice in particular used to
-/// wake the Session, restart the same unchanged drain, and emit an endless run
-/// of text-only replies (issue #2948).
-
 /// One identity per engine-internal continuation attempt. These wake the
 /// Session from the engine's own loops, and one run lives through several
 /// activations - the counter restarts with each activation while the store
@@ -3329,6 +3324,10 @@ fn continuation_input_id(kind: &str, run: &str, attempt: usize) -> String {
     format!("{kind}:{run}:{attempt}:{}", uuid::Uuid::new_v4())
 }
 
+/// Inputs the engine admits on its own behalf. They are loop bookkeeping, so
+/// they never re-arm a blocked loop: the pause notice in particular used to
+/// wake the Session, restart the same unchanged drain, and emit an endless run
+/// of text-only replies (issue #2948).
 fn engine_input(input_id: &str) -> bool {
     [
         "goal:",
