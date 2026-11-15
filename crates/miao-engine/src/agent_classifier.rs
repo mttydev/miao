@@ -129,7 +129,10 @@ pub fn host_edit(resources: &[String], host: &crate::product::HostContext) -> Ve
     if resources.is_empty() {
         return Verdict::Unknown;
     }
-    let directory = normalize(Path::new(&host.directory));
+    // One spelling on every platform: `canonical_plain` drops the Windows
+    // verbatim prefix, without which a resource plainly inside the workspace
+    // prefix-matched nothing and was classified as outside it.
+    let directory = crate::tools::canonical_plain(normalize(Path::new(&host.directory)));
     let safe = resources.iter().all(|resource| {
         if protected_path(resource) {
             return false;
@@ -143,6 +146,7 @@ pub fn host_edit(resources: &[String], host: &crate::product::HostContext) -> Ve
             };
             normalize(&Path::new(cwd).join(path))
         };
+        let target = crate::tools::canonical_plain(target);
         let Ok(relative) = target.strip_prefix(&directory) else {
             return false;
         };
