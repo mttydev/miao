@@ -3210,6 +3210,13 @@ impl App {
     fn open_account_list(&mut self) {
         let keys = self.stored_keys();
         let scoped = self.accounts_filter.clone();
+        // The account the open Session is pinned to, so the row that would be
+        // switched away from is named: a list of interchangeable keys without
+        // the current one reads as a store, not a switch.
+        let pinned = self
+            .session
+            .as_ref()
+            .and_then(|session| session.credential_id.clone());
         // Neither half alone decides whether the list is empty: a store row or
         // a credential the engine already serves both belong here.
         if keys.is_empty()
@@ -3227,15 +3234,22 @@ impl App {
                 Some(provider) => key.provider == provider,
                 None => true,
             })
-            .map(|key| Row {
-                id: key.id.clone(),
-                // The label is what tells two keys of one provider apart, and
-                // what a route id and a Session pin name as their account.
-                label: match scoped {
-                    Some(_) => key.label.clone(),
-                    None => format!("{} · {}", key.provider, key.label),
-                },
-                detail: key.detail(&self.accounts),
+            .map(|key| {
+                let current = pinned.as_deref() == Some(key.id.as_str())
+                    || (pinned.is_none() && key.label == "default");
+                Row {
+                    id: key.id.clone(),
+                    // The label is what tells two keys of one provider apart, and
+                    // what a route id and a Session pin name as their account.
+                    label: match scoped {
+                        Some(_) => key.label.clone(),
+                        None => format!("{} · {}", key.provider, key.label),
+                    },
+                    detail: match current {
+                        true => format!("current · {}", key.detail(&self.accounts)),
+                        false => key.detail(&self.accounts),
+                    },
+                }
             })
             .collect::<Vec<_>>();
         // A credential the engine serves but the store does not hold — an
@@ -3252,6 +3266,7 @@ impl App {
             if keys.iter().any(|key| key.id == account.credential_id) {
                 continue;
             }
+            let current = pinned.as_deref() == Some(account.credential_id.as_str());
             rows.push(Row {
                 id: account.credential_id.clone(),
                 label: match scoped {
@@ -3262,7 +3277,10 @@ impl App {
                         account.credential_id
                     ),
                 },
-                detail: format!("not in the key store · {}", account.detail),
+                detail: match current {
+                    true => format!("current · not in the key store · {}", account.detail),
+                    false => format!("not in the key store · {}", account.detail),
+                },
             });
         }
         if rows.is_empty() {
@@ -9953,13 +9971,41 @@ mod tests {
         let labels: Vec<&str> = list.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(labels, vec!["default", "work", "add key"]);
         assert_eq!(list.kind, crate::dialogs::ListKind::Keys);
+        // Nothing pins this Session yet, so it runs on the provider's default
+        // account and that row reads as the one in effect.
+        assert!(
+            list.rows[0].detail.starts_with("current · key · glm-5.3"),
+            "{}",
+            list.rows[0].detail
+        );
+        assert!(
+            list.rows[1].detail.starts_with("key · no route"),
+            "{}",
+            list.rows[1].detail
+        );
+        // Pinning a key moves the marker with it, so a switch names what it is
+        // switching away from.
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_keys", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        let work = keys
+            .iter()
+            .find(|entry| entry.label == "work")
+            .expect("work key");
+        app.pin_account("ses_keys", Some(work.id.clone()));
+        app.open_account_list();
+        let Some(Dialog::Accounts(list)) = app.dialog.as_ref() else {
+            panic!("a keys dialog")
+        };
         assert!(
             list.rows[0].detail.starts_with("key · glm-5.3"),
             "{}",
             list.rows[0].detail
         );
         assert!(
-            list.rows[1].detail.starts_with("key · no route"),
+            list.rows[1].detail.starts_with("current · key · no route"),
             "{}",
             list.rows[1].detail
         );

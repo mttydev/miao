@@ -1573,10 +1573,32 @@ async fn run(
                         )
                         .await;
                     match result {
-                        Ok(_) => {
+                        Ok(result) => {
                             if open.as_ref().is_some_and(|state| state.id == session_id) {
                                 dirty.get_or_insert_with(Instant::now);
                             }
+                            // The switch is invisible otherwise: the account
+                            // row moves, and the model it lands on may be a
+                            // different one when the account does not serve
+                            // what the Session was running.
+                            let model = result
+                                .get("binding")
+                                .and_then(|binding| binding.get("model"))
+                                .and_then(Value::as_str);
+                            let changed = result
+                                .get("changed")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let notice = match (changed, model) {
+                                (false, _) => "already on that account".to_string(),
+                                (true, Some(model)) => {
+                                    format!("account switched · the next prompt runs {model}")
+                                }
+                                (true, None) => {
+                                    "account switched · back to the provider default".to_string()
+                                }
+                            };
+                            bus.send(AppEvent::Notice(notice));
                         }
                         Err(error) => {
                             bus.send(AppEvent::ActionFailed(format!("account failed: {error}")))

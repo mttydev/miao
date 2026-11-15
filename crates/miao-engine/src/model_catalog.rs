@@ -344,34 +344,53 @@ impl Provider for Catalog {
         let family = current_route
             .and_then(|route| self.accounts.get(route))
             .map(|account| account.model_key.as_str());
-        let candidates = self
-            .model_catalog()
-            .into_iter()
-            .filter(|info| {
-                let Some(account) = info
-                    .route_id
-                    .as_ref()
-                    .and_then(|route| self.accounts.get(route))
-                else {
-                    return false;
-                };
-                let same_model = family.map_or(
-                    info.protocol == identity.protocol && info.model == identity.model,
-                    |family| family == account.model_key,
-                );
-                same_model
-                    && match credential {
-                        Some(id) => account.id.as_deref() == Some(id),
-                        None => account.is_default,
+        // First pass: the route that keeps the model the session is on, under
+        // the account that was asked for. "Switch account" is not "switch
+        // model", so this pass wins whenever the account serves the family.
+        // Two routes of one credential serving the same family are not an
+        // operator's ambiguity to resolve: the catalog order is the answer.
+        let mut same_family: Option<Info> = None;
+        // Second pass: the account's own first route. Reaching it means the
+        // account does not serve the model the session is on, so the switch
+        // moves the model too — refusing left the operator stuck on a key they
+        // had just asked to leave.
+        let mut first_served: Option<Info> = None;
+        for info in self.model_catalog() {
+            let Some(account) = info
+                .route_id
+                .as_ref()
+                .and_then(|route| self.accounts.get(route))
+            else {
+                continue;
+            };
+            let served = match credential {
+                Some(id) => account.id.as_deref() == Some(id),
+                None => account.is_default,
+            };
+            if !served {
+                continue;
+            }
+            if first_served.is_none() {
+                first_served = Some(info.clone());
+            }
+            let same_model = family.map_or(
+                info.protocol == identity.protocol && info.model == identity.model,
+                |family| family == account.model_key,
+            );
+            if same_model && same_family.is_none() {
+                // The pinned variant belongs to this model: a route that cannot
+                // host it is refused, the way it always was.
+                if let Some(variant) = current.and_then(|binding| binding.variant.as_ref()) {
+                    if !info.variants.contains(variant) {
+                        return Err(ProviderError::Stream(
+                            "account route does not support the selected variant".into(),
+                        ));
                     }
-            })
-            .collect::<Vec<_>>();
-        if candidates.len() > 1 {
-            return Err(ProviderError::Stream(
-                "account route is ambiguous for the selected model".into(),
-            ));
+                }
+                same_family = Some(info);
+            }
         }
-        Ok(candidates.into_iter().next())
+        Ok(same_family.or(first_served))
     }
 
     fn model_catalog(&self) -> Vec<Info> {

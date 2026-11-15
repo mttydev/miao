@@ -225,6 +225,58 @@ fn duplicate_defaults_and_account_identities_are_rejected() {
         .is_err());
 }
 
+/// "Switch account" is not "switch model": when the account does serve the
+/// model the session is on, the family is kept. When it does not — a second
+/// key of the same provider that only serves other models — the switch lands
+/// on that account's own route instead of refusing, and the old model's
+/// variant does not follow across families.
+#[tokio::test]
+async fn a_switch_to_an_account_that_serves_another_family_lands_on_its_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let runtime = Runtime::new(
+        store.clone(),
+        catalog(),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    store
+        .initialize(
+            "s",
+            "fixture",
+            std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+    // The model arrives as an agent default, the way an operator's configured
+    // agent carries it: the account switch must not promote it into a pin.
+    let agent = |name: &str, route: &str| {
+        serde_json::from_value(json!({"name":name,"model":binding(route)})).unwrap()
+    };
+    runtime
+        .set_agent("s", agent("guide", "other"))
+        .await
+        .unwrap();
+    let switched = runtime
+        .select_account("s", Some("credential-c".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        switched["binding"]["route_id"], "c",
+        "the account's own route wins over the family it does not serve"
+    );
+    assert!(
+        switched["binding"]["variant"].is_null(),
+        "the old model's variant does not follow across families: {}",
+        switched["binding"]
+    );
+    assert_eq!(switched["account"]["credential_id"], "credential-c");
+    // The move is account intent, never an explicit model pin.
+    assert!(store.model_selection("s").await.unwrap().is_none());
+    runtime.shutdown().await;
+}
+
 #[tokio::test]
 async fn encrypted_history_cannot_move_to_another_account_route() {
     let dir = tempfile::tempdir().unwrap();
