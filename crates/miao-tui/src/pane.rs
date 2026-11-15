@@ -2268,7 +2268,10 @@ fn composer_bottom_titles(
     let inner = width.saturating_sub(2) as usize;
     let left = match footer.leader {
         Some(menu) => Line::from(Span::styled(
-            format!(" {} ", fit_chords(menu, inner.saturating_sub(version.width()))),
+            format!(
+                " {} ",
+                fit_chords(menu, inner.saturating_sub(version.width()))
+            ),
             Style::new().fg(palette.primary),
         )),
         None => {
@@ -2604,7 +2607,14 @@ fn render_composer(
     theme: &Theme,
     footer: Option<&ComposerFooter>,
 ) -> Option<ComposerText> {
-    render_composer_in(frame, area, composer, theme, composer_column(area.width), footer)
+    render_composer_in(
+        frame,
+        area,
+        composer,
+        theme,
+        composer_column(area.width),
+        footer,
+    )
 }
 
 fn render_composer_in(
@@ -5518,8 +5528,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 5)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ =
-                    render_composer(frame, frame.area(), &composer, &theme, Some(&footer));
+                let _ = render_composer(frame, frame.area(), &composer, &theme, Some(&footer));
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
@@ -6540,17 +6549,10 @@ mod tests {
 
     /// Paint the Session composer with a footer and return its bottom border
     /// row: the row the status strip used to spend.
-    fn paint_composer_footer(
-        status: &StatusStrip,
-        leader: Option<&str>,
-        width: u16,
-    ) -> String {
+    fn paint_composer_footer(status: &StatusStrip, leader: Option<&str>, width: u16) -> String {
         let theme = home_theme();
         let composer = crate::editor::Composer::new(Path::new("."));
-        let footer = ComposerFooter {
-            status,
-            leader,
-        };
+        let footer = ComposerFooter { status, leader };
         let height = 5u16;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
@@ -6611,7 +6613,10 @@ mod tests {
         };
         let painted = paint_composer_footer(&status, None, 80);
         let version = format!("miao {}", crate::VERSION);
-        assert!(painted.contains(&version), "the border names the build: {painted}");
+        assert!(
+            painted.contains(&version),
+            "the border names the build: {painted}"
+        );
         // The border's corner closes the row after the build's own cell.
         assert!(
             painted
@@ -6666,9 +6671,8 @@ mod tests {
         shell.set_transcript(&transcript);
         shell.status.model = Some("glm-5".into());
         let height = 12u16;
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
-                .expect("terminal");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
+            .expect("terminal");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
         let row = |y: u16| {
             (0..60u16)
@@ -6700,9 +6704,8 @@ mod tests {
             ..StatusStrip::default()
         };
         let height = 24u16;
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
-                .expect("terminal");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
+            .expect("terminal");
         terminal
             .draw(|frame| home.render(frame, frame.area(), &mut composer, &status))
             .expect("draw");
@@ -6722,9 +6725,8 @@ mod tests {
 
         // An empty strip keeps the rule whole.
         let empty = StatusStrip::default();
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
-                .expect("terminal");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
+            .expect("terminal");
         terminal
             .draw(|frame| home.render(frame, frame.area(), &mut composer, &empty))
             .expect("draw");

@@ -895,8 +895,12 @@ impl App {
                 // landing prompt's bottom rule now, the same way the Session
                 // box carries them on its border, so the row the strip spent
                 // stays with the page.
-                self.home
-                    .render(frame, frame.area(), &mut self.shell.composer, &self.shell.status);
+                self.home.render(
+                    frame,
+                    frame.area(),
+                    &mut self.shell.composer,
+                    &self.shell.status,
+                );
             }
             Screen::Session => {
                 self.shell.render(frame);
