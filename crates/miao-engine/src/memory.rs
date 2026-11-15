@@ -37,7 +37,10 @@ pub struct Document {
 
 impl Default for Document {
     fn default() -> Self {
-        Self { version: 1, entries: Vec::new() }
+        Self {
+            version: 1,
+            entries: Vec::new(),
+        }
     }
 }
 
@@ -83,8 +86,7 @@ pub fn save(root: &Path, document: &Document) -> std::io::Result<()> {
 /// entries are included (the model should know what it saved even if the
 /// operator has not confirmed it yet), but disabled entries are marked.
 pub fn context_block(document: &Document) -> Option<String> {
-    let active: Vec<&Entry> =
-        document.entries.iter().filter(|e| !e.disabled).collect();
+    let active: Vec<&Entry> = document.entries.iter().filter(|e| !e.disabled).collect();
     if active.is_empty() {
         return None;
     }
@@ -99,7 +101,10 @@ pub fn context_block(document: &Document) -> Option<String> {
 
 /// The id for a new memory entry: `mem_<timestamp_ms>_<short_random>`.
 pub fn new_id(now_ms: u64) -> String {
-    format!("mem_{now_ms}_{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+    format!(
+        "mem_{now_ms}_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    )
 }
 
 #[cfg(test)]
