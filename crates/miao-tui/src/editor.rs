@@ -1378,15 +1378,6 @@ impl Composer {
         self.attach_binary(mime, data, &format!("image-{}.{extension}", images + 1))
     }
 
-    /// The durable name a clipboard image is materialized under.
-    fn require_name(index: usize, extension: &str) -> Option<String> {
-        let extension = match extension {
-            "jpeg" => "jpg",
-            other => other,
-        };
-        Some(format!("image-{index}.{extension}"))
-    }
-
     /// Attach bytes under a marker the operator can see: an image counts as
     /// `[Image N]`, anything else (a PDF) carries its file name, because the
     /// engine sends it as a file part rather than a picture.
