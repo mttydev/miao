@@ -521,6 +521,10 @@ mod backpressure_tests {
                 .any(|event| matches!(event, AppEvent::Clipboard(_))),
             "the clipboard result was lost instead of delivered"
         );
-        assert_eq!(bus.dropped(), 0, "a clipboard result was counted as dropped");
+        assert_eq!(
+            bus.dropped(),
+            0,
+            "a clipboard result was counted as dropped"
+        );
     }
 }
