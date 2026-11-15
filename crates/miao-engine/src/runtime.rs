@@ -4495,7 +4495,8 @@ async fn execute(
                     }
                     if transport_continuations < 2 && allowance != Some(0) {
                         transport_continuations += 1;
-                        let input_id = continuation_input_id("transport", run, transport_continuations);
+                        let input_id =
+                            continuation_input_id("transport", run, transport_continuations);
                         inner.store.admit(crate::protocol::Input {
 agent_references: Default::default(),
 command: None,
