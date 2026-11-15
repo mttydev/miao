@@ -2948,7 +2948,96 @@ fn hoverable_line(
         span: (inner.x, inner.x + inner.width.saturating_sub(1)),
         text: text.clone(),
     });
-    lines.push(Line::from(Span::styled(fit(&text, width), style)));
+    // Every detail row sits one indent in: only section headers touch the
+    // rule, and that indent is what makes the column scan as sections instead
+    // of one wall of text. `fit` handles the body alone so the indent survives
+    // its whitespace collapse.
+    lines.push(Line::from(Span::styled(
+        format!("  {}", fit(&text, width.saturating_sub(2))),
+        style,
+    )));
+}
+
+/// The width the label of a `grid_row` is padded to, so a section's figures
+/// stack in one column instead of starting wherever the label ended.
+const GRID_LABEL_WIDTH: usize = 8;
+
+/// A section header: upper case, muted and bold. It carries no `▾` — the glyph
+/// promised a disclosure that does not exist, and eight of them stacked down
+/// the column read as decoration rather than as structure.
+fn section_header(title: &str, palette: &crate::theme::Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        title.to_string(),
+        Style::new()
+            .fg(palette.text_muted)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// One aligned `label  value` row under a section header. The label column is
+/// fixed so the values line up; `fit` cannot build this row because collapsing
+/// runs of spaces is exactly what the alignment is made of.
+fn grid_row(
+    hover_rows: &mut Vec<HoverRow>,
+    inner: ratatui::layout::Rect,
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    value_style: ratatui::style::Style,
+    palette: &crate::theme::Palette,
+) {
+    let width = inner.width as usize;
+    // The labels are our own ASCII words, so padding by character count is the
+    // cell width too.
+    let indent = format!(
+        "  {label}{}",
+        " ".repeat(GRID_LABEL_WIDTH.saturating_sub(label.len()))
+    );
+    hover_rows.push(HoverRow {
+        row: inner.y + lines.len() as u16,
+        span: (inner.x, inner.x + inner.width.saturating_sub(1)),
+        text: format!("{label} {value}"),
+    });
+    let label_width = UnicodeWidthStr::width(indent.as_str()) as u16;
+    lines.push(Line::from(vec![
+        Span::styled(
+            clip_cells(&indent, 0, width as u16),
+            Style::new().fg(palette.text_muted),
+        ),
+        Span::styled(
+            clip_cells(value, 0, (width as u16).saturating_sub(label_width)),
+            value_style,
+        ),
+    ]));
+}
+
+/// Two `label  value` pairs on one row. The figures are right-aligned so a
+/// column of them compares by shape instead of by reading each number; pairing
+/// them keeps the column short without turning the numbers back into prose.
+fn grid_pair(
+    hover_rows: &mut Vec<HoverRow>,
+    inner: ratatui::layout::Rect,
+    lines: &mut Vec<Line<'static>>,
+    first: (&str, String),
+    second: (&str, String),
+    style: ratatui::style::Style,
+    width: usize,
+) {
+    // The value column starts where a single-value row's does, so a section
+    // can mix single and paired rows without the figures stepping sideways.
+    let text = format!(
+        "  {:<8}{:<8}{:<6}{:>4}",
+        first.0, first.1, second.0, second.1
+    );
+    hover_rows.push(HoverRow {
+        row: inner.y + lines.len() as u16,
+        span: (inner.x, inner.x + inner.width.saturating_sub(1)),
+        text: format!("{} {} · {} {}", first.0, first.1, second.0, second.1),
+    });
+    lines.push(Line::from(Span::styled(
+        clip_cells(&text, 0, width as u16),
+        style,
+    )));
 }
 
 /// One wrapped display row of the draft as spans, with the selected cells
@@ -3060,10 +3149,10 @@ fn hourly_lines(
     // The window spans the workspace ledger rather than this Session: say so,
     // or every Session's sidebar reads the same figures and the block looks
     // like a stub instead of a total.
-    let mut lines = vec![Line::from(Span::styled("▾ Last 24h · workspace", muted))];
+    let mut lines = vec![section_header("24H · WORKSPACE", palette)];
     let mut hover: Vec<(usize, String)> = Vec::new();
     let Some(usage) = usage else {
-        lines.push(Line::from(Span::styled("no usage recorded", muted)));
+        lines.push(Line::from(Span::styled("  no usage recorded", muted)));
         return (lines, hover);
     };
     // A narrow column pairs hours instead of dropping them: the shape of the
@@ -3079,7 +3168,7 @@ fn hourly_lines(
         })
         .collect::<Vec<_>>();
     if cells.is_empty() {
-        lines.push(Line::from(Span::styled("no usage recorded", muted)));
+        lines.push(Line::from(Span::styled("  no usage recorded", muted)));
         return (lines, hover);
     }
     let mut sorted = cells.clone();
@@ -3262,9 +3351,14 @@ fn hourly_lines(
     // An unhealthy cache state carries its own next step: billed input that
     // the cache barely recognised is the one shape compaction actually
     // fixes, so name the command instead of printing a bare percentage. It
-    // sits in its own group below the figures.
-    lines.push(Line::default());
-    if usage.cache_hit().is_some_and(|hit| hit < 0.5) && usage.input >= 50_000 {
+    // sits in its own group below the figures — and opens one only when it has
+    // something to say, so the boundary above the next section stays a single
+    // blank row.
+    let low_cache = usage.cache_hit().is_some_and(|hit| hit < 0.5) && usage.input >= 50_000;
+    if low_cache || usage.truncated {
+        lines.push(Line::default());
+    }
+    if low_cache {
         lines.push(Line::from(vec![
             Span::styled("low cache hit: ", Style::new().fg(palette.warning)),
             Span::styled("/compact", Style::new().fg(palette.secondary)),
@@ -3356,23 +3450,32 @@ impl Pane for SidebarPane {
                 "no Session selected",
                 Style::new().fg(palette.text_muted),
             ))],
-            Some(session) => vec![
-                Line::from(Span::styled(
-                    fit(session.label(), text_width),
-                    Style::new().fg(palette.text).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    fit(&session.directory.clone().unwrap_or_default(), text_width),
-                    Style::new().fg(palette.text_muted),
-                )),
-                Line::from(Span::styled(
-                    session
-                        .updated_at_ms
-                        .map(|updated| format!("updated {}", relative_time(updated)))
-                        .unwrap_or_default(),
-                    Style::new().fg(palette.text_muted),
-                )),
-            ],
+            // Where the Session lives and when it last moved belong on one
+            // muted line: as two rows they read as two unrelated facts and
+            // spent a third of the header on something nobody scans for.
+            Some(session) => {
+                let origin = session.directory.clone().unwrap_or_default();
+                let updated = session
+                    .updated_at_ms
+                    .map(|updated| format!("updated {}", relative_time(updated)))
+                    .unwrap_or_default();
+                let detail = match (origin.is_empty(), updated.is_empty()) {
+                    (false, false) => format!("{origin} · {updated}"),
+                    (false, true) => origin,
+                    (true, false) => updated,
+                    (true, true) => String::new(),
+                };
+                vec![
+                    Line::from(Span::styled(
+                        fit(session.label(), text_width),
+                        Style::new().fg(palette.text).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        fit(&detail, text_width),
+                        Style::new().fg(palette.text_muted),
+                    )),
+                ]
+            }
         };
         if self.session.is_some() {
             // The workspace strip opens the billed-usage section: a "Context"
@@ -3395,13 +3498,10 @@ impl Pane for SidebarPane {
             // workspace spent, so they carry their own "WHAT · scope" header
             // instead of reading as the tail of the Last 24h group.
             lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                "▾ Usage · session",
-                Style::new().fg(palette.text_muted),
-            )));
+            lines.push(section_header("SESSION · USAGE", &palette));
             match &self.usage {
                 None => lines.push(Line::from(Span::styled(
-                    "no usage yet",
+                    "  no usage yet",
                     Style::new().fg(palette.text_muted),
                 ))),
                 Some(usage) => {
@@ -3429,16 +3529,16 @@ impl Pane for SidebarPane {
                         (usage.context_window, usage.context_tokens)
                     {
                         let percent = crate::status::context_percent(window, tokens);
-                        // `ctx` asked the reader to know the word. Say what the
-                        // figure is — the conversation the model can still see
-                        // — and let the hover carry the rest, because the row
-                        // itself has only the column's 42 cells.
-                        hoverable_line(
+                        // The row names the conversation the model can still see
+                        // rather than making the reader learn "ctx", and it sits
+                        // in the same label column as the figures below it.
+                        grid_row(
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            format!(
-                                "context {} of {} · {}%",
+                            "context",
+                            &format!(
+                                "{} of {} · {}%",
                                 crate::status::compact_tokens(tokens),
                                 crate::status::compact_tokens(window),
                                 percent
@@ -3448,7 +3548,7 @@ impl Pane for SidebarPane {
                             } else {
                                 palette.text_muted
                             }),
-                            text_width,
+                            &palette,
                         );
                         if let Some(row) = self.hover_rows.last_mut() {
                             row.text = format!(
@@ -3459,27 +3559,24 @@ impl Pane for SidebarPane {
                             );
                         }
                     }
-                    hoverable_line(
+                    grid_pair(
                         &mut self.hover_rows,
                         inner,
                         &mut lines,
-                        format!(
-                            "in {} · out {}",
-                            crate::status::compact_tokens(usage.input_tokens),
-                            crate::status::compact_tokens(usage.output_tokens)
-                        ),
+                        ("in", crate::status::compact_tokens(usage.input_tokens)),
+                        ("out", crate::status::compact_tokens(usage.output_tokens)),
                         Style::new().fg(palette.text_muted),
                         text_width,
                     );
-                    hoverable_line(
+                    grid_pair(
                         &mut self.hover_rows,
                         inner,
                         &mut lines,
-                        format!(
-                            "cache {} · turns {}",
+                        (
+                            "cache",
                             crate::status::compact_tokens(usage.cache_read_tokens),
-                            usage.turns
                         ),
+                        ("turns", usage.turns.to_string()),
                         Style::new().fg(palette.text_muted),
                         text_width,
                     );
@@ -3500,10 +3597,7 @@ impl Pane for SidebarPane {
                         // row; this one sat glued to the figures above and read
                         // as one more data line.
                         lines.push(Line::default());
-                        lines.push(Line::from(Span::styled(
-                            "▾ Activity",
-                            Style::new().fg(palette.text_muted),
-                        )));
+                        lines.push(section_header("ACTIVITY", &palette));
                     }
                     // The rows read abnormal-first: what went wrong (retries,
                     // rework) before what it cost in supervision and spend,
@@ -3680,22 +3774,36 @@ impl Pane for SidebarPane {
                     }
                 }
             }
-            lines.push(Line::default());
-            if let Some(mode) = &self.mode {
-                lines.push(Line::from(Span::styled(
-                    format!("▾ Mode · {mode}"),
-                    Style::new().fg(palette.warning),
-                )));
-            }
-            if let Some((files, added, removed)) = self.changes {
-                let noun = if files == 1 { "file" } else { "files" };
+            // What this Session did to the checkout is one block, not two
+            // one-line headers: a header with no rows under it reads as a
+            // section that failed to load.
+            if self.mode.is_some() || self.changes.is_some() {
                 lines.push(Line::default());
-                lines.push(Line::from(Span::styled(
-                    format!("▾ Changes {files} {noun}  +{added} −{removed}"),
-                    Style::new().fg(palette.text_muted),
-                )));
+                lines.push(section_header("WORKING TREE", &palette));
+                if let Some(mode) = &self.mode {
+                    grid_row(
+                        &mut self.hover_rows,
+                        inner,
+                        &mut lines,
+                        "mode",
+                        mode,
+                        Style::new().fg(palette.warning),
+                        &palette,
+                    );
+                }
+                if let Some((files, added, removed)) = self.changes {
+                    let noun = if files == 1 { "file" } else { "files" };
+                    grid_row(
+                        &mut self.hover_rows,
+                        inner,
+                        &mut lines,
+                        "changes",
+                        &format!("{files} {noun}  +{added} −{removed}"),
+                        Style::new().fg(palette.text_muted),
+                        &palette,
+                    );
+                }
             }
-            lines.push(Line::default());
             if let Some(goal) = &self.goal {
                 // The status word is the one thing here that can need the
                 // operator, so it keeps colour only when it does.
@@ -3704,23 +3812,33 @@ impl Pane for SidebarPane {
                     "done" => Style::new().fg(palette.success),
                     _ => Style::new().fg(palette.text_muted),
                 };
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "GOAL · ",
+                        Style::new()
+                            .fg(palette.text_muted)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(goal.status.clone(), goal_style.add_modifier(Modifier::BOLD)),
+                ]));
                 lines.push(Line::from(Span::styled(
-                    format!("▾ Goal · {}", goal.status),
-                    goal_style,
-                )));
-                let width = area.width.saturating_sub(3);
-                lines.push(Line::from(Span::styled(
-                    clip_cells(&goal.objective, 0, width),
+                    format!(
+                        "  {}",
+                        clip_cells(&goal.objective, 0, text_width.saturating_sub(2) as u16)
+                    ),
                     Style::new().fg(palette.text),
                 )));
                 if let Some(budget) = &goal.budget {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "budget · {}",
-                            clip_cells(budget, 0, width.saturating_sub(9))
-                        ),
+                    grid_row(
+                        &mut self.hover_rows,
+                        inner,
+                        &mut lines,
+                        "budget",
+                        budget,
                         Style::new().fg(palette.text_muted),
-                    )));
+                        &palette,
+                    );
                 }
             }
             if let Some(plan) = &self.plan {
@@ -3731,41 +3849,54 @@ impl Pane for SidebarPane {
                     _ => Style::new().fg(palette.text_muted),
                 };
                 lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "PLAN · ",
+                        Style::new()
+                            .fg(palette.text_muted)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(plan.status.clone(), plan_style.add_modifier(Modifier::BOLD)),
+                ]));
                 lines.push(Line::from(Span::styled(
-                    format!("▾ Plan · {}", plan.status),
-                    plan_style,
-                )));
-                let width = area.width.saturating_sub(3);
-                lines.push(Line::from(Span::styled(
-                    clip_cells(&plan.summary, 0, width),
+                    format!(
+                        "  {}",
+                        clip_cells(&plan.summary, 0, text_width.saturating_sub(2) as u16)
+                    ),
                     Style::new().fg(palette.text),
                 )));
                 if plan.steps > 0 {
-                    lines.push(Line::from(Span::styled(
-                        format!("{} step{}", plan.steps, plural(plan.steps as u64)),
+                    grid_row(
+                        &mut self.hover_rows,
+                        inner,
+                        &mut lines,
+                        "steps",
+                        &format!("{}", plan.steps),
                         Style::new().fg(palette.text_muted),
-                    )));
+                        &palette,
+                    );
                 }
             }
-            // Every ▾ section opens after one blank row; the Goal block no
-            // longer carries its own trailing one.
+            // Exactly one blank row opens each section, wherever it sits in
+            // the column, so the gaps alone tell the reader where a block
+            // begins.
             lines.push(Line::default());
             let done = self
                 .todos
                 .iter()
                 .filter(|todo| todo.status == "completed")
                 .count();
-            lines.push(Line::from(Span::styled(
-                format!("▾ Todo {done}/{}", self.todos.len()),
-                Style::new().fg(palette.text_muted),
-            )));
+            lines.push(section_header(
+                &format!("TODO {done}/{}", self.todos.len()),
+                &palette,
+            ));
             if self.todos.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    "no todo list",
+                    "  no todo list",
                     Style::new().fg(palette.text_muted),
                 )));
             }
-            let width = area.width.saturating_sub(3) as usize;
+            let width = area.width.saturating_sub(6) as usize;
             for todo in &self.todos {
                 // The same bracket glyphs the transcript's todowrite row paints,
                 // so a task reads identically in both columns.
@@ -3782,7 +3913,7 @@ impl Pane for SidebarPane {
                 } else {
                     palette.text_muted
                 };
-                let text = fit(&todo.content, width.saturating_sub(4));
+                let text = fit(&todo.content, width);
                 // The row shows the clipped title; the hover tip has to carry
                 // the text the clip removed.
                 self.hover_rows.push(HoverRow {
@@ -3791,7 +3922,7 @@ impl Pane for SidebarPane {
                     text: todo.content.clone(),
                 });
                 lines.push(Line::from(Span::styled(
-                    format!("[{glyph}] {text}"),
+                    format!("  [{glyph}] {text}"),
                     Style::new().fg(color),
                 )));
             }
@@ -5047,10 +5178,10 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let goal = text.find("▾ Goal · active").expect("goal header");
+        let goal = text.find("GOAL · active").expect("goal header");
         let objective = text.find("ship the offset reporting").expect("objective");
-        let budget = text.find("budget · two hours").expect("budget");
-        let todos = text.find("▾ Todo 1/1").expect("todo header");
+        let budget = text.find("budget  two hours").expect("budget");
+        let todos = text.find("TODO 1/1").expect("todo header");
         assert!(goal < objective && objective < budget, "{text}");
         assert!(
             budget < todos,
@@ -5118,13 +5249,13 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let goal = text.find("▾ Goal · active").expect("goal header");
-        let plan = text.find("▾ Plan · approved").expect("plan header");
+        let goal = text.find("GOAL · active").expect("goal header");
+        let plan = text.find("PLAN · approved").expect("plan header");
         let summary = text
             .find("read the ledger, then replay it")
             .expect("plan summary");
-        let steps = text.find("2 steps").expect("step count");
-        let todos = text.find("▾ Todo 0/1").expect("todo header");
+        let steps = text.find("steps").expect("step count");
+        let todos = text.find("TODO 0/1").expect("todo header");
         assert!(
             goal < plan && plan < summary && summary < steps && steps < todos,
             "the plan reads between the goal and the checklist: {text}"
@@ -7837,10 +7968,10 @@ mod tests {
             .collect::<Vec<_>>();
         let header = rows
             .iter()
-            .position(|row| row.contains("Last 24h"))
+            .position(|row| row.contains("24H · WORKSPACE"))
             .expect("hourly header");
         assert!(
-            rows[header].contains("workspace"),
+            rows[header].contains("WORKSPACE"),
             "the strip says what it totals: {:?}",
             rows[header]
         );
@@ -8515,7 +8646,10 @@ mod tests {
         };
         // The workspace strip answers a different question from the rows below
         // it, so it opens first and the session block gets its own header.
-        assert!(at("Last 24h") < at("▾ Usage · session"), "{painted:#?}");
+        assert!(
+            at("24H · WORKSPACE") < at("SESSION · USAGE"),
+            "{painted:#?}"
+        );
         // What went wrong leads; supervision and delegation follow, because a
         // monochrome terminal can only carry priority through order.
         assert!(at("retried") < at("needs you"), "{painted:#?}");
@@ -8581,7 +8715,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} missing: {rows:?}"))
         };
         // The rows open the section: the header, then one row per model.
-        let header = at("▾ Usage · session");
+        let header = at("SESSION · USAGE");
         assert_eq!(at("glm-5 · chat ×3"), header + 1, "{rows:?}");
         assert_eq!(at("claude-x · responses ×1"), header + 2, "{rows:?}");
     }
@@ -8625,7 +8759,7 @@ mod tests {
             .collect::<Vec<_>>();
         let header = rows
             .iter()
-            .position(|row| row.contains("Todo"))
+            .position(|row| row.contains("TODO"))
             .expect("todo header");
         // The checklist is bounded by the column itself now that the 24-hour
         // strip opens the usage section above it: everything between its
@@ -8655,7 +8789,7 @@ mod tests {
             rows[title]
         );
     }
-    /// Every ▾ section opens after one blank row, wherever it sits in the
+    /// Every section opens after one blank row, wherever it sits in the
     /// column: a section header glued to the rows above reads as part of them.
     #[test]
     fn every_section_header_opens_after_a_blank_row() {
@@ -8706,14 +8840,13 @@ mod tests {
                 .is_empty()
         };
         for header in [
-            "▾ Last 24h",
-            "▾ Usage · session",
-            "▾ Activity",
-            "▾ Mode",
-            "▾ Changes",
-            "▾ Goal",
-            "▾ Plan",
-            "▾ Todo",
+            "24H · WORKSPACE",
+            "SESSION · USAGE",
+            "ACTIVITY",
+            "WORKING TREE",
+            "GOAL",
+            "PLAN",
+            "TODO",
         ] {
             let at = rows
                 .iter()
