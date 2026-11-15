@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { EngineEvent, EngineProgress } from "@miao/client/engine"
-import { createEngineReader, type EngineTransport } from "./engine-reader"
+import { createEngineReader, progressDeltaText, type EngineTransport } from "./engine-reader"
 
 // Captured from `session_catalog` on `miao serve` built from this tree.
 const catalog = [
@@ -134,15 +134,27 @@ describe("engine reader", () => {
     const deltas: string[] = []
     const other: string[] = []
     try {
-      const off = reader.subscribeProgress("ses_b", (event) => deltas.push(String(event.text ?? "")))
-      reader.subscribeProgress("ses_a", (event) => other.push(String(event.text ?? "")))
+      const off = reader.subscribeProgress("ses_b", (event) => deltas.push(progressDeltaText(event) ?? ""))
+      reader.subscribeProgress("ses_a", (event) => other.push(progressDeltaText(event) ?? ""))
       emitProgress({ session_id: "ses_b", kind: "text.delta", text: "he" })
-      emitProgress({ session_id: "ses_b", kind: "text.delta", text: "llo" })
+      emitProgress({
+        session_id: "ses_b",
+        kind: "provider.delta",
+        data: { delta: { kind: "text.delta", text: "llo" } },
+      })
       emitProgress({ session_id: "ses_a", kind: "text.delta", text: "x" })
       off()
       emitProgress({ session_id: "ses_b", kind: "text.delta", text: "!" })
       expect(deltas).toEqual(["he", "llo"])
       expect(other).toEqual(["x"])
+      expect(
+        progressDeltaText({
+          session_id: "s",
+          kind: "provider.delta",
+          data: { delta: { kind: "text.delta", text: "7\n8\n9" } },
+        }),
+      ).toEqual("7\n8\n9")
+      expect(progressDeltaText({ session_id: "s", kind: "run.started" })).toBeUndefined()
     } finally {
       await reader.close()
     }
