@@ -3,8 +3,8 @@ use miao_engine::{
     protocol::{Delivery, Input},
     store::Store,
 };
-use rusqlite;
 use serde_json::json;
+use rusqlite::Connection;
 use std::{
     io::Write,
     process::{Command, Stdio},
@@ -120,7 +120,7 @@ async fn catalog_never_creates_a_missing_database_or_migrates_an_unrelated_one()
 async fn old_catalog_metadata_survives_unavailable_usage_without_a_migration() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
-    let conn = rusqlite::Connection::open(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
     conn.execute_batch(
         "PRAGMA application_id=1296646469;
         CREATE TABLE engine_session(id TEXT PRIMARY KEY,title TEXT);
@@ -323,7 +323,7 @@ async fn a_catalog_row_carries_the_live_state_the_agent_view_reads() {
         .unwrap();
     // A run is going: the durable marker the dialog's ● chip reads.
     {
-        let conn = rusqlite::Connection::open(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
         conn.execute(
             "INSERT INTO engine_run(id,session_id,state,lease_epoch) VALUES('run-1','ses_live','running',0)",
             [],
