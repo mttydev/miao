@@ -33,11 +33,12 @@ fn config() -> Config {
         "powershell".into(),
         "-NoProfile".into(),
         "-Command".into(),
-        // `cmd.exe` needs the redirect target quoted, and the quoted command is
-        // then re-parsed by `cmd /s /c`, which is where the fixture wrote the
-        // wrong place and the formatter reported `failed`. PowerShell writes one
-        // literal path and needs no shell re-parse.
-        "Set-Content -LiteralPath \"$FILE\" -Value formatted -NoNewline".into(),
+        // The engine substitutes `$FILE` inside an argument, so the path lands
+        // in the command text; single quotes keep backslashes literal. The
+        // extra argument form (`$args[0]`) does not work here because
+        // `-Command <string>` appends trailing arguments to the last command
+        // instead of binding them.
+        "Set-Content -LiteralPath '$FILE' -Value formatted".into(),
     ];
     Config {
         name: "fixture".into(),
