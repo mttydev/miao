@@ -733,7 +733,7 @@ impl App {
             drafts: HashMap::new(),
             history_index: 0,
             catalog: Vec::new(),
-        last_catalog_ask: None,
+            last_catalog_ask: None,
             pending_models: false,
             models_filter: None,
             accounts_filter: None,
