@@ -942,6 +942,15 @@ pub struct Composer {
     /// Inline media sent with the prompt. The composer only shows their
     /// `[Image N]` markers; the bytes travel beside the text.
     attachments: Vec<Value>,
+    /// The marker each attachment is drawn as, in the order the bytes travel.
+    /// The marker text is the only link between the two lists, so it is what
+    /// keeps an undo from leaving bytes attached with nothing on screen.
+    attachment_markers: Vec<String>,
+    /// Image numbers this draft has already handed out. Monotonic on purpose:
+    /// the count of live pictures reused a number and a name that were still on
+    /// screen once an earlier one was deleted. Files never spend a number —
+    /// their marker carries the file name instead.
+    next_image: usize,
     /// Pasted blocks too large to show. The composer holds the placeholder
     /// (`[Pasted ~N lines]`) and the full text waits here until submit, so a
     /// 2000-line paste costs one line on screen instead of pushing the draft
@@ -976,6 +985,8 @@ impl Composer {
             placeholder: random_pick(),
             suggestion: None,
             attachments: Vec::new(),
+            attachment_markers: Vec::new(),
+            next_image: 0,
             pastes: Vec::new(),
             history: load_history(&history_path),
             history_index: None,
@@ -1081,10 +1092,35 @@ impl Composer {
             return Action::None;
         }
         let action = self.handle_edit_key(key, keys);
+        // An undo, a redo or a selection delete rewrites the text without
+        // touching the bytes beside it, so the two are reconciled here rather
+        // than in each of those paths.
+        self.settle_attachments();
         if matches!(action, Action::None) {
             self.refresh_completion();
         }
         action
+    }
+
+    /// Drop the bytes whose marker the draft no longer shows.
+    ///
+    /// The marker is the only record that a picture is part of this draft: a
+    /// step taken back leaves the text without it, and shipping the attachment
+    /// anyway sent the model a picture the operator had just removed.
+    fn settle_attachments(&mut self) {
+        if self.attachments.is_empty() {
+            return;
+        }
+        let text = self.editor.text().to_string();
+        let markers = std::mem::take(&mut self.attachment_markers);
+        let attachments = std::mem::take(&mut self.attachments);
+        for (attachment, marker) in attachments.into_iter().zip(markers) {
+            if !text.contains(&marker) {
+                continue;
+            }
+            self.attachments.push(attachment);
+            self.attachment_markers.push(marker);
+        }
     }
 
     /// Editing keys are the `input_*` actions; the keymap decides which stroke
@@ -1222,6 +1258,8 @@ impl Composer {
         let draft = self.editor.take();
         let text = self.expand_pastes(&draft);
         let attachments = std::mem::take(&mut self.attachments);
+        self.attachment_markers.clear();
+        self.next_image = 0;
         self.pastes.clear();
         self.record_history(&text);
         self.history_index = None;
@@ -1357,47 +1395,43 @@ impl Composer {
     /// Show an image as `[Image N] ` and keep its bytes for the next prompt.
     /// Returns the new attachment count.
     pub fn attach_image(&mut self, mime: &str, data: &str) -> usize {
-        // A clipboard image has no source name, so two pasted screenshots used
-        // to materialize under the same default name and the transcript showed
-        // "image.png" twice. Number them the way the marker is numbered, so the
-        // name the engine writes is unique per paste.
-        let images = self
-            .attachments
-            .iter()
-            .filter(|attachment| {
-                attachment
-                    .get("mime")
-                    .and_then(Value::as_str)
-                    .is_some_and(|mime| mime.starts_with("image/"))
-            })
-            .count();
-        let extension = match mime.rsplit('/').next().unwrap_or("png") {
-            "jpeg" => "jpg",
-            other => other,
-        };
-        self.attach_binary(mime, data, &format!("image-{}.{extension}", images + 1))
+        self.attach_binary(mime, data, "")
     }
 
     /// Attach bytes under a marker the operator can see: an image counts as
     /// `[Image N]`, anything else (a PDF) carries its file name, because the
     /// engine sends it as a file part rather than a picture.
     pub fn attach_binary(&mut self, mime: &str, data: &str, name: &str) -> usize {
-        let images = self
-            .attachments
-            .iter()
-            .filter(|attachment| {
-                attachment
-                    .get("mime")
-                    .and_then(Value::as_str)
-                    .is_some_and(|mime| mime.starts_with("image/"))
-            })
-            .count();
-        let marker = if mime.starts_with("image/") {
-            format!("[Image {}] ", images + 1)
+        // A clipboard image has no source name, so two pasted screenshots used
+        // to materialize under the same default name and the transcript showed
+        // "image.png" twice. The name follows the marker's number, and that
+        // number only moves forward: numbering by the live count handed an
+        // undone or deleted picture's number to the next paste, so the draft
+        // ended up with two `[Image 2]` markers and two `image-2.png` files.
+        let image = mime.starts_with("image/");
+        let number = match image {
+            true => {
+                self.next_image += 1;
+                self.next_image
+            }
+            false => 0,
+        };
+        let marker = if image {
+            format!("[Image {number}] ")
         } else if name.is_empty() {
             "[File] ".to_string()
         } else {
             format!("[File {name}] ")
+        };
+        let name = match image && name.is_empty() {
+            true => format!(
+                "image-{number}.{}",
+                match mime.rsplit('/').next().unwrap_or("png") {
+                    "jpeg" => "jpg",
+                    other => other,
+                }
+            ),
+            false => name.to_string(),
         };
         self.editor.insert_str(&marker);
         let mut attachment = json!({ "mime": mime, "data": data });
@@ -1407,8 +1441,9 @@ impl Composer {
             attachment["metadata"] = json!({ "name": name });
         }
         self.attachments.push(attachment);
+        self.attachment_markers.push(marker.trim_end().to_string());
         self.refresh_completion();
-        images + 1
+        number
     }
 
     /// Take the marker the cursor touches as one unit, and the payload it
@@ -1432,6 +1467,7 @@ impl Composer {
             Placeholder::Attachment => {
                 if rank < self.attachments.len() {
                     self.attachments.remove(rank);
+                    self.attachment_markers.remove(rank);
                 }
             }
             Placeholder::Paste => {
@@ -1461,6 +1497,8 @@ impl Composer {
     pub fn clear(&mut self) {
         self.editor.clear();
         self.attachments.clear();
+        self.attachment_markers.clear();
+        self.next_image = 0;
         self.mode = Mode::Normal;
         self.completion = Completion::default();
     }
@@ -1512,6 +1550,25 @@ impl Composer {
         self.mode = Mode::Normal;
         self.editor.set_text(text);
         self.attachments = attachments;
+        // The markers returned with the text, so this draft's bookkeeping is
+        // rebuilt from what is on screen: an empty list would drop the restored
+        // pictures at the next keystroke.
+        let markers = self
+            .editor
+            .markers()
+            .into_iter()
+            .filter(|(_, _, kind, _)| *kind == Placeholder::Attachment)
+            .map(|(_, _, _, inner)| format!("[{inner}]"))
+            .collect::<Vec<_>>();
+        let kept = self.attachments.len().min(markers.len());
+        self.next_image = markers[..kept]
+            .iter()
+            .filter_map(|marker| marker.strip_prefix("[Image "))
+            .filter_map(|number| number.strip_suffix(']'))
+            .filter_map(|number| number.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        self.attachment_markers = markers[..kept].to_vec();
         self.refresh_completion();
     }
 
@@ -1771,6 +1828,8 @@ mod tests {
             placeholder: 0,
             suggestion: None,
             attachments: Vec::new(),
+            attachment_markers: Vec::new(),
+            next_image: 0,
             pastes: Vec::new(),
             history: Vec::new(),
             history_index: None,
@@ -2149,6 +2208,59 @@ mod tests {
 
     /// A long paste must not push the draft out of view. The composer holds
     /// one placeholder line; the text waits until submit.
+    /// A number and a name are handed out once per draft. Numbering by the live
+    /// attachment count reused both after an earlier picture left, so a draft
+    /// could hold two `[Image 2]` markers and two `image-2.png` files.
+    #[test]
+    fn a_taken_back_picture_does_not_hand_its_number_to_the_next_paste() {
+        let dir = std::env::temp_dir().join(format!("miao-tui-attach-{}", std::process::id()));
+        let mut composer = composer(&dir);
+        composer.attach_image("image/png", "b25l");
+        composer.attach_image("image/png", "dHdv");
+        assert_eq!(composer.editor.text(), "[Image 1] [Image 2] ");
+        // The first picture leaves, the text and its bytes together.
+        composer.editor.set_text("[Image 2] ");
+        composer.settle_attachments();
+        assert_eq!(composer.attachments.len(), 1);
+        assert_eq!(
+            composer.attach_image("image/png", "dGhyZWU="),
+            3,
+            "the number only moves forward"
+        );
+        assert_eq!(composer.editor.text(), "[Image 2] [Image 3] ");
+        assert_eq!(
+            composer.attachments.last().unwrap()["metadata"]["name"],
+            "image-3.png",
+            "the materialized name follows the marker"
+        );
+    }
+
+    /// Undo takes the marker back, so it has to take the bytes with it: the
+    /// attachment list is what the prompt actually sends.
+    #[test]
+    fn undoing_a_paste_takes_its_picture_with_it() {
+        let dir = std::env::temp_dir().join(format!("miao-tui-attach-undo-{}", std::process::id()));
+        let mut composer = composer(&dir);
+        composer.editor.insert_char('a');
+        composer.attach_image("image/png", "b25l");
+        assert_eq!(composer.attachments.len(), 1);
+        // `alt+z` is the draft's undo stroke; `ctrl+z` stays the terminal's
+        // suspend, which is why the keymap does not bind it here.
+        composer.handle_key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT),
+            &Keymap::default(),
+        );
+        assert!(
+            !composer.editor.text().contains("[Image"),
+            "the marker is taken back: {:?}",
+            composer.editor.text()
+        );
+        assert!(
+            composer.attachments.is_empty(),
+            "the bytes go with the marker"
+        );
+    }
+
     #[test]
     fn a_long_paste_collapses_to_one_placeholder_line() {
         let dir = std::env::temp_dir().join(format!("miao-tui-paste-{}", std::process::id()));
