@@ -24,6 +24,7 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 ### Fixed
 - **tui**: kill the engine child process on TUI exit (#3072) (`ef720fc648`)
 - **desktop**: read the wrapped delta shape progress frames actually carry (#3070) (`dc234b4a7d`)
+- **engine**: name the unknown fields a tool input carries (#3071) (`40a24dbaae`)
 - **tui**: the held paste-image prompt empties the composer when it sends (#3069) (`d272ea8c39`)
 - **desktop**: swallow the IME confirm-Enter with a post-composition window (#3066) (`03d622b467`)
 - **desktop**: never submit an IME composition, and use real menus (#3064) (`d582865c18`)
