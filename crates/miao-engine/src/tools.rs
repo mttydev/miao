@@ -1959,7 +1959,56 @@ impl Tools {
                 mismatched.join(", ")
             );
         }
+        // A field the schema never declared is the other silent trip: the
+        // write faces reject unknown fields outright, and the bare message
+        // named neither the field nor the tool. A model that mirrored a
+        // display-only field back into its write — `verified` rides every
+        // todo echo — resends the same call over and over trying to guess.
+        let mut unknown = Vec::new();
+        if let Some(schema) = schema {
+            Self::collect_unknown_fields(schema, input, String::new(), &mut unknown);
+        }
+        if !unknown.is_empty() {
+            return format!(
+                "invalid tool input: {name} does not accept {}",
+                unknown.join(", ")
+            );
+        }
         error.to_string()
+    }
+
+    /// The input keys a `deny_unknown_fields` face will refuse: fields absent
+    /// from the schema's properties, walked into nested objects and arrays of
+    /// objects so `todos[0].verified` is named, not just `todos`.
+    fn collect_unknown_fields(schema: &Value, input: &Value, path: String, out: &mut Vec<String>) {
+        match (schema["type"].as_str(), input) {
+            (Some("object"), Value::Object(map)) => {
+                let Some(properties) = schema["properties"].as_object() else {
+                    return;
+                };
+                let open = schema["additionalProperties"] != json!(false);
+                for (key, value) in map {
+                    let field = match path.is_empty() {
+                        true => key.clone(),
+                        false => format!("{path}.{key}"),
+                    };
+                    match properties.get(key) {
+                        Some(child) => Self::collect_unknown_fields(child, value, field, out),
+                        None if !open => out.push(field),
+                        None => {}
+                    }
+                }
+            }
+            (Some("array"), Value::Array(items)) => {
+                let Some(item) = schema.get("items") else {
+                    return;
+                };
+                for (index, value) in items.iter().enumerate() {
+                    Self::collect_unknown_fields(item, value, format!("{path}[{index}]"), out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Whether a value fits the simple type a schema declares for it. Schemas
