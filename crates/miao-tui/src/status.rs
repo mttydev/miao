@@ -224,6 +224,22 @@ pub struct TurnTiming {
     pub ttft_ms: Option<u64>,
 }
 
+/// How full the live context is, as one number for every surface that paints it.
+///
+/// The denominator is the *input ceiling* the engine plans against — the
+/// model's window minus the output it must leave room for — and the numerator is
+/// what the conversation already occupies. Dividing by the raw window made the
+/// two disagree (a deepseek route reserves 393k of 1M, so the same occupancy
+/// read 52% against the ceiling and >100% against what a turn could still send),
+/// and every surface used to do its own arithmetic. Clamped because a request
+/// that already overflows the ceiling is "full", not "131% full".
+pub fn context_percent(window: u64, tokens: u64) -> u64 {
+    if window == 0 {
+        return 0;
+    }
+    tokens.saturating_mul(100).saturating_div(window).min(100)
+}
+
 impl UsageSummary {
     pub fn from_value(value: &Value) -> Self {
         Self {
@@ -330,6 +346,22 @@ mod tests {
     /// The strip formats the engine's figure and never derives its own: the
     /// prompt total already counts the cache axes, so dividing by `input` plus
     /// the cache read read a fully cached day as 50% and nagged every Session.
+    /// A context over its ceiling reads as full, not as "131%": the same
+    /// occupancy is painted by the sidebar and `/context`, and both used to do
+    /// their own arithmetic against a different denominator.
+    #[test]
+    fn context_percent_is_one_number_and_never_over_a_hundred() {
+        assert_eq!(context_percent(0, 10), 0, "no window states nothing");
+        assert_eq!(context_percent(1000, 0), 0);
+        assert_eq!(context_percent(1000, 323), 32);
+        assert_eq!(context_percent(616_000, 323_900), 52);
+        assert_eq!(
+            context_percent(616_000, 807_000),
+            100,
+            "an overflowed ceiling is full, not 131% full"
+        );
+    }
+
     #[test]
     fn the_hourly_hit_share_is_the_engine_figure_not_a_local_guess() {
         let usage = HourlyUsage::from_value(&json!({

@@ -3333,16 +3333,17 @@ impl Pane for SidebarPane {
                             text_width,
                         );
                     }
-                    // How full the live context is: the window the last turn
-                    // planned against and the occupancy it planned for. This
-                    // is a different read from the billed tokens below — those
-                    // are what was paid for, this is what still fits — so it
-                    // leads, and the rung where automatic compaction arms
-                    // (~80%) paints the warning colour.
+                    // How full the live context is: the input ceiling the last
+                    // turn planned against and the occupancy it planned for.
+                    // This is a different read from the billed tokens below —
+                    // those are what was paid for, this is what still fits — so
+                    // it leads, and a nearly full ceiling paints the warning
+                    // colour. The percentage comes from one shared helper so
+                    // every surface agrees and never prints more than 100%.
                     if let (Some(window), Some(tokens)) =
                         (usage.context_window, usage.context_tokens)
                     {
-                        let percent = tokens.saturating_mul(100) / window.max(1);
+                        let percent = crate::status::context_percent(window, tokens);
                         // `ctx` asked the reader to know the word. Say what the
                         // figure is — the conversation the model can still see
                         // — and let the hover carry the rest, because the row
@@ -3366,7 +3367,7 @@ impl Pane for SidebarPane {
                         );
                         if let Some(row) = self.hover_rows.last_mut() {
                             row.text = format!(
-                                "context {} of {} · {}% — the conversation the model can still read; compaction starts at 80%",
+                                "context {} of {} · {}% of the input ceiling — the conversation the model can still read; compaction runs before it is full",
                                 crate::status::compact_tokens(tokens),
                                 crate::status::compact_tokens(window),
                                 percent
