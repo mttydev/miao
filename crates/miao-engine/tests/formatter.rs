@@ -44,7 +44,9 @@ fn config() -> Config {
         argv,
         extensions: vec![".txt".into()],
         env: BTreeMap::new(),
-        timeout_ms: 5_000,
+        // PowerShell startup on a cold runner is seconds, so the fixture budget
+        // has to cover the spawn rather than only the write.
+        timeout_ms: 20_000,
     }
 }
 
