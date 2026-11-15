@@ -1258,18 +1258,30 @@ impl Composer {
         let draft = self.editor.take();
         let text = self.expand_pastes(&draft);
         let attachments = std::mem::take(&mut self.attachments);
+        self.clear_submitted();
+        self.record_history(&text);
+        self.history_index = None;
+        Action::Submit { text, attachments }
+    }
+
+    /// Empty the composer the way a submitted draft leaves it: the text, its
+    /// markers, the bytes and the paste payloads all go, because the prompt
+    /// that carried them is already out. The held-prompt resend shares this —
+    /// it sends through the app's `submit`, which has no `Composer::submit`
+    /// of its own to clear with, and a draft that stayed behind invited the
+    /// same prompt a second time.
+    pub fn clear_submitted(&mut self) {
+        self.editor.clear();
+        self.attachments.clear();
         self.attachment_markers.clear();
         self.next_image = 0;
         self.pastes.clear();
-        self.record_history(&text);
-        self.history_index = None;
         self.draft.clear();
         self.completion = Completion::default();
         // The offer was about the work this prompt now asks for. It comes back
         // only if the checklist still has something runnable once the turn
         // settles, so a submitted prompt never leaves stale work on screen.
         self.suggestion = None;
-        Action::Submit { text, attachments }
     }
 
     /// Replace every paste placeholder with the text it stands for.
