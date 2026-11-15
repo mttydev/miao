@@ -13,6 +13,7 @@ pub mod blob;
 pub mod branch_discipline;
 pub mod budget;
 mod cache_affinity;
+pub mod checkpoint;
 pub mod children;
 pub mod cli;
 pub mod codegraph;
