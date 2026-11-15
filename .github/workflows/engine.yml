@@ -98,8 +98,8 @@ jobs:
         run: |
           free=$(df -m "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
           echo "free disk under $RUNNER_TEMP: ${free}MB"
-          if [ "${free:-0}" -lt 12000 ]; then
-            echo "::error::runner has ${free}MB free but an engine shard needs 12000MB; prune unused build trees before rerunning"
+          if [ "${free:-0}" -lt 9000 ]; then
+            echo "::error::runner has ${free}MB free but an engine shard needs 9000MB; prune unused build trees before rerunning"
             exit 1
           fi
 

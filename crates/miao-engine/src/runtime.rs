@@ -3352,6 +3352,18 @@ async fn record_promotions(
     Ok(())
 }
 
+/// One identity per engine-internal continuation attempt. These wake the
+/// Session from the engine's own loops, and one run lives through several
+/// activations - the counter restarts with each activation while the store
+/// rows survive it, so a shared counter id let two activations race on one
+/// identity, and once a pause had cancelled the row the twin's re-admission
+/// surfaced as Error::Conflict and failed the whole run. A fresh suffix per
+/// attempt makes the race impossible; the monitor deliveries set the same
+/// precedent in #3028.
+fn continuation_input_id(kind: &str, run: &str, attempt: usize) -> String {
+    format!("{kind}:{run}:{attempt}:{}", uuid::Uuid::new_v4())
+}
+
 /// Inputs the engine admits on its own behalf. They are loop bookkeeping, so
 /// they never re-arm a blocked loop: the pause notice in particular used to
 /// wake the Session, restart the same unchanged drain, and emit an endless run
@@ -4513,7 +4525,8 @@ async fn execute(
                     }
                     if transport_continuations < 2 && allowance != Some(0) {
                         transport_continuations += 1;
-                        let input_id = format!("transport:{run}:{transport_continuations}");
+                        let input_id =
+                            continuation_input_id("transport", run, transport_continuations);
                         inner.store.admit(crate::protocol::Input {
 agent_references: Default::default(),
 command: None,
@@ -4607,7 +4620,7 @@ command: None,
                     // why the history it sees may be shorter than it remembers.
                     if overflow_recoveries < 1 {
                         overflow_recoveries += 1;
-                        let input_id = format!("overflow:{run}:{overflow_recoveries}");
+                        let input_id = continuation_input_id("overflow", run, overflow_recoveries);
                         inner
                             .store
                             .admit(crate::protocol::Input {
@@ -5972,7 +5985,7 @@ command: None,
                     }
                     goal_last = Some(std::time::Instant::now());
                     goal_iterations += 1;
-                    let input_id = format!("goal:{run}:{goal_iterations}");
+                    let input_id = continuation_input_id("goal", run, goal_iterations);
                     let admission = inner.store.admit(Input {
 agent_references: Default::default(),
 command: None,
@@ -6006,7 +6019,7 @@ command: None,
         {
             if empty_completions == 0 {
                 empty_completions += 1;
-                let input_id = format!("empty:{run}");
+                let input_id = continuation_input_id("empty", run, 0);
                 let admission = inner
                     .store
                     .admit(Input {
@@ -9594,6 +9607,28 @@ fn validate_agent(inner: &Inner, agent: &crate::session_agent::AgentManifest) ->
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod continuation_id_tests {
+    use super::*;
+
+    #[test]
+    fn every_self_continuation_attempt_gets_its_own_identity() {
+        // Two activations of one run restart the attempt counter, and a pause
+        // between them cancels the rows the first activation admitted. Shared
+        // ids turned that sequence into Error::Conflict, which failed the
+        // whole run; the fresh suffix per attempt is what keeps the second
+        // activation's admission independent.
+        let first = continuation_input_id("goal", "run-1", 1);
+        let second = continuation_input_id("goal", "run-1", 1);
+        assert_ne!(first, second);
+        assert!(first.starts_with("goal:run-1:1:"));
+        assert_ne!(
+            continuation_input_id("empty", "run-1", 0),
+            continuation_input_id("empty", "run-1", 0)
+        );
+    }
 }
 
 #[cfg(test)]

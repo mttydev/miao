@@ -34,7 +34,10 @@ async fn lost_ack_is_exact_retry_and_conflicts_do_not_change_history() {
         },
         input("one", Delivery::Queue),
     ] {
-        assert!(matches!(store.admit(conflict).await, Err(Error::Conflict)));
+        assert!(matches!(
+            store.admit(conflict).await,
+            Err(Error::AdmissionConflict(_))
+        ));
     }
     assert!(store.history("s").await.unwrap().is_empty());
     assert_eq!(store.events("s", 0, 100).await.unwrap().len(), 1);
@@ -95,7 +98,7 @@ async fn cancelling_a_pending_input_keeps_it_from_being_promoted_or_resurrected(
     // dead, so it can neither resurrect the prompt nor report a receipt.
     assert!(matches!(
         store.admit(input("drop", Delivery::Queue)).await,
-        Err(Error::Conflict)
+        Err(Error::AdmissionConflict(_))
     ));
     assert_eq!(store.promote("s", false).await.unwrap().len(), 1);
     assert!(store.promote("s", true).await.unwrap().is_empty());

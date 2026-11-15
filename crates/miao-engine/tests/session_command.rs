@@ -104,7 +104,7 @@ async fn command_admission_and_exact_retry_never_replay_substitution() {
     changed.command.as_mut().unwrap().arguments = "changed".into();
     assert!(matches!(
         runtime.admit(changed, true).await,
-        Err(Error::Conflict)
+        Err(Error::AdmissionConflict(_))
     ));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("workspace/marker")).unwrap(),

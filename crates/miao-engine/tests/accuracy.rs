@@ -300,7 +300,7 @@ async fn seeded_admission_sequences_preserve_delivery_and_exact_retry() {
                                 ..input
                             })
                             .await,
-                        Err(Error::Conflict)
+                        Err(Error::AdmissionConflict(_))
                     ));
                     assert_eq!(store.events("s", 0, 2000).await.unwrap().len(), cursor);
                     admitted.push(id.clone());

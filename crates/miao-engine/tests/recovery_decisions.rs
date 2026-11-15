@@ -292,7 +292,7 @@ async fn admission_conflict_rolls_back_the_decision_and_leaves_unknown_unresolve
         store
             .resolve_recovery("s", "call", "collision", Decision::Retry)
             .await,
-        Err(Error::Conflict)
+        Err(Error::AdmissionConflict(_))
     ));
     assert!(store.recoveries("s", "").await.unwrap()["calls"][0]["resolution"].is_null());
     assert!(!store

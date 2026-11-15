@@ -223,7 +223,7 @@ async fn attachment_is_part_of_the_admission_identity_and_validated() {
                 }],
             )
             .await,
-        Err(Error::Conflict)
+        Err(Error::AdmissionConflict(_))
     ));
     // An unsupported media type is rejected before admission.
     assert!(matches!(
@@ -280,7 +280,7 @@ async fn image_only_input_keeps_metadata_in_promotion_history_and_retry_identity
     .unwrap();
     assert!(matches!(
         reopened.admit_with(prompt, vec![changed]).await,
-        Err(Error::Conflict)
+        Err(Error::AdmissionConflict(_))
     ));
     let oversized: Attachment = serde_json::from_value(
         json!({"mime":"image/png","data":PNG,"metadata":{"name":"x".repeat(64 * 1024)}}),
