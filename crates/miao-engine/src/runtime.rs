@@ -388,6 +388,46 @@ fn input_ceiling(window: u64, declared: Option<u64>) -> u64 {
     window.saturating_sub(reserve)
 }
 
+/// The same limits the request bound uses, re-keyed to the input a turn can
+/// actually send. Every consumer — the request bound, the painted percentage
+/// and the compaction trigger — has to plan against this window, or a Session
+/// sits above what the endpoint will accept while the trigger still says
+/// `under_threshold`.
+fn ceiling_limits(limits: ContextLimits, declared_output: Option<u64>) -> ContextLimits {
+    let mut limits = limits;
+    limits.window = input_ceiling(limits.window, declared_output);
+    limits
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::{ceiling_limits, window_limits};
+
+    /// The trigger, the request bound and the painted percentage plan against
+    /// one number: the input a turn can actually send. This path used to keep
+    /// the raw window, so a 1M route whose requests could only carry 655,360
+    /// tokens armed compaction at 922,746 — above the wall — and a Session sat
+    /// at `under_threshold` until the endpoint refused it.
+    #[test]
+    fn the_trigger_plans_against_the_input_ceiling() {
+        let declared = ceiling_limits(window_limits(1_048_576), Some(393_216));
+        assert_eq!(declared.window, 655_360);
+        assert_eq!(declared.budget().threshold(), 576_716);
+        // The raw window would have armed at 922,746, which no request can
+        // reach: that gap is the bug this pins.
+        assert_eq!(window_limits(1_048_576).budget().threshold(), 922_746);
+    }
+
+    /// A route that declares no output capacity is not unlimited: the quarter
+    /// reserve still applies, so the trigger cannot arm past the ceiling.
+    #[test]
+    fn an_undeclared_capacity_still_leaves_the_trigger_below_the_window() {
+        let limits = ceiling_limits(window_limits(1_000_000), None);
+        assert_eq!(limits.window, 750_000);
+        assert_eq!(limits.budget().threshold(), 660_000);
+    }
+}
+
 fn window_limits(window: u64) -> ContextLimits {
     ContextLimits {
         window,
@@ -3995,18 +4035,9 @@ async fn execute(
             .lock()
             .await
             .output_for(model.as_deref().unwrap_or_default());
-        let bound = match resolve_limits(configured, declared, learned).map(|limits| {
-            let mut limits = limits;
-            // A turn has to leave room for its own output, so the trigger and
-            // the request bound plan against the input ceiling, never the raw
-            // window. `unwrap_or(0)` used to make "this route declares no
-            // capacity" read as "the whole window may be input": a 1M window
-            // then armed compaction at 880K while the dashboard divided by the
-            // 616K ceiling, so a session could sit above what a request can
-            // actually send and still be told `under_threshold`.
-            limits.window = input_ceiling(limits.window, declared_reserve);
-            limits
-        }) {
+        let bound = match resolve_limits(configured, declared, learned)
+            .map(|limits| ceiling_limits(limits, declared_reserve))
+        {
             Some(limits) => {
                 let counted = match inner.store.context_anchor(session).await? {
                     Some((counted, through)) => {
@@ -5373,7 +5404,19 @@ command: None,
             .await
             .context_limit_for(model.as_deref().unwrap_or_default());
         let learned = inner.learned_limits(model.as_deref()).await;
-        let limits = resolve_limits(configured, declared, learned);
+        // The trigger plans against the input a turn can actually send, the
+        // same window the request bound and the painted percentage use. This
+        // path resolved the raw window: a 1M route then armed compaction at
+        // 880K while a request could only send 870K, so the Session was told
+        // `under_threshold` every settled turn and reached the wall with the
+        // trigger still idle.
+        let declared_reserve = inner
+            .route_limits
+            .lock()
+            .await
+            .output_for(model.as_deref().unwrap_or_default());
+        let limits = resolve_limits(configured, declared, learned)
+            .map(|limits| ceiling_limits(limits, declared_reserve));
         if limits.is_none() && closed_answer && requested.is_none() {
             // Nothing states this Session's window, so there is nothing to plan
             // against and automatic compaction cannot run for it. Name the model:
