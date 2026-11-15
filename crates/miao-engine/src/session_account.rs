@@ -137,15 +137,12 @@ pub(crate) fn resolve(
         .map_err(|error| Error::Invalid(error.to_string()))?;
     let binding = match route {
         Some(route) => {
-            let variant = current.and_then(|binding| binding.variant.clone());
-            if variant
-                .as_ref()
-                .is_some_and(|variant| !route.variants.contains(variant))
-            {
-                return Err(Error::Invalid(
-                    "account route does not support the selected variant".into(),
-                ));
-            }
+            // A same-family route was checked against the pinned variant inside
+            // the provider. A fallback route is a different model: its variant
+            // list is the only question, and an unsupported one just drops.
+            let variant = current
+                .and_then(|binding| binding.variant.clone())
+                .filter(|variant| route.variants.contains(variant));
             Some(crate::session_model::Binding {
                 protocol: route.protocol,
                 model: route.model,
@@ -156,7 +153,7 @@ pub(crate) fn resolve(
         None if credential_id.is_none() && current.is_none() => None,
         None => {
             return Err(Error::Invalid(
-                "no registered account route for the selected model".into(),
+                "no models are served for this account here; store its key and restart miao so its routes load".into(),
             ))
         }
     };
