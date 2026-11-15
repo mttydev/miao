@@ -192,6 +192,41 @@ async fn wrong_typed_arguments_settle_a_result_that_names_the_expected_type() {
 }
 
 #[tokio::test]
+async fn unknown_fields_settle_a_result_that_names_the_field() {
+    // A model that mirrors a display-only field back into its write —
+    // `verified` rides every todo echo — used to get a bare "invalid tool
+    // input" and resent the same call trying to guess. The rejection names
+    // the field and where it sits.
+    let dir = tempfile::tempdir().unwrap();
+    let (url, _requests, server) = common::endpoint(vec![
+        (
+            200,
+            calls(&[(
+                "w1",
+                "todowrite",
+                r#"{"todos":[{"content":"wire it","status":"completed","priority":"high","verified":true}]}"#,
+            )]),
+        ),
+        (200, text("DONE")),
+    ])
+    .await;
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let runtime = runtime(store.clone(), &url, dir.path()).await;
+    runtime.admit(input("track it"), true).await.unwrap();
+    let result = settled_result(&store).await;
+    assert!(
+        result["content"]
+            .as_str()
+            .expect("result text")
+            .contains("invalid tool input: todowrite does not accept todos[0].verified"),
+        "unexpected rejection: {}",
+        result["content"]
+    );
+    server.await.unwrap();
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn oversized_tool_arguments_pause_the_drain_with_a_visible_reason() {
     std::env::set_var("MIAO_TOOL_INPUT_MAX_BYTES", "256");
     let dir = tempfile::tempdir().unwrap();
