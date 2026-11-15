@@ -5,11 +5,13 @@ import {
   type EngineSessionSummary,
 } from "@miao/app"
 import { Markdown } from "@miao/session-ui/markdown"
+import { Icon } from "@miao/ui/v2/icon"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { PinIcon, SendIcon, SparklesIcon, StopIcon, TrashIcon } from "./icons"
 
 /**
- * One local engine's Sessions and the conversation on the selected one, with
- * a WorkBuddy-style welcome screen while the Session has no turns yet.
+ * One local engine's Sessions and the conversation on the selected one, with a
+ * WorkBuddy-style welcome screen while the Session has no turns yet.
  *
  * This is deliberately not `AppInterface` yet. The shared renderer speaks the
  * HTTP API, while the shipped binary exposes the engine's own control plane;
@@ -21,24 +23,11 @@ type Turn = { role: "user" | "assistant" | "tool"; text: string }
 
 const SUGGESTIONS = ["分析一份调查数据", "创作一篇产品文档", "做一份深度研究", "写一份周报", "审查一段代码", "策划一个方案"]
 
-/** Copies one message's text; the label flips to a confirmation for a moment. */
-function CopyButton(props: { text: string }) {
-  const [copied, setCopied] = createSignal(false)
-  return (
-    <button
-      type="button"
-      class="mt-1 text-11-regular text-v2-text-text-muted opacity-0 transition-opacity hover:text-v2-text-text-base group-hover:opacity-100 focus:opacity-100"
-      onClick={() => {
-        void navigator.clipboard.writeText(props.text).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
-        })
-      }}
-    >
-      {copied() ? "已复制" : "复制"}
-    </button>
-  )
-}
+// The shell styles the window with an overlay title bar on macOS, so the
+// traffic lights sit on top of the web content and the top-left strip must
+// both clear them and act as the drag handle.
+const isMac = navigator.userAgent.includes("Macintosh")
+const titlebarInset = isMac ? "pt-12" : "pt-3"
 
 const isToday = (updatedAt: number) => {
   if (updatedAt === 0) return true
@@ -161,6 +150,26 @@ const running = (events: EngineEvent[]): boolean => {
   return false
 }
 
+/** Copies one message's text; the label flips to a confirmation for a moment. */
+function CopyButton(props: { text: string }) {
+  const [copied, setCopied] = createSignal(false)
+  return (
+    <button
+      type="button"
+      class="mt-1 inline-flex items-center gap-1 text-10-regular text-v2-text-text-faint opacity-0 transition-opacity hover:text-v2-text-text-base group-hover:opacity-100 focus:opacity-100"
+      onClick={() => {
+        void navigator.clipboard.writeText(props.text).then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        })
+      }}
+    >
+      <Icon name="outline-copy" size="small" />
+      {copied() ? "已复制" : "复制"}
+    </button>
+  )
+}
+
 export function SessionSurface(props: { url: string; token: string }) {
   const reader = createEngineReader({ url: props.url, token: props.token })
   const [sessions, setSessions] = createSignal<EngineSessionSummary[]>([])
@@ -190,8 +199,6 @@ export function SessionSurface(props: { url: string; token: string }) {
     ]
   })
 
-  let detach: (() => void) | undefined
-  let composer: HTMLTextAreaElement | undefined
   // Questions this window already answered; the effect below must not
   // re-answer the same question.requested on every repaint.
   const answered = new Set<string>()
@@ -220,6 +227,7 @@ export function SessionSurface(props: { url: string; token: string }) {
     }
   })
   let scroller: HTMLDivElement | undefined
+  let composer: HTMLTextAreaElement | undefined
 
   // Follow the tail while the reader is already near it; a scrollback the
   // operator is reading must not be dragged back down by a streamed delta.
@@ -234,6 +242,8 @@ export function SessionSurface(props: { url: string; token: string }) {
   })
 
   const fail = (cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))
+
+  let detach: (() => void) | undefined
 
   const open = async (session: EngineSessionSummary) => {
     detach?.()
@@ -277,6 +287,14 @@ export function SessionSurface(props: { url: string; token: string }) {
       .then(merge)
       .catch(fail)
     setLive(true)
+  }
+
+  const closeSelected = () => {
+    detach?.()
+    detach = undefined
+    setSelected(undefined)
+    setState(undefined)
+    setEvents([])
   }
 
   const newSession = async () => {
@@ -338,14 +356,6 @@ export function SessionSurface(props: { url: string; token: string }) {
     }
   }
 
-  const closeSelected = () => {
-    detach?.()
-    detach = undefined
-    setSelected(undefined)
-    setState(undefined)
-    setEvents([])
-  }
-
   const confirmDialog = async () => {
     const current = dialog()
     if (!current) return
@@ -364,13 +374,7 @@ export function SessionSurface(props: { url: string; token: string }) {
     }
     try {
       await reader.remove(current.session.id)
-      if (current.session.id === selected()) {
-        detach?.()
-        detach = undefined
-        setSelected(undefined)
-        setState(undefined)
-        setEvents([])
-      }
+      if (current.session.id === selected()) closeSelected()
       await refreshSessions()
     } catch (cause) {
       fail(cause)
@@ -443,11 +447,12 @@ export function SessionSurface(props: { url: string; token: string }) {
   // A Session that was cleared holds no turns but still holds a durable
   // history, so it keeps the conversation screen instead of falling back to
   // the first-run welcome — the same screen the TUI leaves after `/clear`.
+  // With no Session at all the window shows the welcome: that is the screen a
+  // first-time operator opens into.
   const welcome = () =>
-    selected() !== undefined &&
-    conversation().length === 0 &&
-    !running(events()) &&
-    !state()?.hasMessages
+    !selected() || (conversation().length === 0 && !running(events()) && !state()?.hasMessages)
+
+  const sendDisabled = () => (!draft().trim() && attached().length === 0) || busy()
 
   return (
     <div
@@ -460,37 +465,48 @@ export function SessionSurface(props: { url: string; token: string }) {
       }}
       onClick={() => setMenu(undefined)}
     >
-      <aside class="flex w-64 shrink-0 flex-col border-r border-v2-border-border-weak">
-        <div class="px-4 pb-2 pt-4">
-          <div class="text-15-medium">miao</div>
-          <div class="text-11-regular text-v2-text-text-muted">local engine</div>
+      <aside class={`flex w-[264px] shrink-0 flex-col border-r border-v2-border-border-weak ${titlebarInset}`}>
+        <div class="flex items-center gap-2.5 px-4 pb-3" data-tauri-drag-region={isMac}>
+          <span class="flex size-7 items-center justify-center rounded-lg bg-v2-background-bg-accent text-v2-text-text-inverse">
+            <SparklesIcon class="size-4" />
+          </span>
+          <span class="flex min-w-0 flex-col">
+            <span class="text-14-medium leading-5">miao</span>
+            <span class="text-10-regular leading-4 text-v2-text-text-faint">local engine</span>
+          </span>
         </div>
         <div class="px-3">
           <button
             type="button"
-            class="w-full rounded bg-v2-background-bg-layer-01 px-3 py-2 text-left text-13-medium hover:bg-v2-background-bg-layer-02"
+            class="flex w-full items-center gap-2 rounded-lg bg-v2-background-bg-accent px-3 py-2 text-left text-13-medium text-v2-text-text-inverse transition-opacity hover:opacity-90"
             onClick={() => void newSession()}
           >
-            + 新的任务
+            <Icon name="plus" size="small" />
+            新的任务
           </button>
-          <input
-            type="search"
-            class="mt-2 w-full rounded bg-v2-background-bg-layer-01 px-3 py-1.5 text-12-regular outline-none placeholder:text-v2-text-text-muted"
-            placeholder="搜索任务"
-            value={query()}
-            onInput={(event) => setQuery(event.currentTarget.value)}
-          />
+          <div class="relative mt-2">
+            <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-v2-icon-icon-muted">
+              <Icon name="magnifying-glass" size="small" />
+            </span>
+            <input
+              type="search"
+              class="w-full rounded-lg border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1.5 pl-8 pr-2 text-12-regular outline-none placeholder:text-v2-text-text-faint"
+              placeholder="搜索任务"
+              value={query()}
+              onInput={(event) => setQuery(event.currentTarget.value)}
+            />
+          </div>
         </div>
-        <div class="flex-1 overflow-y-auto pb-2">
+        <div class="min-h-0 flex-1 overflow-y-auto pb-2">
           <For each={groups()}>
             {(group) => (
               <Show when={group.rows.length > 0}>
-                <div class="px-4 pb-1 pt-3 text-10-medium tracking-wide text-v2-text-text-muted">{group.label}</div>
+                <div class="px-4 pb-1 pt-4 text-10-medium tracking-wide text-v2-text-text-faint">{group.label}</div>
                 <For each={group.rows}>
                   {(session) => (
                     <button
                       type="button"
-                      class="group mx-1 flex w-[calc(100%-0.5rem)] items-center justify-between gap-2 rounded px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-01"
+                      class="mx-2 flex w-[calc(100%-1rem)] items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-v2-background-bg-layer-01"
                       classList={{ "bg-v2-background-bg-layer-01": session.id === selected() }}
                       onClick={() => void open(session)}
                       onContextMenu={(event) => {
@@ -500,11 +516,11 @@ export function SessionSurface(props: { url: string; token: string }) {
                     >
                       <span class="flex min-w-0 flex-1 items-center gap-1.5">
                         <Show when={session.pinned}>
-                          <span class="shrink-0 text-10-regular text-v2-text-text-muted">置顶</span>
+                          <PinIcon class="size-3 shrink-0 text-v2-icon-icon-muted" />
                         </Show>
                         <span class="min-w-0 flex-1 truncate text-12-regular">{session.title}</span>
                       </span>
-                      <span class="shrink-0 text-10-regular text-v2-text-text-muted">{dayLabel(session.updatedAt)}</span>
+                      <span class="shrink-0 text-10-regular text-v2-text-text-faint">{dayLabel(session.updatedAt)}</span>
                     </button>
                   )}
                 </For>
@@ -512,10 +528,10 @@ export function SessionSurface(props: { url: string; token: string }) {
             )}
           </For>
           <Show when={groups().every((group) => group.rows.length === 0)}>
-            <p class="px-4 py-2 text-11-regular text-v2-text-text-muted">{query() ? "没有匹配的任务" : "暂无任务"}</p>
+            <p class="px-4 py-3 text-11-regular text-v2-text-text-faint">{query() ? "没有匹配的任务" : "暂无任务"}</p>
           </Show>
         </div>
-        <div class="border-t border-v2-border-border-weak px-4 py-3 text-11-regular text-v2-text-text-muted">
+        <div class="border-t border-v2-border-border-weak px-4 py-3 text-10-regular text-v2-text-text-faint">
           由本机 miao 引擎驱动
         </div>
       </aside>
@@ -523,16 +539,20 @@ export function SessionSurface(props: { url: string; token: string }) {
         <Show
           when={!welcome()}
           fallback={
-            <div class="flex flex-1 flex-col items-center justify-center px-8 pb-10">
-              <h1 class="text-32-medium">miao，我帮你</h1>
+            <div class={`flex min-h-0 flex-1 flex-col ${titlebarInset}`}>
+              <div class="flex min-h-0 flex-1 flex-col items-center justify-center px-8 pb-8">
+              <span class="mb-5 flex size-12 items-center justify-center rounded-2xl bg-v2-background-bg-accent text-v2-text-text-inverse shadow-sm">
+                <SparklesIcon class="size-6" />
+              </span>
+              <h1 class="text-24-medium">miao，我帮你</h1>
               <p class="mt-2 text-13-regular text-v2-text-text-muted">一句话交代任务，剩下的交给我</p>
-              <div class="mt-8 flex w-full max-w-3xl flex-col rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 shadow-sm transition-shadow focus-within:border-v2-text-text-muted focus-within:shadow-md">
+              <div class="mt-8 flex w-full max-w-2xl flex-col rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 shadow-sm transition-colors focus-within:border-v2-border-border-muted">
                 <textarea
                   ref={composer}
-                  class="max-h-48 min-h-24 w-full resize-none bg-transparent px-4 pt-3 text-13-regular outline-none"
+                  class="max-h-48 min-h-28 w-full resize-none bg-transparent px-4 pt-3.5 text-13-regular outline-none placeholder:text-v2-text-text-faint"
                   placeholder="今天帮你做些什么？"
                   value={draft()}
-                  rows={3}
+                  rows={4}
                   onInput={(event) => setDraft(event.currentTarget.value)}
                   onPaste={(event) => {
                     if (event.clipboardData?.files.length) {
@@ -548,15 +568,16 @@ export function SessionSurface(props: { url: string; token: string }) {
                     }
                   }}
                 />
-                <div class="flex items-center justify-between px-3 pb-3">
-                  <span class="text-11-regular text-v2-text-text-muted">Enter 发送 · Shift+Enter 换行</span>
+                <div class="flex items-center justify-between px-4 pb-3.5">
+                  <span class="text-11-regular text-v2-text-text-faint">Enter 发送 · Shift+Enter 换行</span>
                   <button
                     type="button"
-                    class="rounded-full bg-v2-text-text-base px-4 py-1.5 text-12-medium text-v2-background-bg-deep disabled:opacity-40"
-                    disabled={!draft().trim() || busy()}
+                    class="flex h-8 items-center gap-1.5 rounded-full bg-v2-background-bg-accent px-4 text-12-medium text-v2-text-text-inverse transition-opacity hover:opacity-90 disabled:opacity-40"
+                    disabled={sendDisabled()}
                     onClick={() => void submit(draft())}
                   >
                     {busy() ? "发送中" : "发送"}
+                    <SendIcon class="size-3.5" />
                   </button>
                 </div>
               </div>
@@ -565,7 +586,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                   {(suggestion) => (
                     <button
                       type="button"
-                      class="rounded-full border border-v2-border-border-weak px-3.5 py-1.5 text-12-regular transition-colors hover:border-v2-text-text-muted hover:bg-v2-background-bg-layer-01"
+                      class="rounded-full border border-v2-border-border-weak px-3.5 py-1.5 text-12-regular text-v2-text-text-muted transition-colors hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
                       onClick={() => void submit(suggestion)}
                     >
                       {suggestion}
@@ -573,161 +594,229 @@ export function SessionSurface(props: { url: string; token: string }) {
                   )}
                 </For>
               </div>
-              <div class="mt-auto pt-8 text-11-regular text-v2-text-text-muted">内容由 AI 生成，请核对重要信息</div>
+              </div>
+              <div class="pb-3 pt-2 text-center text-11-regular text-v2-text-text-faint">内容由 AI 生成，请核对重要信息</div>
             </div>
           }
         >
-          <header class="border-b border-v2-border-border-weak px-4 py-2">
-            <Show when={state()} fallback={<span class="text-12-regular text-v2-text-text-muted">选择一个任务</span>}>
+          <header
+            class={`flex h-12 shrink-0 items-center gap-2 border-b border-v2-border-border-weak px-4 ${isMac ? "pl-20" : ""}`}
+            data-tauri-drag-region={isMac}
+          >
+            <Show when={state()} fallback={<span class="text-12-regular text-v2-text-text-faint">选择一个任务</span>}>
               {(current) => (
-                <div class="flex items-baseline gap-3">
-                  <h1 class="truncate text-13-medium">{current().title}</h1>
-                  <span class="text-11-regular text-v2-text-text-muted">
-                    {identity(events()).model ? `${identity(events()).model} · ` : ""}
-                    {identity(events()).agent ? `${identity(events()).agent} · ` : ""}
-                    {current().visibleMessages} messages
-                    {current().pending ? ` · ${current().pending} pending` : ""}
-                    {current().approvals ? ` · ${current().approvals} approvals` : ""}
-                    {live() ? " · live" : ""}
-                  </span>
+                <div class="flex min-w-0 flex-1 items-center gap-2">
+                  <h1 class="min-w-0 truncate text-13-medium" data-tauri-drag-region={isMac}>
+                    {current().title}
+                  </h1>
+                  <Show when={identity(events()).model || identity(events()).agent}>
+                    <span class="hidden shrink-0 text-11-regular text-v2-text-text-faint lg:inline">
+                      {[identity(events()).model, identity(events()).agent].filter(Boolean).join(" · ")}
+                    </span>
+                  </Show>
+                  <Show when={current().pending > 0}>
+                    <span class="inline-flex shrink-0 items-center rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
+                      {current().pending} pending
+                    </span>
+                  </Show>
+                  <Show when={current().approvals > 0}>
+                    <span class="inline-flex shrink-0 items-center rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
+                      {current().approvals} approvals
+                    </span>
+                  </Show>
+                  <Show when={live()}>
+                    <span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
+                      <Icon name="status-active" size="small" />
+                      live
+                    </span>
+                  </Show>
                 </div>
               )}
             </Show>
           </header>
-          <div ref={scroller} class="flex-1 overflow-y-auto px-6 py-3">
-            <For each={conversation()}>
-              {(turn) => (
-                <Show
-                  when={turn.role === "user"}
-                  fallback={
-                    <Show
-                      when={turn.role === "assistant"}
-                      fallback={
-                        <div class="py-1 pl-1 text-11-regular text-v2-text-text-muted">
+          <div ref={scroller} class="min-h-0 flex-1 overflow-y-auto">
+            <div class="mx-auto w-full max-w-3xl px-6 py-4">
+              <For each={conversation()}>
+                {(turn) => (
+                  <Show
+                    when={turn.role === "user"}
+                    fallback={
+                      <Show
+                        when={turn.role === "assistant"}
+                        fallback={
+                          <div class="py-1.5 text-11-regular text-v2-text-text-faint">
+                            <Markdown text={turn.text} />
+                          </div>
+                        }
+                      >
+                        <div class="group py-2 pr-6 text-13-regular leading-relaxed">
                           <Markdown text={turn.text} />
+                          <CopyButton text={turn.text} />
                         </div>
-                      }
-                    >
-                      <div class="group py-2 pr-8 text-13-regular">
-                        <Markdown text={turn.text} />
-                        <CopyButton text={turn.text} />
+                      </Show>
+                    }
+                  >
+                    <div class="group flex flex-col items-end py-2">
+                      <div class="max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-v2-background-bg-layer-01 px-4 py-2.5 text-13-regular">
+                        {turn.text}
                       </div>
-                    </Show>
-                  }
-                >
-                  <div class="group flex flex-col items-end py-2">
-                    <div class="max-w-[80%] rounded-2xl bg-v2-background-bg-layer-01 px-4 py-2 text-13-regular whitespace-pre-wrap">
-                      {turn.text}
+                      <CopyButton text={turn.text} />
                     </div>
-                    <CopyButton text={turn.text} />
+                  </Show>
+                )}
+              </For>
+              <For each={toolRows(events())}>
+                {(row) => (
+                  <div class="py-0.5">
+                    <span class="inline-flex max-w-full items-center gap-1.5 rounded-md bg-v2-background-bg-layer-01 px-2 py-1 text-10-regular text-v2-text-text-muted">
+                      <span class="font-medium">{row.tool}</span>
+                      <span class="min-w-0 truncate opacity-70">{row.resource}</span>
+                    </span>
                   </div>
-                </Show>
-              )}
-            </For>
-            <For each={toolRows(events())}>
-              {(row) => (
-                <div class="flex items-center gap-2 py-1 pl-1 text-11-regular text-v2-text-text-muted">
-                  <span class="rounded border border-v2-border-border-weak px-1.5 py-0.5">tool</span>
-                  <span class="truncate">{row.tool}</span>
-                  <span class="min-w-0 flex-1 truncate opacity-70">{row.resource}</span>
+                )}
+              </For>
+              <Show when={streamingText(events())}>
+                {(text) => (
+                  <div class="py-2 pr-6 text-13-regular leading-relaxed">
+                    <Markdown text={text()} streaming={true} />
+                  </div>
+                )}
+              </Show>
+              <For each={failures(events())}>
+                {(reason) => (
+                  <div class="my-1 inline-flex items-center gap-1.5 rounded-lg bg-v2-background-bg-layer-01 px-2.5 py-1.5 text-11-regular text-v2-state-fg-danger">
+                    运行失败：{reason}
+                  </div>
+                )}
+              </For>
+              <Show when={running(events()) && !streamingText(events())}>
+                <div class="flex items-center gap-2 py-2 text-12-regular text-v2-text-text-faint">
+                  <span class="size-1.5 animate-pulse rounded-full bg-v2-background-bg-accent" />
+                  thinking…
                 </div>
-              )}
-            </For>
-            <Show when={streamingText(events())}>
-              {(text) => (
-                <div class="py-2 pr-8 text-13-regular">
-                  <Markdown text={text()} streaming={true} />
-                </div>
-              )}
-            </Show>
-            <For each={failures(events())}>
-              {(reason) => (
-                <div class="py-1 pl-1 text-11-regular text-v2-state-fg-danger">运行失败：{reason}</div>
-              )}
-            </For>
-            <Show when={running(events()) && !streamingText(events())}>
-              <div class="py-2 text-12-regular text-v2-text-text-muted">thinking…</div>
-            </Show>
+              </Show>
+            </div>
           </div>
           <Show when={error()}>
             {(message) => (
-              <div class="flex items-start gap-2 border-t border-v2-border-border-weak px-4 py-2 text-11-regular text-v2-state-fg-danger">
+              <div class="mx-4 mb-2 flex items-start gap-2 rounded-lg border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-3 py-2 text-11-regular text-v2-state-fg-danger">
                 <span class="min-w-0 flex-1 break-words" role="alert">{message()}</span>
-                <button type="button" class="shrink-0 opacity-70 hover:opacity-100" aria-label="关闭" onClick={() => setError(undefined)}>
-                  ×
+                <button
+                  type="button"
+                  class="shrink-0 opacity-70 hover:opacity-100"
+                  aria-label="关闭"
+                  onClick={() => setError(undefined)}
+                >
+                  <Icon name="xmark-small" size="small" />
                 </button>
               </div>
             )}
           </Show>
-          <div class="flex items-end gap-2 border-t border-v2-border-border-weak px-4 py-3">
-            <textarea
-              class="max-h-40 min-h-9 flex-1 resize-none rounded bg-v2-background-bg-layer-01 px-3 py-2 text-13-regular outline-none"
-              placeholder="继续这个任务…"
-              value={draft()}
-              rows={2}
-              onInput={(event) => setDraft(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault()
+          <div class="shrink-0 px-4 pb-1">
+            <div class="flex items-end gap-2 rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-3 py-2 transition-colors focus-within:border-v2-border-border-muted">
+              <textarea
+                class="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-1.5 text-13-regular outline-none placeholder:text-v2-text-text-faint"
+                placeholder="继续这个任务…"
+                value={draft()}
+                rows={2}
+                onInput={(event) => setDraft(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault()
+                    const sessionID = selected()
+                    if (sessionID && running(events())) void reader.cancel(sessionID).catch(fail)
+                    return
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault()
+                    void submit(draft())
+                  }
+                }}
+              />
+              <button
+                type="button"
+                class="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-12-medium transition-opacity hover:opacity-90 disabled:opacity-40"
+                classList={{
+                  "bg-v2-background-bg-accent text-v2-text-text-inverse": !running(events()),
+                  "border border-v2-border-border-weak text-v2-state-fg-danger": running(events()),
+                }}
+                disabled={!draft().trim() && !running(events())}
+                onClick={() => {
                   const sessionID = selected()
-                  if (sessionID && running(events())) void reader.cancel(sessionID).catch(fail)
-                  return
-                }
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault()
+                  if (running(events()) && sessionID) {
+                    void reader.cancel(sessionID).catch(fail)
+                    return
+                  }
                   void submit(draft())
-                }
-              }}
-            />
-            <button
-              type="button"
-              class="rounded-full px-4 py-2 text-12-medium disabled:opacity-40"
-              classList={{
-                "bg-v2-text-text-base text-v2-background-bg-deep": !running(events()),
-                "border border-v2-border-border-weak": running(events()),
-              }}
-              disabled={!draft().trim() && !running(events())}
-              onClick={() => {
-                const sessionID = selected()
-                if (running(events()) && sessionID) {
-                  void reader.cancel(sessionID).catch(fail)
-                  return
-                }
-                void submit(draft())
-              }}
-            >
-              {running(events()) ? "停止" : busy() ? "发送中" : "发送"}
-            </button>
+                }}
+              >
+                <Show
+                  when={!running(events())}
+                  fallback={
+                    <>
+                      <StopIcon class="size-3.5" />
+                      停止
+                    </>
+                  }
+                >
+                  <>
+                    {busy() ? "发送中" : "发送"}
+                    <SendIcon class="size-3.5" />
+                  </>
+                </Show>
+              </button>
+            </div>
           </div>
-          <div class="px-4 pb-2 text-right text-10-regular text-v2-text-text-muted">内容由 AI 生成，请核对重要信息</div>
+          <div class="shrink-0 pb-2 pt-1 text-center text-10-regular text-v2-text-text-faint">
+            内容由 AI 生成，请核对重要信息
+          </div>
         </Show>
       </main>
       <Show when={menu()}>
         {(current) => (
           <div
             role="menu"
-            class="fixed z-50 min-w-40 rounded-lg border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1 text-12-regular shadow-md"
+            class="fixed z-50 min-w-44 rounded-xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1 text-12-regular shadow-lg"
             style={{ left: `${current().x}px`, top: `${current().y}px` }}
             onClick={(event) => event.stopPropagation()}
           >
-            <button type="button" role="menuitem" class="block w-full px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02" onClick={() => void togglePin(current().session)}>
+            <button
+              type="button"
+              role="menuitem"
+              class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
+              onClick={() => void togglePin(current().session)}
+            >
+              <PinIcon class="size-3.5 text-v2-icon-icon-muted" />
               {current().session.pinned ? "取消置顶" : "置顶"}
             </button>
-            <button type="button" role="menuitem" class="block w-full px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02" onClick={() => renameSession(current().session)}>
+            <button
+              type="button"
+              role="menuitem"
+              class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
+              onClick={() => renameSession(current().session)}
+            >
+              <Icon name="edit" size="small" />
               重命名
             </button>
-            <button type="button" role="menuitem" class="block w-full px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02" onClick={() => void toggleArchive(current().session)}>
+            <button
+              type="button"
+              role="menuitem"
+              class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
+              onClick={() => void toggleArchive(current().session)}
+            >
+              <Icon name="archive" size="small" />
               {current().session.archived ? "恢复" : "归档"}
             </button>
             <button
               type="button"
               role="menuitem"
-              class="block w-full px-3 py-1.5 text-left text-v2-state-fg-danger hover:bg-v2-background-bg-layer-02"
+              class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-v2-state-fg-danger hover:bg-v2-background-bg-layer-02"
               onClick={() => {
                 setMenu(undefined)
                 setDialog({ kind: "delete", session: current().session, title: current().session.title })
               }}
             >
+              <TrashIcon class="size-3.5" />
               删除
             </button>
           </div>
@@ -735,9 +824,9 @@ export function SessionSurface(props: { url: string; token: string }) {
       </Show>
       <Show when={dialog()}>
         {(current) => (
-          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setDialog(undefined)}>
+          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDialog(undefined)}>
             <form
-              class="w-full max-w-sm rounded-xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 p-5 shadow-lg"
+              class="w-96 max-w-[calc(100vw-4rem)] rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-base p-5 shadow-xl"
               onClick={(event) => event.stopPropagation()}
               onSubmit={(event) => {
                 event.preventDefault()
@@ -749,7 +838,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                 fallback={
                   <>
                     <h2 class="text-14-medium">删除任务</h2>
-                    <p class="mt-2 text-12-regular text-v2-text-text-muted">
+                    <p class="mt-2 text-12-regular leading-relaxed text-v2-text-text-muted">
                       「{current().title}」及其全部消息、运行记录将被永久删除，且无法恢复。
                     </p>
                   </>
@@ -757,7 +846,7 @@ export function SessionSurface(props: { url: string; token: string }) {
               >
                 <h2 class="text-14-medium">重命名任务</h2>
                 <input
-                  class="mt-3 w-full rounded bg-v2-background-bg-deep px-3 py-2 text-13-regular outline-none"
+                  class="mt-3 w-full rounded-lg border border-v2-border-border-weak bg-v2-background-bg-deep px-3 py-2 text-13-regular outline-none focus:border-v2-border-border-muted"
                   value={current().title}
                   autofocus
                   onInput={(event) => {
@@ -767,15 +856,19 @@ export function SessionSurface(props: { url: string; token: string }) {
                 />
               </Show>
               <div class="mt-5 flex justify-end gap-2">
-                <button type="button" class="rounded-full px-4 py-1.5 text-12-medium hover:bg-v2-background-bg-layer-02" onClick={() => setDialog(undefined)}>
+                <button
+                  type="button"
+                  class="rounded-full px-4 py-1.5 text-12-medium text-v2-text-text-muted hover:bg-v2-background-bg-layer-02"
+                  onClick={() => setDialog(undefined)}
+                >
                   取消
                 </button>
                 <button
                   type="submit"
-                  class="rounded-full px-4 py-1.5 text-12-medium"
+                  class="rounded-full px-4 py-1.5 text-12-medium transition-opacity hover:opacity-90"
                   classList={{
-                    "bg-v2-state-fg-danger text-v2-background-bg-deep": current().kind === "delete",
-                    "bg-v2-text-text-base text-v2-background-bg-deep": current().kind === "rename",
+                    "border border-v2-border-border-weak text-v2-state-fg-danger": current().kind === "delete",
+                    "bg-v2-background-bg-accent text-v2-text-text-inverse": current().kind === "rename",
                   }}
                 >
                   {current().kind === "delete" ? "删除" : "保存"}

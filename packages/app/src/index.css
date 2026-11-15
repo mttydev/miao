@@ -1,4 +1,8 @@
 @import "@miao/ui/styles/tailwind";
+
+/* The desktop window's classes live outside the web app's tree; register
+   them explicitly so the scanner covers them wherever the checkout sits. */
+@source "../../../apps/desktop/src";
 @import "@miao/session-ui/styles";
 @import "@miao/ui/v2/styles/tailwind.css";
 @import "tw-animate-css";
