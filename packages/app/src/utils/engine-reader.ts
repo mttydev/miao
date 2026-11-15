@@ -1,4 +1,4 @@
-import { EngineHttpClient, type EngineEvent } from "@miao/client/engine"
+import { EngineHttpClient, type EngineEvent, type EngineProgress } from "@miao/client/engine"
 import {
   EngineSessionShapeError,
   catalogToSummaries,
@@ -32,6 +32,8 @@ export type EngineTransport = {
   request(method: string, params?: unknown): Promise<unknown>
   subscribe(session: string, after?: number): Promise<void>
   onEvent(handler: (event: EngineEvent) => void): void
+  /** Optional: older transports carry committed events only. */
+  onProgress?(handler: (event: EngineProgress) => void): void
   close(): Promise<void>
 }
 
@@ -49,6 +51,12 @@ export function createEngineReader(input: {
 }) {
   const transport = input.transport ?? new EngineHttpClient(input)
   const listeners = new Map<string, Set<(event: EngineEvent) => void>>()
+  const progressListeners = new Map<string, Set<(event: EngineProgress) => void>>()
+  transport.onProgress?.((event) => {
+    const sessionID = event.session_id
+    if (!sessionID) return
+    for (const listener of progressListeners.get(sessionID) ?? []) listener(event)
+  })
   const forwarded = new Set<string>()
 
   transport.onEvent((event) => {
@@ -128,6 +136,13 @@ export function createEngineReader(input: {
         attachments,
       })
     },
+    /** Attach to one Session's ephemeral progress frames (deltas, notices). */
+    subscribeProgress(sessionID: string, handler: (event: EngineProgress) => void) {
+      const set = progressListeners.get(sessionID) ?? new Set()
+      progressListeners.set(sessionID, set)
+      set.add(handler)
+      return () => set.delete(handler)
+    },
     /** Attach to one Session's committed events, replaying from `after`. */
     async subscribe(sessionID: string, handler: (event: EngineEvent) => void, after = 0) {
       const set = listeners.get(sessionID) ?? new Set()
@@ -164,6 +179,7 @@ export function createEngineReader(input: {
     },
     async close() {
       listeners.clear()
+      progressListeners.clear()
       forwarded.clear()
       await transport.close()
     },

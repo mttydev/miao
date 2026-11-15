@@ -102,24 +102,6 @@ const identity = (events: EngineEvent[]): { model?: string; agent?: string } => 
   return {}
 }
 
-/** The streamed answer in flight: deltas after the last committed assistant turn. */
-const streamingText = (events: EngineEvent[]): string => {
-  const sorted = [...events].sort((a, b) => a.seq - b.seq)
-  let cut = 0
-  for (const event of sorted)
-    if (event.kind === "message.committed" && (event.data as { role?: string })?.role === "assistant")
-      cut = event.seq
-  return sorted
-    .filter((event) => event.seq > cut && event.kind === "provider.delta")
-    .map((event) => {
-      const data = event.data
-      if (typeof data === "string") return data
-      const part = (data ?? {}) as Record<string, unknown>
-      return String(part.text ?? part.delta ?? "")
-    })
-    .join("")
-}
-
 /** Runs that ended failed, after the last committed answer. */
 const failures = (events: EngineEvent[]): string[] => {
   const sorted = [...events].sort((a, b) => a.seq - b.seq)
@@ -186,6 +168,7 @@ export function SessionSurface(props: { url: string; token: string }) {
   const [selected, setSelected] = createSignal<string>()
   const [state, setState] = createSignal<EngineSessionState>()
   const [events, setEvents] = createSignal<EngineEvent[]>([])
+  const [streaming, setStreaming] = createSignal("")
   const [live, setLive] = createSignal(false)
   const [error, setError] = createSignal<string>()
   const [draft, setDraft] = createSignal("")
@@ -257,6 +240,7 @@ export function SessionSurface(props: { url: string; token: string }) {
   const fail = (cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))
 
   let detach: (() => void) | undefined
+  let detachProgress: (() => void) | undefined
 
   const open = async (session: EngineSessionSummary) => {
     detach?.()
@@ -287,6 +271,13 @@ export function SessionSurface(props: { url: string; token: string }) {
         session.id,
         (event) => {
           if (event.seq > after) merge([event])
+          // A committed assistant turn (or a fresh run) retires the deltas
+          // that were streaming into the live bubble.
+          if (
+            event.kind === "run.started" ||
+            (event.kind === "message.committed" && (event.data as { role?: string })?.role === "assistant")
+          )
+            setStreaming("")
         },
         after,
       )
@@ -295,6 +286,11 @@ export function SessionSurface(props: { url: string; token: string }) {
         return undefined
       })
     detach = unsubscribe
+    detachProgress?.()
+    detachProgress = reader.subscribeProgress(session.id, (event) => {
+      if (event.kind === "text.delta" && typeof event.text === "string")
+        setStreaming((current) => current + event.text)
+    })
     await reader
       .events(session.id, after)
       .then(merge)
@@ -305,6 +301,9 @@ export function SessionSurface(props: { url: string; token: string }) {
   const closeSelected = () => {
     detach?.()
     detach = undefined
+    detachProgress?.()
+    detachProgress = undefined
+    setStreaming("")
     setSelected(undefined)
     setState(undefined)
     setEvents([])
@@ -467,6 +466,7 @@ export function SessionSurface(props: { url: string; token: string }) {
 
   onCleanup(() => {
     detach?.()
+    detachProgress?.()
     void reader.close()
   })
 
@@ -723,10 +723,15 @@ export function SessionSurface(props: { url: string; token: string }) {
                   </div>
                 )}
               </For>
-              <Show when={streamingText(events())}>
+              <Show when={streaming()}>
                 {(text) => (
-                  <div class="py-2 pr-6 text-13-regular leading-relaxed">
-                    <Markdown text={text()} streaming={true} />
+                  <div class="flex gap-3 py-2">
+                    <span class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-v2-background-bg-accent text-v2-text-text-inverse">
+                      <SparklesIcon class="size-3.5" />
+                    </span>
+                    <div class="min-w-0 flex-1 text-13-regular leading-relaxed">
+                      <Markdown text={text()} streaming={true} />
+                    </div>
                   </div>
                 )}
               </Show>
@@ -737,7 +742,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                   </div>
                 )}
               </For>
-              <Show when={running(events()) && !streamingText(events())}>
+              <Show when={running(events()) && !streaming()}>
                 <div class="flex items-center gap-2 py-2 text-12-regular text-v2-text-text-faint">
                   <span class="size-1.5 animate-pulse rounded-full bg-v2-background-bg-accent" />
                   {language.t("desktop.surface.transcript.thinking")}

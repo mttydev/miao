@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { EngineEvent } from "@miao/client/engine"
+import type { EngineEvent, EngineProgress } from "@miao/client/engine"
 import { createEngineReader, type EngineTransport } from "./engine-reader"
 
 // Captured from `session_catalog` on `miao serve` built from this tree.
@@ -33,6 +33,7 @@ function transport(result: Record<string, unknown>) {
   const calls: Array<{ method: string; params?: unknown }> = []
   const subscribed: string[] = []
   let onEvent: ((event: EngineEvent) => void) | undefined
+  let onProgress: ((event: EngineProgress) => void) | undefined
   const fake: EngineTransport = {
     request: async (method, params) => {
       calls.push({ method, params })
@@ -45,9 +46,18 @@ function transport(result: Record<string, unknown>) {
     onEvent: (handler) => {
       onEvent = handler
     },
+    onProgress: (handler) => {
+      onProgress = handler
+    },
     close: async () => {},
   }
-  return { fake, calls, subscribed, emit: (event: EngineEvent) => onEvent?.(event) }
+  return {
+    fake,
+    calls,
+    subscribed,
+    emit: (event: EngineEvent) => onEvent?.(event),
+    emitProgress: (event: EngineProgress) => onProgress?.(event),
+  }
 }
 
 describe("engine reader", () => {
@@ -113,6 +123,26 @@ describe("engine reader", () => {
         method: "select_model",
         params: { session_id: "ses_b", binding: { protocol: "openai-chat", model: "m1", route_id: "p/m1" } },
       })
+    } finally {
+      await reader.close()
+    }
+  })
+
+  test("fans progress frames out to the Session's progress subscribers", async () => {
+    const { fake, emitProgress } = transport({})
+    const reader = createEngineReader({ url: "http://127.0.0.1:4096", token: "t", transport: fake })
+    const deltas: string[] = []
+    const other: string[] = []
+    try {
+      const off = reader.subscribeProgress("ses_b", (event) => deltas.push(String(event.text ?? "")))
+      reader.subscribeProgress("ses_a", (event) => other.push(String(event.text ?? "")))
+      emitProgress({ session_id: "ses_b", kind: "text.delta", text: "he" })
+      emitProgress({ session_id: "ses_b", kind: "text.delta", text: "llo" })
+      emitProgress({ session_id: "ses_a", kind: "text.delta", text: "x" })
+      off()
+      emitProgress({ session_id: "ses_b", kind: "text.delta", text: "!" })
+      expect(deltas).toEqual(["he", "llo"])
+      expect(other).toEqual(["x"])
     } finally {
       await reader.close()
     }
