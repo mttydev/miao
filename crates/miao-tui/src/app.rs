@@ -1012,9 +1012,16 @@ impl App {
                         let count = self.shell.composer.attach_image(&mime, &data);
                         self.notice(&format!("attached image {count}"));
                         // A held prompt was waiting for exactly this picture:
-                        // once it lands, send what was held.
+                        // once it lands, send what was held. The send leaves
+                        // the composer like any submitted draft — the marker
+                        // went out with the text, so a draft that stayed behind
+                        // read as unsent and invited the prompt a second time.
+                        // `submit`'s refusals hand the draft back through
+                        // `restore_with`, so emptying first loses nothing.
                         if let Some((text, _attachments)) = self.held_prompt.take() {
-                            self.submit(text, self.shell.composer.attachments().to_vec());
+                            let attachments = self.shell.composer.attachments().to_vec();
+                            self.shell.composer.clear_submitted();
+                            self.submit(text, attachments);
                         }
                     }
                     Some(clipboard::Content::Text(text)) => {
@@ -6801,6 +6808,15 @@ mod tests {
         };
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0]["mime"], "image/png");
+        // The held prompt is a submitted draft: what went out must not stay
+        // on screen. A draft that remained read as unsent and invited the
+        // same prompt a second time, and the composer still held the bytes,
+        // so a later paste appended a second marker next to the first.
+        assert!(
+            app.shell.composer.editor.is_empty(),
+            "the draft must not survive its own send"
+        );
+        assert!(app.shell.composer.attachments().is_empty());
     }
 
     /// No picture on the clipboard: the hold blocks with a notice instead of
