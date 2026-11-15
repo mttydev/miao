@@ -501,9 +501,18 @@ fn evaluate(connection: &Connection, context: &Context, facts: &Request) -> Resu
 }
 
 pub(crate) fn classify(context: &Context, input: &Input) -> bool {
-    use crate::agent_classifier::{bash, host_edit, Verdict};
+    use crate::agent_classifier::{host_edit, Verdict};
+    // Only the Unix classifier is consulted, so the import follows it.
+    #[cfg(unix)]
+    use crate::agent_classifier::bash;
     match input.facts.actions.first().map(String::as_str) {
         Some("edit") => host_edit(&input.facts.resources, &context.authority.host) == Verdict::Safe,
+        // A shell string is only classifiable where the shell semantics the
+        // parser assumes hold. On Windows `git status` parses as safe while the
+        // command line it becomes is not the same thing (cmd/PowerShell quoting,
+        // builtins, drive-relative paths), so the arm is not compiled there and
+        // a `bash` action asks instead of settling itself.
+        #[cfg(unix)]
         Some("bash")
             if input
                 .metadata
