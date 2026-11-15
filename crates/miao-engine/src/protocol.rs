@@ -188,6 +188,11 @@ pub struct PeerReceipt {
 pub enum Error {
     #[error("input id conflicts with an existing admission")]
     Conflict,
+    /// The same rejection, carrying the id and the state it ran into. A bare
+    /// "input id conflicts" left every investigation guessing which producer
+    /// re-admitted what, so the run-failure journal could not name the cause.
+    #[error("input id conflicts with an existing admission: {0}")]
+    AdmissionConflict(String),
     #[error("runtime already owns this store")]
     Busy,
     #[error("session lease was superseded by another owner")]

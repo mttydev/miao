@@ -3898,7 +3898,10 @@ pub(crate) fn admit_input(
         // resurrect a prompt the operator dropped or report a receipt whose
         // prompt never runs, so it conflicts like any other reused identity.
         if state == "cancelled" {
-            return Err(Error::Conflict);
+            return Err(Error::AdmissionConflict(format!(
+                "{} exists as cancelled",
+                input.input_id
+            )));
         }
         if serde_json::to_value(crate::session_command::for_input(
             tx,
@@ -3906,12 +3909,18 @@ pub(crate) fn admit_input(
             &input.input_id,
         )?)? != serde_json::to_value(&input.command)?
         {
-            return Err(Error::Conflict);
+            return Err(Error::AdmissionConflict(format!(
+                "{} exists with a different command",
+                input.input_id
+            )));
         }
         if crate::session_agent::input_references(tx, session, &input.input_id)?
             != input.agent_references
         {
-            return Err(Error::Conflict);
+            return Err(Error::AdmissionConflict(format!(
+                "{} exists with different agent references",
+                input.input_id
+            )));
         }
         let stored = stored.clone().unwrap_or_else(|| "[]".into());
         if session != &input.session_id
@@ -3919,7 +3928,21 @@ pub(crate) fn admit_input(
             || mode != delivery
             || stored != serialized
         {
-            return Err(Error::Conflict);
+            return Err(Error::AdmissionConflict(format!(
+                "{} exists with a different {}",
+                input.input_id,
+                match (
+                    session != &input.session_id,
+                    prompt != &input.prompt,
+                    mode != delivery,
+                    stored != serialized
+                ) {
+                    (true, _, _, _) => "session",
+                    (_, true, _, _) => "prompt",
+                    (_, _, true, _) => "delivery mode",
+                    _ => "attachments",
+                }
+            )));
         }
     }
     tx.execute(
