@@ -341,3 +341,51 @@ async fn a_scope_that_cannot_be_honoured_exactly_is_refused_at_request_time() {
     ));
     runtime.shutdown().await;
 }
+
+/// `/clear` keeps the rows and writes an empty-summary checkpoint, so the
+/// history is still there for audit while the next provider prefix starts
+/// empty. The usage report a client paints its context row from has to follow
+/// that checkpoint instead of naming the occupancy of the conversation the
+/// clear removed.
+#[tokio::test]
+async fn an_explicit_clear_reports_an_empty_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store.ensure("s").await.unwrap();
+    store
+        .message("s", "user", json!([{"type":"text","text":"first ask"}]))
+        .await
+        .unwrap();
+    store
+        .message(
+            "s",
+            "assistant",
+            json!([{"type":"text","text":"first answer"}]),
+        )
+        .await
+        .unwrap();
+    store
+        .record(
+            "s",
+            "usage",
+            json!({
+                "run_id":"run-1","step":1,
+                "usage":{"inputTokens":10,"outputTokens":2},
+                "context_window":200_000,"context_tokens":120_000
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.usage_report("s").await.unwrap()["context"],
+        json!({"window":200_000,"tokens":120_000})
+    );
+
+    store.clear_history("s").await.unwrap();
+    let report = store.usage_report("s").await.unwrap();
+    assert_eq!(
+        report["context"],
+        json!({"window":200_000,"tokens":0}),
+        "a cleared Session holds an empty context, not the one it dropped"
+    );
+}

@@ -678,10 +678,32 @@ impl Transcript {
 impl Transcript {
     pub fn from_snapshot(snapshot: &Value) -> Self {
         let mut transcript = Transcript::default();
+        // An empty summary is the operator's explicit clear: the engine keeps the
+        // rows for audit but the provider prefix starts after that checkpoint, so
+        // the pane starts there too. Without the cut every re-projection — a
+        // transport resync, a quiet-frames recovery — rebuilt the whole
+        // conversation and the cleared turns came back. A summarising compaction
+        // carries text and keeps the transcript as it was.
+        let cut = snapshot
+            .get("selection")
+            .filter(|selection| selection.get("summary").and_then(Value::as_str) == Some(""))
+            .and_then(|selection| selection.get("through_seq"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        transcript.tail_seq = cut;
         let Some(messages) = snapshot.get("messages").and_then(Value::as_array) else {
             return transcript;
         };
         for message in messages {
+            // Only a message that carries a sequence can be on the cleared side
+            // of the cut; a projection without one is never dropped.
+            if message
+                .get("seq")
+                .and_then(Value::as_u64)
+                .is_some_and(|seq| seq <= cut)
+            {
+                continue;
+            }
             transcript.push_message(message);
         }
         transcript
@@ -1460,6 +1482,57 @@ mod tests {
         let mut transcript = Transcript::default();
         transcript.apply_event(9, "tool.completed", &json!({ "call_id": "run-1/call_1" }));
         assert!(transcript.displays.is_empty());
+    }
+
+    /// `/clear` writes an empty-summary checkpoint and keeps the rows. The
+    /// projection has to start after it, otherwise the next refresh repainted
+    /// every cleared turn.
+    #[test]
+    fn a_clear_checkpoint_cuts_the_projected_transcript() {
+        let mut transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "selection": { "through_seq": 4, "summary": "", "seq": 9 },
+            "messages": [
+                { "seq": 2, "role": "user", "content": "cleared ask" },
+                { "seq": 4, "role": "assistant", "content": [{ "type": "text", "text": "cleared answer" }] },
+                { "seq": 6, "role": "user", "content": "after the clear" }
+            ]
+        }));
+        assert_eq!(
+            transcript.entries,
+            vec![Entry::User {
+                text: "after the clear".into(),
+                seq: 6
+            }]
+        );
+        assert_eq!(transcript.tail_seq, 6);
+        // A failure from before the cut belongs to the cleared run, so it must
+        // not trail the empty transcript as if it had just happened.
+        transcript.apply_event(
+            3,
+            "stop_failure",
+            &json!({ "run_id": "run-1", "reason": "failed", "message": "provider unavailable" }),
+        );
+        transcript.push_failure();
+        assert!(!transcript
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Error { .. })));
+    }
+
+    /// A summarising compaction re-plans the provider prefix; it does not erase
+    /// what the operator is reading.
+    #[test]
+    fn a_summarising_checkpoint_keeps_the_projected_transcript() {
+        let transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "selection": { "through_seq": 4, "summary": "earlier work", "seq": 9 },
+            "messages": [
+                { "seq": 4, "role": "user", "content": "compacted ask" },
+                { "seq": 6, "role": "user", "content": "after it" }
+            ]
+        }));
+        assert_eq!(transcript.entries.len(), 2);
     }
 
     #[test]

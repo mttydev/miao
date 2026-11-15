@@ -4764,6 +4764,9 @@ impl Store {
             // provider turn. Older events are overwritten, so a compaction or
             // a trim shows up the next time a turn settles.
             let mut context = json!(null);
+            // The sequence of the usage event that set `context`. An explicit
+            // clear later in the journal supersedes that reading.
+            let mut context_seq = 0u64;
             let mut tokens = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0});
             let mut coverage = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0});
             let mut requests = 0u64;
@@ -4998,6 +5001,7 @@ impl Store {
                             (data["context_window"].as_u64(), data["context_tokens"].as_u64())
                         {
                             context = json!({"window":window,"tokens":counted});
+                            context_seq = row.get::<_, u64>(0)?;
                         }
                         for (field, key) in [
                             ("inputTokens", "input"),
@@ -5216,6 +5220,23 @@ impl Store {
                     "code": "noCacheReads",
                     "message": format!("no cache reads across {measured} turns; a route that supports prompt caching needs a stable prompt prefix and a supported cache key (prompt_cache_key)"),
                 }));
+            }
+            // An explicit clear checkpoints the history without deleting it, and
+            // the newest usage event still describes the conversation that clear
+            // removed. Once the clear is newer than that report, the Session's
+            // context is empty again: the window is still the model's, but the
+            // occupancy a client paints has to be zero until a turn reports.
+            if !context.is_null() {
+                let cleared: Option<u64> = conn
+                    .query_row(
+                        "SELECT created_seq FROM engine_compaction WHERE session_id=?1 AND summary='' ORDER BY created_seq DESC LIMIT 1",
+                        params![session],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if cleared.is_some_and(|cleared| cleared > context_seq) {
+                    context["tokens"] = json!(0);
+                }
             }
             Ok(json!({
                 "providerUsage":provider_usage.report(),

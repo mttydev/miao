@@ -1438,6 +1438,11 @@ impl App {
                 // The durable transcript stays for audit; the pane follows
                 // what the provider will see from now on, which is nothing.
                 self.shell.clear_transcript();
+                // The sidebar's context row reads the last turn's occupancy,
+                // which is exactly the conversation just cleared. The engine
+                // reports zero for a cleared Session, so ask again instead of
+                // leaving a full bar over an empty history.
+                self.request_usage(true);
                 self.notice("context cleared · the next prompt starts fresh");
             }
             AppEvent::Notice(message) => self.notice(&message),
