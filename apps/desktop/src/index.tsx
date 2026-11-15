@@ -1,4 +1,4 @@
-import { PlatformProvider, type Platform } from "@miao/app"
+import { LanguageProvider, loadInitialLocale, PlatformProvider, type Platform, useLanguage } from "@miao/app"
 import "@miao/app/index.css"
 import { ThemeProvider } from "@miao/ui/theme/context"
 import { Channel, invoke } from "@tauri-apps/api/core"
@@ -63,26 +63,31 @@ function Desktop() {
 }
 
 function StartupError(props: { message: string; onRetry: () => void }) {
+  const language = useLanguage()
   return (
     <div class="flex h-dvh flex-col items-center justify-center gap-4 bg-v2-background-bg-deep px-8 text-center text-v2-text-text-base">
-      <h1 class="text-15-medium">miao 没能启动本地引擎</h1>
+      <h1 class="text-15-medium">{language.t("desktop.surface.startup.title")}</h1>
       <p class="max-w-md text-12-regular text-v2-text-text-muted break-words">{props.message}</p>
       <button
         type="button"
         class="rounded-full bg-v2-background-bg-accent px-4 py-1.5 text-12-medium text-v2-text-text-inverse"
         onClick={props.onRetry}
       >
-        重试
+        {language.t("desktop.surface.action.retry")}
       </button>
     </div>
   )
 }
 
-render(
-  () => (
-    <ThemeProvider>
-      <Desktop />
-    </ThemeProvider>
-  ),
-  document.getElementById("root")!,
-)
+void loadInitialLocale().then((locale) => {
+  render(
+    () => (
+      <ThemeProvider>
+        <LanguageProvider locale={locale}>
+          <Desktop />
+        </LanguageProvider>
+      </ThemeProvider>
+    ),
+    document.getElementById("root")!,
+  )
+})
