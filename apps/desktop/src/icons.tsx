@@ -5,7 +5,7 @@ import type { Component, JSX } from "solid-js"
  * (send, stop, pin, trash, sparkles). Drawn in the same 24-grid stroke
  * style as @miao/ui's v2 icons so they sit next to them unnoticed.
  */
-function make(name: string, path: JSX.Element, filled = false): Component<{ class?: string }> {
+function make(name: string, paths: JSX.Element, filled = false): Component<{ class?: string }> {
   return (props) => (
     <svg
       viewBox="0 0 24 24"
@@ -15,12 +15,13 @@ function make(name: string, path: JSX.Element, filled = false): Component<{ clas
       aria-hidden="true"
       fill={filled ? "currentColor" : "none"}
       stroke={filled ? "none" : "currentColor"}
-      stroke-width="2"
+      stroke-width="2.5"
       stroke-linecap="round"
       stroke-linejoin="round"
       data-icon={name}
-      innerHTML={path as unknown as string}
-    />
+    >
+      {paths}
+    </svg>
   )
 }
 

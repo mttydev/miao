@@ -490,7 +490,7 @@ export function SessionSurface(props: { url: string; token: string }) {
             </span>
             <input
               type="search"
-              class="w-full rounded-lg bg-v2-background-bg-layer-01 py-1.5 pl-8 pr-2 text-12-regular outline-none placeholder:text-v2-text-text-faint"
+              class="w-full rounded-lg border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1.5 pl-8 pr-2 text-12-regular outline-none placeholder:text-v2-text-text-faint"
               placeholder="搜索任务"
               value={query()}
               onInput={(event) => setQuery(event.currentTarget.value)}
@@ -539,7 +539,8 @@ export function SessionSurface(props: { url: string; token: string }) {
         <Show
           when={!welcome()}
           fallback={
-            <div class={`flex flex-1 flex-col items-center justify-center px-8 ${titlebarInset} pb-8`}>
+            <div class={`flex min-h-0 flex-1 flex-col ${titlebarInset}`}>
+              <div class="flex min-h-0 flex-1 flex-col items-center justify-center px-8 pb-8">
               <span class="mb-5 flex size-12 items-center justify-center rounded-2xl bg-v2-background-bg-accent text-v2-text-text-inverse shadow-sm">
                 <SparklesIcon class="size-6" />
               </span>
@@ -593,7 +594,8 @@ export function SessionSurface(props: { url: string; token: string }) {
                   )}
                 </For>
               </div>
-              <div class="mt-auto pt-10 text-11-regular text-v2-text-text-faint">内容由 AI 生成，请核对重要信息</div>
+              </div>
+              <div class="pb-3 pt-2 text-center text-11-regular text-v2-text-text-faint">内容由 AI 生成，请核对重要信息</div>
             </div>
           }
         >

@@ -33,7 +33,7 @@ function awaitInitialization() {
   // Outside the shell (plain `vite dev` in a browser) there is no sidecar to
   // await; hand the surface a dead URL so the UI still renders for design work.
   if (import.meta.env.DEV && !isTauri)
-    return Promise.resolve<ServerReadyData>({ url: "http://127.0.0.1:4999", username: null, password: null })
+    return Promise.resolve<ServerReadyData>({ url: "http://127.0.0.1:4999", username: null, password: "dev" })
   return invoke<ServerReadyData>("await_initialization", { events: new Channel() })
 }
 
