@@ -1,5 +1,6 @@
 import { PlatformProvider, type Platform } from "@miao/app"
 import "@miao/app/index.css"
+import { ThemeProvider } from "@miao/ui/theme/context"
 import { Channel, invoke } from "@tauri-apps/api/core"
 import { open } from "@tauri-apps/plugin-dialog"
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification"
@@ -26,7 +27,13 @@ const platform: Platform = {
     open({ directory: true, multiple: options?.multiple ?? false, title: options?.title }),
 }
 
+const isTauri = "__TAURI_INTERNALS__" in window
+
 function awaitInitialization() {
+  // Outside the shell (plain `vite dev` in a browser) there is no sidecar to
+  // await; hand the surface a dead URL so the UI still renders for design work.
+  if (import.meta.env.DEV && !isTauri)
+    return Promise.resolve<ServerReadyData>({ url: "http://127.0.0.1:4999", username: null, password: null })
   return invoke<ServerReadyData>("await_initialization", { events: new Channel() })
 }
 
@@ -41,10 +48,7 @@ function Desktop() {
     <Show
       when={ready.latest}
       fallback={
-        <Show
-          when={!ready.error}
-          fallback={<StartupError message={failure()} onRetry={() => void refetch()} />}
-        >
+        <Show when={!ready.error} fallback={<StartupError message={failure()} onRetry={() => void refetch()} />}>
           <div class="h-dvh bg-v2-background-bg-deep" />
         </Show>
       }
@@ -62,10 +66,10 @@ function StartupError(props: { message: string; onRetry: () => void }) {
   return (
     <div class="flex h-dvh flex-col items-center justify-center gap-4 bg-v2-background-bg-deep px-8 text-center text-v2-text-text-base">
       <h1 class="text-15-medium">miao 没能启动本地引擎</h1>
-      <p class="max-w-md text-12-regular text-v2-text-text-weak break-words">{props.message}</p>
+      <p class="max-w-md text-12-regular text-v2-text-text-muted break-words">{props.message}</p>
       <button
         type="button"
-        class="rounded-full bg-v2-text-text-base px-4 py-1.5 text-12-medium text-v2-background-bg-deep"
+        class="rounded-full bg-v2-background-bg-accent px-4 py-1.5 text-12-medium text-v2-text-text-inverse"
         onClick={props.onRetry}
       >
         重试
@@ -74,4 +78,11 @@ function StartupError(props: { message: string; onRetry: () => void }) {
   )
 }
 
-render(() => <Desktop />, document.getElementById("root")!)
+render(
+  () => (
+    <ThemeProvider>
+      <Desktop />
+    </ThemeProvider>
+  ),
+  document.getElementById("root")!,
+)
