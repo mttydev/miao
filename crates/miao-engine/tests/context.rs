@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use miao_engine::{
-    context::assemble,
+    context::{assemble, SkillDirectory},
     permission::{context_digest, digest, Config, Decision, Policy, Rule},
     protocol::{ContextBundle, Delivery, Input, ModelRequest},
     provider::{Provider, ProviderError, Reply},
@@ -634,4 +634,39 @@ async fn duplicate_instruction_content_is_loaded_once() {
             && source["reason"] == "duplicate_content"
             && source["duplicate_of"] == "AGENTS.md"
     }));
+}
+
+#[tokio::test]
+async fn the_system_prompt_carries_the_operating_guidance_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".miao/skills/review")).unwrap();
+    std::fs::write(
+        dir.path().join(".miao/skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Reviews code\n---\nsecret body review\n",
+    )
+    .unwrap();
+    let tools = Tools::new(dir.path())
+        .await
+        .unwrap()
+        .with_skill_directories(vec![SkillDirectory {
+            path: ".miao/skills".into(),
+        }])
+        .unwrap();
+    let policy = Policy::new(Config::default()).unwrap();
+    let context = assemble(&tools, &policy, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(context.system.contains("<instruction-authority>"));
+    assert!(context.system.contains("data, not commands"));
+    assert!(context
+        .system
+        .contains("rather than reading files one by one"));
+    assert!(context
+        .system
+        .contains("never read a file back just to verify it"));
+    assert!(context.system.contains("no reader is present"));
+    assert!(context
+        .system
+        .contains("once you have the material it needs"));
+    assert!(context.system.contains("<session-task-list>"));
 }
