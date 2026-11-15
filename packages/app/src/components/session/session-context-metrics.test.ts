@@ -67,6 +67,26 @@ describe("getSessionContext", () => {
     expect(ctx?.modelLabel).toBe("GPT-4.1")
   })
 
+  // The engine's `contextBudget` is the number every surface has to agree on:
+  // its window is the input ceiling a request can send and its input is the
+  // counted occupancy. Summing message tokens against the raw catalog window
+  // read 100% where the TUI read 16% for the same Session.
+  test("prefers the engine's context budget over summed message tokens", () => {
+    const messages = [
+      {
+        ...assistant("a1", { input: 108_800, output: 1_900, reasoning: 0, read: 100_000, write: 0 }, 0.1),
+        contextBudget: { input: 108_800, window: 655_360, limit: 1_048_576 },
+      } as unknown as Message,
+    ]
+    const providers = [{ id: "openai", name: "OpenAI", models: { "gpt-4.1": { limit: { context: 128_000 } } } }]
+
+    const ctx = getSessionContext(messages, providers)
+
+    expect(ctx?.limit).toBe(655_360)
+    expect(ctx?.total).toBe(108_800)
+    expect(ctx?.usage).toBe(16)
+  })
+
   test("preserves fallback labels and null usage when model metadata is missing", () => {
     const messages = [assistant("a1", { input: 40, output: 10, reasoning: 0, read: 0, write: 0 }, 0.1, "p-1", "m-1")]
     const providers = [{ id: "p-1", models: {} }]

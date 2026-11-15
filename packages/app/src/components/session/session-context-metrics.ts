@@ -19,6 +19,17 @@ type ContextMessage = {
   providerID: string
   modelID: string
   tokens: AssistantMessage["tokens"]
+  /**
+   * The occupancy and the input ceiling the engine planned the turn against.
+   * When present this is the number every surface must agree on: the window
+   * already excludes the output the turn reserves, and the input is the
+   * provider-counted occupancy rather than a sum of token buckets.
+   */
+  contextBudget?: {
+    readonly input: number
+    readonly window: number
+    readonly limit?: number
+  }
   time: { created: number | null; completed?: number }
 }
 
@@ -52,8 +63,14 @@ const build = (messages: readonly ContextMessage[] = [], providers: Provider[] =
 
   const provider = providers.find((item) => item.id === message.providerID)
   const model = provider?.models[message.modelID]
-  const limit = model?.limit.context
-  const total = tokenTotal(message)
+  // The engine's own budget wins: its window is the input ceiling a request
+  // can actually send, and its input is the counted occupancy. Summing message
+  // tokens against the raw catalog window double-counted cached input and
+  // divided by a window no request could fill, so the same Session read 16% in
+  // the TUI and 100% here.
+  const budget = message.contextBudget
+  const limit = budget?.window ?? model?.limit.context
+  const total = budget?.input ?? tokenTotal(message)
 
   return {
     message,
@@ -64,7 +81,9 @@ const build = (messages: readonly ContextMessage[] = [], providers: Provider[] =
     limit,
     input: message.tokens.input,
     total,
-    usage: limit ? Math.round((total / limit) * 100) : null,
+    // Floor, the way the TUI's `context_percent` does: the same occupancy
+    // must not read 17% in one surface and 16% in the other.
+    usage: limit ? Math.floor((total / limit) * 100) : null,
   }
 }
 
@@ -85,6 +104,15 @@ export function getSessionContextFromRecords(records: SessionMessageInfo[] = [],
               providerID: record.model?.providerID ?? "",
               modelID: record.model?.id ?? "",
               tokens: record.tokens,
+              ...(record.contextBudget
+                ? {
+                    contextBudget: {
+                      input: record.contextBudget.input,
+                      window: record.contextBudget.window,
+                      limit: record.contextBudget.limit,
+                    },
+                  }
+                : {}),
               time: record.time,
             },
           ]
