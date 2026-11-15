@@ -25,6 +25,19 @@ fn composer_column(width: u16) -> u16 {
     width
 }
 
+/// Width of the column the footer band is painted in.
+///
+/// The queue rows, the input and the status strip belong to the conversation:
+/// painted at the window's width, a long queued prompt and the build at the
+/// row's right edge ran under the sidebar's rule. With the sidebar hidden the
+/// whole window is the column.
+fn footer_column(width: u16, sidebar_hidden: bool) -> u16 {
+    match sidebar_hidden {
+        true => width,
+        false => body_columns(Rect::new(0, 0, width, 1)).0.width,
+    }
+}
+
 /// Where the body splits between the transcript and the sidebar.
 ///
 fn body_columns(area: Rect) -> (Rect, Option<Rect>) {
@@ -527,6 +540,14 @@ impl Shell {
         // Prompts the engine still holds un-promoted sit straight above the
         // input: the queue depth in the title says how many, these rows say
         // what they are, where the operator typed them.
+        // The three rows under the transcript are painted in the conversation's
+        // column: the sidebar owns the right column, so a queued prompt, the box
+        // and the status strip stop at its rule instead of running under it.
+        let column_width = footer_column(frame.area().width, self.sidebar_hidden);
+        let footer = |area: Rect| Rect {
+            width: area.width.min(column_width),
+            ..area
+        };
         let queued_height = queued_rows(&self.transcript.pending_prompts) as u16;
         let [body_area, panel_area, queued_area, composer_area, status_area] = Layout::vertical([
             Constraint::Min(1),
@@ -534,7 +555,7 @@ impl Shell {
             Constraint::Length(queued_height),
             Constraint::Length(composer_height(
                 &self.composer,
-                composer_column(frame.area().width),
+                composer_column(column_width),
                 frame.area().height,
             )),
             Constraint::Length(1),
@@ -553,9 +574,22 @@ impl Shell {
         if let Some(panel) = self.panel.as_ref() {
             panel.render(frame, panel_area, &self.transcript.theme);
         }
+        // The band under the sidebar keeps the page background across the whole
+        // row: painting it only where the content narrowed left the rest of the
+        // last rows at the terminal's default colour.
+        if sidebar_area.is_some() {
+            frame.render_widget(
+                Paragraph::new("").style(Style::new().bg(self.transcript.theme.palette.background)),
+                Rect {
+                    y: queued_area.y,
+                    height: queued_area.height + composer_area.height + status_area.height,
+                    ..frame.area()
+                },
+            );
+        }
         render_queued(
             frame,
-            queued_area,
+            footer(queued_area),
             &self.transcript.pending_prompts,
             &self.transcript.theme,
         );
@@ -567,23 +601,32 @@ impl Shell {
         if self.transcript.pending_prompts.is_empty() {
             self.queued.clear();
         } else {
-            self.queued.snapshot(frame, queued_area);
+            self.queued.snapshot(frame, footer(queued_area));
             self.queued.paint(frame);
         }
-        // The input spans the whole window width, covering the sidebar's bottom
-        // band the way the layout draws it: the sidebar's content ends high, and
-        // a prose-width input left that band looking cut off.
-        self.composer_text =
-            render_composer(frame, composer_area, &self.composer, &self.transcript.theme);
+        self.composer_text = render_composer(
+            frame,
+            footer(composer_area),
+            &self.composer,
+            &self.transcript.theme,
+        );
         match &self.leader_hint {
-            Some(menu) => frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    fit_chords(menu, status_area.width as usize),
-                    Style::new().fg(self.transcript.theme.palette.primary),
-                ))),
-                status_area,
+            Some(menu) => {
+                let hint_area = footer(status_area);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        fit_chords(menu, hint_area.width as usize),
+                        Style::new().fg(self.transcript.theme.palette.primary),
+                    ))),
+                    hint_area,
+                )
+            }
+            None => render_status(
+                frame,
+                footer(status_area),
+                &self.status,
+                &self.transcript.theme,
             ),
-            None => render_status(frame, status_area, &self.status, &self.transcript.theme),
         }
     }
 }
@@ -6386,6 +6429,62 @@ mod tests {
         assert!(queued < input, "the queue sits above the input");
     }
 
+    /// The queue, the input and the status strip belong to the conversation's
+    /// column. Painted at the window's width, a long queued prompt and the build
+    /// at the row's right edge ran under the sidebar's rule — the footer read as
+    /// crossing into the sidebar.
+    #[test]
+    fn the_footer_band_stops_at_the_sidebar_rule() {
+        let theme = home_theme();
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.set_pending_prompts(&[
+            "a queued prompt long enough to reach the sidebar when the band is painted at the window's width, and then some more".to_string(),
+        ]);
+        let width = 160u16;
+        let column = footer_column(width, false);
+        assert!(
+            column < width - 1,
+            "the sidebar takes columns from the band"
+        );
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24))
+            .expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rows = buffer.content.chunks(width as usize).collect::<Vec<_>>();
+        let text = |row: &[ratatui::buffer::Cell]| {
+            row.iter().map(|cell| cell.symbol()).collect::<String>()
+        };
+        let queued = rows
+            .iter()
+            .position(|row| text(row).contains("long enough to reach"))
+            .expect("the queued prompt is painted");
+        // The queue row and the status row live left of the sidebar's rule.
+        for (y, row) in [
+            (queued, rows[queued]),
+            (rows.len() - 1, rows[rows.len() - 1]),
+        ] {
+            for (x, cell) in row.iter().enumerate().skip(column as usize) {
+                assert_eq!(
+                    cell.symbol(),
+                    " ",
+                    "row {y} column {x} paints {:?} inside the sidebar's column",
+                    cell.symbol()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_footer_column_is_the_whole_window_without_a_sidebar() {
+        assert_eq!(footer_column(160, true), 160);
+        assert_eq!(footer_column(160, false), 160 - SIDEBAR_WIDTH - 1);
+        assert_eq!(
+            footer_column(80, false),
+            80,
+            "a window too narrow for the sidebar keeps the whole row"
+        );
+    }
+
     /// Paint the composer into a fixed frame and read its rows back as strings.
     fn paint_composer(
         composer: &crate::editor::Composer,
@@ -6853,11 +6952,11 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_frame_paints_the_input_across_the_whole_window() {
-        // The composer is a named box spanning the window, so its top edge
-        // starts at the first column and ends at the last: the sidebar's bottom
-        // band is covered rather than left looking cut off beside a
-        // prose-width input.
+    fn a_wide_frame_closes_the_input_box_at_the_sidebar_rule() {
+        // The composer is a named box inside the conversation's column: it opens
+        // on the window's first column and closes on that column's last one,
+        // because the sidebar owns everything to its right. Painted corner to
+        // corner it ran under the sidebar's rule and read as crossing into it.
         let theme = Theme {
             name: crate::theme::DEFAULT_THEME.to_string(),
             palette: crate::theme::builtin(
@@ -6881,10 +6980,19 @@ mod tests {
                     .contains("Ask anything")
             })
             .expect("the composer is painted");
-        // The top border spans the whole window, corner to corner.
+        let column = footer_column(200, false) as usize;
         let top = &rows[placeholder - 1];
         assert_eq!(top[0].symbol(), "┌", "the box opens on the window's edge");
-        assert_eq!(top[199].symbol(), "┐", "and closes on the other edge");
+        assert_eq!(
+            top[column - 1].symbol(),
+            "┐",
+            "and closes at the conversation column's last cell"
+        );
+        assert_ne!(
+            top[199].symbol(),
+            "┐",
+            "the sidebar's column is not the box's to close"
+        );
     }
 
     /// The composer must start on the same column as the text it answers. It
