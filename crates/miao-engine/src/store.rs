@@ -151,6 +151,9 @@ pub struct Store {
     closed: watch::Receiver<()>,
     runtime_owner: Arc<AtomicBool>,
     path: Arc<std::path::PathBuf>,
+    /// Cached usage reports per Session: `(last_event_seq, report)`. A report
+    /// is only recomputed when new usage-bearing events appear.
+    usage_cache: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, (u64, Value)>>>,
 }
 
 pub(crate) struct RuntimeLease {
@@ -215,6 +218,9 @@ impl Store {
             work,
             closed,
             runtime_owner: Arc::new(AtomicBool::new(false)),
+            usage_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeMap::new(),
+            )),
             path: Arc::new(path),
         })
     }
@@ -639,6 +645,9 @@ impl Store {
             work,
             closed,
             runtime_owner: Arc::new(AtomicBool::new(false)),
+            usage_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeMap::new(),
+            )),
             path: Arc::new(path),
         })
     }
@@ -4754,8 +4763,36 @@ impl Store {
     }
 
     pub async fn usage_report(&self, session: &str) -> Result<Value, Error> {
+        // A report that would scan the same events returns the same result:
+        // skip the scan when the journal has not grown since the last call.
+        // The sidebar refreshes on a throttle while a turn runs, and each of
+        // those refreshes used to re-parse the whole journal.
+        let cached = {
+            let cache = self.usage_cache.lock().expect("usage cache lock");
+            cache
+                .get(session)
+                .map(|(seq, report)| (*seq, report.clone()))
+        };
+        if let Some((last_seq, report)) = cached {
+            let probe = session.to_owned();
+            let stale = self
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM engine_event WHERE session_id=?1 AND seq>?2)",
+                        rusqlite::params![probe, last_seq],
+                        |row| row.get::<_, i64>(0).map(|v| v != 0),
+                    )
+                    .map_err(Error::from)
+                })
+                .await
+                .unwrap_or(true);
+            if !stale {
+                return Ok(report);
+            }
+        }
         let session = session.to_owned();
-        self.call(move |conn| {
+        let probe = session.clone();
+        let report = self.call(move |conn| {
             let mut turns = 0u64;
             let mut partial_turns = 0u64;
             // The newest usage event that carried the window the turn was
@@ -5318,7 +5355,24 @@ impl Store {
                 // already reads for spend instead of replaying the gate.
                 "budget": budget,
             }))
-        }).await
+        }).await?;
+        let cache_key = probe.clone();
+        let max_seq: u64 = self
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COALESCE(MAX(seq), 0) FROM engine_event WHERE session_id=?1",
+                    rusqlite::params![probe],
+                    |row| row.get::<_, i64>(0).map(|v| v as u64),
+                )
+                .map_err(Error::from)
+            })
+            .await
+            .unwrap_or(0);
+        self.usage_cache
+            .lock()
+            .expect("usage cache lock")
+            .insert(cache_key, (max_seq, report.clone()));
+        Ok(report)
     }
 
     /// Billed usage by whole hour, for a window ending with the current hour.
