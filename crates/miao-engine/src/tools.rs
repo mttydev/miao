@@ -1705,7 +1705,14 @@ impl Tools {
             // path would be rejected by `permission::assess`'s boundary check, so
             // the resource is `@reference/<path>` and policy can target
             // `@reference/**`.
-            format!("@reference{}", path.to_string_lossy().replace('\\', "/"))
+            // A namespaced resource is not a filesystem path: the Windows
+            // verbatim prefix would sit inside the name (`//?/C:/…`) and a
+            // policy rule written as `@reference/**` would then be matched
+            // against a `?` segment. Name it the way every other resource is
+            // named.
+            let text = path.to_string_lossy();
+            let text = text.strip_prefix(crate::runtime::VERBATIM).unwrap_or(&text);
+            format!("@reference{}", text.replace('\\', "/"))
         } else if name == "cron_create" || name == "cron_list" {
             "@session/cron".into()
         } else if name == "cron_delete" {
