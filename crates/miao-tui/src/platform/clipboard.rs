@@ -11,10 +11,13 @@ use std::process::{Command, Stdio};
 
 use base64::Engine;
 
-/// An image paste is served only while it is fresh: an empty bracketed paste
-/// on a terminal without image support would otherwise re-serve the previous
-/// image forever.
-const HOST_CLIPBOARD_MAX_AGE_MS: u128 = 10_000;
+/// An image paste is served once per picture. The host rewrites the handoff
+/// file on every paste, and the file is no longer deleted after a read: deleting
+/// it made the second screenshot depend on the platform fallback (`osascript`
+/// inside a pane the host may sandbox), and a refused fallback looked like the
+/// paste doing nothing at all. Identity, not age, is what keeps a repeated empty
+/// paste from attaching one picture twice.
+static LAST_HANDOFF: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
@@ -100,7 +103,7 @@ pub fn copy_command(
 }
 
 /// Read the clipboard, preferring an image. `host_file` is the mtty handoff
-/// path (`MTTY_CLIPBOARD_FILE`); it is consumed on every read.
+/// path (`MTTY_CLIPBOARD_FILE`); each picture is served once.
 pub fn read(host_file: Option<&Path>) -> Option<Content> {
     if let Some(content) = read_host_image(host_file) {
         return Some(content);
@@ -116,19 +119,27 @@ pub fn read(host_file: Option<&Path>) -> Option<Content> {
 
 fn read_host_image(path: Option<&Path>) -> Option<Content> {
     let path = path?;
-    let metadata = std::fs::metadata(path).ok()?;
-    let age = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .map_or(u128::MAX, |elapsed| elapsed.as_millis());
-    if age > HOST_CLIPBOARD_MAX_AGE_MS {
-        let _ = std::fs::remove_file(path);
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
         return None;
     }
-    let bytes = std::fs::read(path).ok();
-    let _ = std::fs::remove_file(path);
-    let bytes = bytes.filter(|bytes| !bytes.is_empty())?;
+    // One picture, one attachment: an empty paste the host repeats (a terminal
+    // without image support, a text paste next to a stale file) must not attach
+    // the same bytes twice. A new screenshot rewrites the file and hashes
+    // differently, so it is served.
+    let digest = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    };
+    {
+        let mut last = LAST_HANDOFF.lock().expect("handoff lock");
+        if *last == Some(digest) {
+            return None;
+        }
+        *last = Some(digest);
+    }
     Some(Content::Image {
         mime: "image/png".into(),
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -482,31 +493,42 @@ mod tests {
         assert_eq!(copy_command("freebsd", false, |_| true), None);
     }
 
+    /// One picture, one attachment — and the file stays where the host can
+    /// rewrite it. Deleting it on read made the *second* screenshot depend on
+    /// `osascript`, which a sandboxed pane may refuse, so the paste silently did
+    /// nothing.
     #[test]
-    fn the_host_clipboard_file_is_served_once_and_only_while_fresh() {
+    fn the_host_clipboard_file_is_served_once_per_picture() {
         let dir = std::env::temp_dir().join(format!("miao-clipboard-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fresh = dir.join("fresh.png");
-        std::fs::write(&fresh, b"png").unwrap();
+        std::fs::write(&fresh, b"first-picture").unwrap();
         let content = read_host_image(Some(&fresh)).expect("fresh image");
         assert_eq!(
             content,
             Content::Image {
                 mime: "image/png".into(),
-                data: "cG5n".into()
+                data: "Zmlyc3QtcGljdHVyZQ==".into()
             }
         );
-        assert!(!fresh.exists(), "the handoff file is consumed");
+        assert!(fresh.exists(), "the host keeps the file it will rewrite");
 
-        let stale = dir.join("stale.png");
-        std::fs::write(&stale, b"png").unwrap();
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
-        let file = std::fs::File::options().write(true).open(&stale).unwrap();
-        file.set_modified(old).unwrap();
-        drop(file);
-        assert!(read_host_image(Some(&stale)).is_none());
-        assert!(!stale.exists(), "a stale handoff is removed");
+        // The same bytes again (a text paste next to a stale file, an empty
+        // paste the host repeats) do not attach a second copy.
+        assert!(read_host_image(Some(&fresh)).is_none());
+
+        // A new screenshot rewrites the file; its bytes hash differently and it
+        // is served, even though the path never changed.
+        std::fs::write(&fresh, b"second-picture").unwrap();
+        let content = read_host_image(Some(&fresh)).expect("the second picture");
+        assert_eq!(
+            content,
+            Content::Image {
+                mime: "image/png".into(),
+                data: "c2Vjb25kLXBpY3R1cmU=".into()
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
