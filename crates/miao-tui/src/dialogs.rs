@@ -3084,28 +3084,14 @@ mod tests {
     fn the_session_list_marks_the_open_session() {
         let rows = vec![
             SessionSummary {
-                id: "ses_a".into(),
-                title: Some("A".into()),
-                parent_id: None,
-                updated_at_ms: None,
-                archived_at_ms: None,
-                pinned_at_ms: None,
-                directory: None,
-                model: None,
-                credential_id: None,
-                preview: None,
                 active_run: None,
                 todos_open: None,
                 goal_armed: None,
             },
-                parent_id: None,
-                updated_at_ms: None,
-                archived_at_ms: None,
-                pinned_at_ms: None,
-                directory: None,
-                model: None,
-                credential_id: None,
-                preview: None,
+            SessionSummary {
+                active_run: None,
+                todos_open: None,
+                goal_armed: None,
             },
         ];
         let dialog = Dialog::sessions_with_open(&rows, Some("ses_b"));
@@ -3119,20 +3105,13 @@ mod tests {
     #[test]
     fn session_rows_answer_rename_pin_archive_and_delete() {
         let row = SessionSummary {
-            id: "ses_a".into(),
-            title: Some("A".into()),
-            parent_id: None,
-            updated_at_ms: None,
-            archived_at_ms: None,
-            pinned_at_ms: None,
-            directory: None,
-            model: None,
-            credential_id: None,
-            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,
         };
+        let mut dialog = Dialog::sessions(&[row]);
+        assert_eq!(dialog.list().expect("list").rows[0].label, "A");
+        assert!(matches!(
             dialog.handle_key(key(KeyCode::Char('r'))),
             Action::Rename(id) if id == "ses_a"
         ));
@@ -3531,6 +3510,9 @@ mod tests {
             goal_armed: None,
         }
     }
+
+    #[test]
+    fn a_session_row_shows_what_the_conversation_last_said() {
         let mut row = summary("ses_a", None, "/repo");
         row.preview = Some("we moved the parser into the engine".into());
         let dialog = Dialog::sessions(&[row]);

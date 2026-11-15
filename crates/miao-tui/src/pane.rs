@@ -5142,20 +5142,13 @@ mod tests {
             },
         );
         shell.set_session(Some(&SessionSummary {
-            id: "ses_a".into(),
-            title: Some("offset fix".into()),
-            parent_id: None,
-            updated_at_ms: Some(10),
-            archived_at_ms: None,
-            pinned_at_ms: None,
-            directory: Some("/work/miao".into()),
-            model: None,
-            credential_id: None,
-            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,
         }));
+        shell.set_goal(Some(&crate::session::GoalView {
+            objective: "ship the offset reporting".into(),
+            status: "active".into(),
             budget: Some("two hours".into()),
             evidence: None,
         }));
@@ -5208,20 +5201,13 @@ mod tests {
             },
         );
         shell.set_session(Some(&SessionSummary {
-            id: "ses_p".into(),
-            title: Some("plan".into()),
-            parent_id: None,
-            updated_at_ms: Some(10),
-            archived_at_ms: None,
-            pinned_at_ms: None,
-            directory: Some("/work/miao".into()),
-            model: None,
-            credential_id: None,
-            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,
         }));
+        shell.set_goal(Some(&crate::session::GoalView {
+            objective: "ship the offset reporting".into(),
+            status: "active".into(),
             budget: None,
             evidence: None,
         }));
@@ -5411,20 +5397,13 @@ mod tests {
         );
         // The sidebar only paints its sections for an open Session.
         shell.set_session(Some(&SessionSummary {
-            id: "ses_a".into(),
-            title: Some("offset fix".into()),
-            parent_id: None,
-            updated_at_ms: Some(10),
-            archived_at_ms: None,
-            pinned_at_ms: None,
-            directory: Some("/work/miao".into()),
-            model: None,
-            credential_id: None,
-            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,
         }));
+        shell.set_todos(&[
+            crate::session::TodoView {
+                content: "wire the parser".into(),
                 status: "completed".into(),
             },
             crate::session::TodoView {
@@ -8878,6 +8857,9 @@ mod tests {
             goal_armed: None,
         }
     }
+
+    #[test]
+    fn a_multi_select_question_collects_every_toggled_label() {
         let mut panel = Panel::question(question(true));
         assert!(panel.submit().is_none(), "nothing chosen yet");
         panel.toggle();
