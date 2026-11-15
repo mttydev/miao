@@ -2,6 +2,7 @@ import {
   createEngineReader,
   type EngineEvent,
   type EngineSessionState,
+  type EngineModelRow,
   type EngineSessionSummary,
   useLanguage,
 } from "@miao/app"
@@ -193,6 +194,8 @@ export function SessionSurface(props: { url: string; token: string }) {
   const [query, setQuery] = createSignal("")
   const [menu, setMenu] = createSignal<{ session: EngineSessionSummary; x: number; y: number }>()
   const [dialog, setDialog] = createSignal<{ kind: "rename" | "delete"; session: EngineSessionSummary; title: string }>()
+  const [catalog, setCatalog] = createSignal<EngineModelRow[]>([])
+  const [modelMenu, setModelMenu] = createSignal<{ x: number; y: number }>()
   const language = useLanguage()
 
   // Pinned rows float above the time buckets, the same order the TUI sidebar keeps.
@@ -391,6 +394,19 @@ export function SessionSurface(props: { url: string; token: string }) {
     }
   }
 
+  const pickModel = async (row: EngineModelRow) => {
+    setModelMenu(undefined)
+    const sessionID = selected()
+    if (!sessionID || typeof row.protocol !== "string" || typeof row.model !== "string") return
+    const route = typeof row.route_id === "string" ? row.route_id : undefined
+    try {
+      await reader.selectModel(sessionID, { protocol: row.protocol, model: row.model, route_id: route })
+      await reader.snapshot(sessionID).then(setState).catch(fail)
+    } catch (cause) {
+      fail(cause)
+    }
+  }
+
   const renameSession = (session: EngineSessionSummary) => {
     setMenu(undefined)
     setDialog({ kind: "rename", session, title: session.title })
@@ -445,6 +461,7 @@ export function SessionSurface(props: { url: string; token: string }) {
       return [] as EngineSessionSummary[]
     })
     setSessions(list)
+    reader.modelCatalog().then(setCatalog).catch(() => setCatalog([]))
     if (list[0]) await open(list[0])
   })
 
@@ -473,7 +490,10 @@ export function SessionSurface(props: { url: string; token: string }) {
           void newSession()
         }
       }}
-      onClick={() => setMenu(undefined)}
+      onClick={() => {
+        setMenu(undefined)
+        setModelMenu(undefined)
+      }}
     >
       <aside class={`flex w-[264px] shrink-0 flex-col border-r border-v2-border-border-weak ${titlebarInset}`}>
         <div class="flex items-center gap-2.5 px-4 pb-3" data-tauri-drag-region={isMac}>
@@ -619,10 +639,23 @@ export function SessionSurface(props: { url: string; token: string }) {
                   <h1 class="min-w-0 truncate text-13-medium" data-tauri-drag-region={isMac}>
                     {current().title}
                   </h1>
-                  <Show when={identity(events()).model || identity(events()).agent}>
+                  <Show when={identity(events()).agent}>
                     <span class="hidden shrink-0 text-11-regular text-v2-text-text-faint lg:inline">
-                      {[identity(events()).model, identity(events()).agent].filter(Boolean).join(" · ")}
+                      {identity(events()).agent}
                     </span>
+                  </Show>
+                  <Show when={catalog().length > 0}>
+                    <button
+                      type="button"
+                      class="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-11-regular text-v2-text-text-muted transition-colors hover:bg-v2-background-bg-layer-01"
+                      onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        setModelMenu({ x: rect.left, y: rect.bottom + 4 })
+                      }}
+                    >
+                      {state()?.modelSelection?.model ?? language.t("desktop.surface.header.pickModel")}
+                      <Icon name="chevron-down" size="small" />
+                    </button>
                   </Show>
                   <Show when={current().pending > 0}>
                     <span class="inline-flex shrink-0 items-center rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
@@ -829,6 +862,30 @@ export function SessionSurface(props: { url: string; token: string }) {
               <TrashIcon class="size-3.5" />
               {language.t("desktop.surface.action.delete")}
             </button>
+          </div>
+        )}
+      </Show>
+      <Show when={modelMenu()}>
+        {(at) => (
+          <div
+            class="fixed z-50 max-h-80 min-w-72 overflow-y-auto rounded-xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1 text-12-regular shadow-lg"
+            style={{ left: `${at().x}px`, top: `${at().y}px` }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <For each={catalog()}>
+              {(row) => (
+                <button
+                  type="button"
+                  class="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-v2-background-bg-layer-02"
+                  onClick={() => void pickModel(row)}
+                >
+                  <Show when={state()?.modelSelection?.model === row.model && state()?.modelSelection?.protocol === row.protocol} fallback={<span class="w-4" />}>
+                    <Icon name="check" size="small" />
+                  </Show>
+                  <span class="min-w-0 flex-1 truncate">{String(row.model_key ?? row.model ?? "")}</span>
+                </button>
+              )}
+            </For>
           </div>
         )}
       </Show>

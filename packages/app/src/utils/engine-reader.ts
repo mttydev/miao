@@ -14,6 +14,17 @@ import {
  * can provide the same shape without a socket, because the HTTP behaviour itself
  * is covered where the transport lives (`packages/client`).
  */
+/** One `model_catalog` row, exactly as the engine serializes it. */
+export type EngineModelRow = {
+  /** Fields this layer does not read stay visible rather than rejected. */
+  [key: string]: unknown
+  account?: unknown
+  model?: unknown
+  model_key?: unknown
+  protocol?: unknown
+  route_id?: unknown
+}
+
 /** The engine caps one `events` page at 100; a shorter page ends the tail. */
 const EVENT_PAGE = 100
 
@@ -86,6 +97,14 @@ export function createEngineReader(input: {
     /** Delete everything the Session owns. Not a tombstone: the identity can be re-created. */
     async remove(sessionID: string) {
       return transport.request("remove", { session_id: sessionID })
+    },
+    /** The models the host can bind this Session to. */
+    async modelCatalog() {
+      return (await transport.request("model_catalog")) as EngineModelRow[]
+    },
+    /** Bind the Session's subsequent provider turns to one catalog identity. */
+    async selectModel(sessionID: string, binding: { protocol: string; model: string; route_id?: string }) {
+      return transport.request("select_model", { session_id: sessionID, binding })
     },
     /** Stop the Session's active run. Idle is a no-op the engine accepts. */
     async cancel(sessionID: string) {

@@ -38,6 +38,7 @@ export { createDraftStore, type DraftStore } from "./utils/draft-store"
 export {
   createEngineReader,
   type EngineEvent,
+  type EngineModelRow,
   type EngineReader,
   type EngineSessionState,
   type EngineSessionSummary,

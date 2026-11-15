@@ -102,6 +102,22 @@ describe("engine reader", () => {
     }
   })
 
+  test("reads the model catalog and binds a selection", async () => {
+    const rows = [{ account: "default", model: "m1", model_key: "p/m1", protocol: "openai-chat", route_id: null }]
+    const { fake, calls } = transport({ model_catalog: rows, select_model: { binding: {}, changed: true } })
+    const reader = createEngineReader({ url: "http://127.0.0.1:4096", token: "t", transport: fake })
+    try {
+      expect(await reader.modelCatalog()).toEqual(rows)
+      await reader.selectModel("ses_b", { protocol: "openai-chat", model: "m1", route_id: "p/m1" })
+      expect(calls[1]).toEqual({
+        method: "select_model",
+        params: { session_id: "ses_b", binding: { protocol: "openai-chat", model: "m1", route_id: "p/m1" } },
+      })
+    } finally {
+      await reader.close()
+    }
+  })
+
   test("opens one stream per Session and fans events out to its subscribers", async () => {
     const { fake, subscribed, emit } = transport({})
     const reader = createEngineReader({ url: "http://127.0.0.1:4096", token: "t", transport: fake })
