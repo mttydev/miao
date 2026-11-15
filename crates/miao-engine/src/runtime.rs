@@ -3402,6 +3402,33 @@ fn signature_key(signature: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// A short, stable key for the text one engine-authored note carries.
+///
+/// The signature and the round alone do not fix a note: a pause counts the
+/// background work still running and a block repeats its stall counters, so the
+/// same derived identity could arrive with different text. `Store::inject` and
+/// `Store::update_state` reject one identity carrying two payloads as a
+/// conflict, and because the pause note is written with `?` that conflict
+/// failed the whole drain. Folding the text into the identity keeps both
+/// promises: an identical repeat still dedupes, and a changed note is recorded
+/// as the new fact it is.
+fn content_key(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// The durable identity of one loop note: which list it is about, which round,
+/// and the text it carries. See `content_key` for why the text is part of it.
+fn note_identity(kind: &str, signature: &str, round: u64, text: &str) -> String {
+    format!(
+        "{kind}-{}-{round}-{}",
+        signature_key(signature),
+        content_key(text)
+    )
+}
+
 /// The live no-progress block for exactly this todo list, if nothing re-armed
 /// it since. A changed list carries a different signature and releases the gate
 /// on its own, which is how a finished dependency resumes the work.
@@ -3477,15 +3504,9 @@ async fn rearm_blocked_loop(
                 "background notification"
             }
         ));
+        let write = note_identity("loop-armed", &signature, round, &next.to_string());
         if let Ok(mutation) = crate::state::Mutation::parse("goal", next) {
-            inner
-                .store
-                .update_state(
-                    session,
-                    &format!("loop-armed-{}", signature_key(&signature)),
-                    mutation,
-                )
-                .await?;
+            inner.store.update_state(session, &write, mutation).await?;
         }
     }
     Ok(())
@@ -5868,20 +5889,16 @@ command: None,
                         // evidence a blocked goal owes: it reads as a classified
                         // stop, and the next real event clears it.
                         if goal_status.is_null() || goal_status == "active" {
+                            let evidence = format!(
+                                "loop: no todo changed state for {goal_flat} continuation turns (round {round} of this list). It re-arms on its own with the next operator message, the next background notice, or a changed todo list."
+                            );
                             let mut next = goal.clone();
                             next["status"] = json!("blocked");
-                            next["evidence"] = json!(format!(
-                                "loop: no todo changed state for {goal_flat} continuation turns (round {round} of this list). It re-arms on its own with the next operator message, the next background notice, or a changed todo list."
-                            ));
+                            next["evidence"] = json!(evidence);
+                            let write =
+                                note_identity("loop-blocked", &flat, round, &next.to_string());
                             if let Ok(mutation) = crate::state::Mutation::parse("goal", next) {
-                                inner
-                                    .store
-                                    .update_state(
-                                        session,
-                                        &format!("loop-blocked-{}-{round}", signature_key(&flat)),
-                                        mutation,
-                                    )
-                                    .await?;
+                                inner.store.update_state(session, &write, mutation).await?;
                             }
                         }
                         round
@@ -5938,7 +5955,7 @@ command: None,
                         .store
                         .inject(
                             session,
-                            &format!("loop-paused-{}-{blocked_round}", signature_key(&signature)),
+                            &note_identity("loop-paused", &signature, blocked_round, &pause),
                             &pause,
                             "engine",
                         )
@@ -9628,6 +9645,139 @@ mod continuation_id_tests {
             continuation_input_id("empty", "run-1", 0),
             continuation_input_id("empty", "run-1", 0)
         );
+    }
+}
+
+#[cfg(test)]
+mod note_identity_tests {
+    use super::*;
+    use crate::protocol::{Delivery, Input};
+    use crate::state::Mutation;
+
+    #[test]
+    fn one_note_identity_dedupes_a_repeat_but_not_changed_text() {
+        let signature = json!({"todos":[]}).to_string();
+        let first = "Task paused: 2 background job(s) still running.";
+        let second = "Task paused: 1 background job(s) still running.";
+        assert_eq!(
+            note_identity("loop-paused", &signature, 0, first),
+            note_identity("loop-paused", &signature, 0, first)
+        );
+        assert_ne!(
+            note_identity("loop-paused", &signature, 0, first),
+            note_identity("loop-paused", &signature, 0, second)
+        );
+    }
+
+    /// The observed failure: a Session paused twice on the same unchanged todo
+    /// list while its running-job count fell from two to one. Both pauses
+    /// derived the same signature and round, so the second write collided with
+    /// the first and failed the run instead of recording the new count.
+    #[tokio::test]
+    async fn a_pause_whose_counts_changed_is_a_new_note_not_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = session_store(dir.path()).await;
+        let signature = json!({"todos":[]}).to_string();
+        let texts = [
+            "Task paused: 2 background job(s) still running. The session resumes automatically as each one finishes — no action needed.",
+            "Task paused: 1 background job(s) still running. The session resumes automatically as each one finishes — no action needed.",
+        ];
+        for text in texts {
+            store
+                .inject(
+                    "s",
+                    &note_identity("loop-paused", &signature, 0, text),
+                    text,
+                    "engine",
+                )
+                .await
+                .unwrap();
+        }
+        // The identical repeat still dedupes instead of doubling the transcript.
+        store
+            .inject(
+                "s",
+                &note_identity("loop-paused", &signature, 0, texts[1]),
+                texts[1],
+                "engine",
+            )
+            .await
+            .unwrap();
+        let notes = store
+            .events("s", 0, 500)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "message.synthetic")
+            .count();
+        assert_eq!(notes, 2);
+    }
+
+    /// A block write carries changing stall counters too, and a re-arm of the
+    /// same list carries whichever arrival lifted it, so their state operation
+    /// ids must not make a changed payload look like a conflicting rewrite.
+    #[tokio::test]
+    async fn a_block_and_a_rearm_whose_payloads_changed_are_new_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = session_store(dir.path()).await;
+        let signature = json!({"todos":[]}).to_string();
+        for worked in [3, 4] {
+            let mut goal = json!({"objective":"Finish tasks","status":"blocked","autonomous":true});
+            goal["evidence"] = json!(format!(
+                "loop: no todo changed state for {worked} continuation turns (round 2 of this list)."
+            ));
+            store
+                .update_state(
+                    "s",
+                    &note_identity("loop-blocked", &signature, 2, &goal.to_string()),
+                    Mutation::parse("goal", goal).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        for arriving in ["operator message", "background notification"] {
+            let mut goal = json!({"objective":"Finish tasks","status":"active","autonomous":true});
+            goal["evidence"] = json!(format!(
+                "loop: resumed automatically by an arriving {arriving}."
+            ));
+            store
+                .update_state(
+                    "s",
+                    &note_identity("loop-armed", &signature, 2, &goal.to_string()),
+                    Mutation::parse("goal", goal).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.state("s").await.unwrap()["goal"]["value"]["status"],
+            "active"
+        );
+    }
+
+    async fn session_store(dir: &std::path::Path) -> Store {
+        let store = Store::open(dir.join("engine.db")).await.unwrap();
+        store
+            .admit_attachments_at(
+                Input {
+                    agent_references: Default::default(),
+                    command: None,
+                    session_id: "s".into(),
+                    input_id: "one".into(),
+                    prompt: "Work on the authorized tasks".into(),
+                    delivery: Delivery::Steer,
+                },
+                Vec::new(),
+                Some(
+                    std::fs::canonicalize(dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            )
+            .await
+            .unwrap();
+        store
     }
 }
 
