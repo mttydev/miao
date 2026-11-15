@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "キャッシュ書き込み",
   "context.timeline.ttft": "最初のトークンまで {{value}} ミリ秒",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "ファイル",
   "desktop.menu.edit": "編集",
   "desktop.menu.view": "表示",
@@ -531,7 +531,7 @@ export const dict = {
   "help.tabs.title": "タブのご紹介",
   "help.tabs.description": "タブを使って作業と進行中のセッションを整理できます",
   "help.tabs.date": "7月14日",
-  "help.tabs.introduction": "miao Desktopでタブを中心とした操作ができるようになりました。",
+  "help.tabs.introduction": "MiaoDesktopでタブを中心とした操作ができるようになりました。",
   "help.tabs.sessions":
     "新しいセッションをタブで開始したり、プロジェクトから既存のセッションを開いたりできます。新しい作業を始めるときは新しいタブを開き、作業が終わったら閉じます。",
   "help.tabs.organize":
@@ -835,7 +835,7 @@ export const dict = {
   "sidebar.project.clearNotifications": "通知をクリア",
   "sidebar.empty.title": "開いているプロジェクトはありません",
   "sidebar.empty.description": "プロジェクトを開いて始めましょう",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "デスクトップ",
   "settings.section.server": "サーバー",
   "settings.tab.general": "一般",

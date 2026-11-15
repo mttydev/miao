@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Écriture dans le cache",
   "context.timeline.ttft": "{{value}} ms avant le premier token",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Fichier",
   "desktop.menu.edit": "Édition",
   "desktop.menu.view": "Affichage",
@@ -77,7 +77,7 @@ export const dict = {
   "desktop.recovery.action.quit": "Quitter",
   "desktop.recovery.loadFailed": "Échec du chargement d'miao",
   "desktop.recovery.terminated": "La fenêtre miao s'est arrêtée de manière inattendue",
-  "desktop.recovery.unresponsive": "miao ne répond pas",
+  "desktop.recovery.unresponsive": "MiaoDesktop ne répond pas",
   "desktop.recovery.unresponsive.detail":
     "Vous pouvez relancer l'application, ouvrir les journaux ou continuer d'attendre.",
   "desktop.recovery.loadFailed.detail": "Fenêtre : {{window}}\nURL : {{url}}\nErreur : {{code}} {{description}}",
@@ -537,7 +537,7 @@ export const dict = {
   "help.tabs.title": "Présentation des onglets",
   "help.tabs.description": "Organisez votre travail et vos sessions actives à l'aide d'onglets",
   "help.tabs.date": "14 juillet",
-  "help.tabs.introduction": "miao Desktop s'articule désormais autour d'onglets.",
+  "help.tabs.introduction": "MiaoDesktop s'articule désormais autour d'onglets.",
   "help.tabs.sessions":
     "Démarrez une nouvelle session dans un onglet ou ouvrez une session existante depuis l'un de vos projets. Ouvrez un nouvel onglet lorsque vous commencez une nouvelle tâche et fermez-le une fois celle-ci terminée.",
   "help.tabs.organize":
@@ -852,7 +852,7 @@ export const dict = {
   "sidebar.project.clearNotifications": "Effacer les notifications",
   "sidebar.empty.title": "Aucun projet ouvert",
   "sidebar.empty.description": "Ouvrez un projet pour commencer",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Application de bureau",
   "settings.section.server": "Serveur",
   "settings.tab.general": "Général",

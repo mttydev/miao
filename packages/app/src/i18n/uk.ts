@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Запис кешу",
   "context.timeline.ttft": "{{value}} мс до першого маркера",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Файл",
   "desktop.menu.edit": "Редагування",
   "desktop.menu.view": "Вигляд",
@@ -77,7 +77,7 @@ export const dict = {
   "desktop.recovery.action.quit": "Завершити роботу",
   "desktop.recovery.loadFailed": "Не вдалося завантажити miao",
   "desktop.recovery.terminated": "Роботу вікна miao несподівано завершено",
-  "desktop.recovery.unresponsive": "miao не відповідає",
+  "desktop.recovery.unresponsive": "MiaoDesktop не відповідає",
   "desktop.recovery.unresponsive.detail":
     "Ви можете повторно запустити програму, відкрити журнали або продовжити очікування.",
   "desktop.recovery.loadFailed.detail": "Вікно: {{window}}\nURL: {{url}}\nПомилка: {{code}} {{description}}",
@@ -569,7 +569,7 @@ export const dict = {
   "help.tabs.title": "Представляємо вкладки",
   "help.tabs.description": "Упорядковуйте роботу й активні сесії за допомогою вкладок",
   "help.tabs.date": "14 липня",
-  "help.tabs.introduction": "miao Desktop тепер побудовано навколо вкладок.",
+  "help.tabs.introduction": "MiaoDesktop тепер побудовано навколо вкладок.",
   "help.tabs.sessions":
     "Почніть нову сесію у вкладці або відкрийте наявну сесію з будь-якого свого проєкту. Відкривайте нову вкладку, коли починаєте щось нове, і закривайте її після завершення.",
   "help.tabs.organize":
@@ -1018,7 +1018,7 @@ export const dict = {
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "Десктопний застосунок",
   "settings.section.server": "Сервер",

@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Zápis do vyrovnávacej pamäte",
   "context.timeline.ttft": "{{value}} ms do prvého tokenu",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Súbor",
   "desktop.menu.edit": "Upraviť",
   "desktop.menu.view": "Zobraziť",
@@ -73,9 +73,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Exportovať záznamy",
   "desktop.recovery.action.keepWaiting": "Čakať ďalej",
   "desktop.recovery.action.quit": "Ukončiť",
-  "desktop.recovery.loadFailed": "miao sa nepodarilo načítať",
+  "desktop.recovery.loadFailed": "MiaoDesktop sa nepodarilo načítať",
   "desktop.recovery.terminated": "Okno miao bolo neočakávane ukončené",
-  "desktop.recovery.unresponsive": "miao neodpovedá",
+  "desktop.recovery.unresponsive": "MiaoDesktop neodpovedá",
   "desktop.recovery.unresponsive.detail": "Môžete reštartovať aplikáciu, otvoriť záznamy alebo počkať.",
   "desktop.recovery.loadFailed.detail": "Okno: {{window}}\nURL: {{url}}\nChyba: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Okno: {{window}}\nDôvod: {{reason}}\nKód: {{code}}",
@@ -530,7 +530,7 @@ export const dict = {
   "help.tabs.title": "Predstavujeme karty",
   "help.tabs.description": "Organizujte si prácu a aktívne relácie pomocou kariet",
   "help.tabs.date": "14. júl",
-  "help.tabs.introduction": "miao Desktop je teraz postavený na kartách.",
+  "help.tabs.introduction": "MiaoDesktop je teraz postavený na kartách.",
   "help.tabs.sessions":
     "Spustite novú reláciu na karte alebo otvorte existujúcu reláciu z niektorého zo svojich projektov. Otvorte novú kartu, keď začínate niečo nové, a zatvorte ju, keď skončíte.",
   "help.tabs.organize":
@@ -931,7 +931,7 @@ export const dict = {
   "debugBar.direction.tip": "Vynútiť smer rozloženia celej aplikácie bez zmeny vybraného jazyka",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Server",
   "settings.tab.general": "Všeobecné",

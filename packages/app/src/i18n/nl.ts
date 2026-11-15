@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Cache schrijven",
   "context.timeline.ttft": "{{value}} ms tot eerste token",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Bestand",
   "desktop.menu.edit": "Bewerken",
   "desktop.menu.view": "Weergave",
@@ -73,9 +73,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Logboeken exporteren",
   "desktop.recovery.action.keepWaiting": "Blijven wachten",
   "desktop.recovery.action.quit": "Stoppen",
-  "desktop.recovery.loadFailed": "miao kan niet worden geladen",
+  "desktop.recovery.loadFailed": "MiaoDesktop kan niet worden geladen",
   "desktop.recovery.terminated": "Het Miao-venster is onverwacht beëindigd",
-  "desktop.recovery.unresponsive": "miao reageert niet",
+  "desktop.recovery.unresponsive": "MiaoDesktop reageert niet",
   "desktop.recovery.unresponsive.detail": "Je kunt de app opnieuw openen, de logboeken openen of blijven wachten.",
   "desktop.recovery.loadFailed.detail": "Venster: {{window}}\nURL: {{url}}\nFout: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Venster: {{window}}\nReden: {{reason}}\nCode: {{code}}",
@@ -532,7 +532,7 @@ export const dict = {
   "help.tabs.title": "Introductie van tabbladen",
   "help.tabs.description": "Organiseer je werk en actieve sessies met tabbladen",
   "help.tabs.date": "14 juli",
-  "help.tabs.introduction": "miao Desktop is nu opgebouwd rond tabbladen.",
+  "help.tabs.introduction": "MiaoDesktop is nu opgebouwd rond tabbladen.",
   "help.tabs.sessions":
     "Start een nieuwe sessie in een tabblad of open een bestaande sessie vanuit een van je projecten. Open een nieuw tabblad wanneer je aan iets nieuws begint en sluit het wanneer je klaar bent.",
   "help.tabs.organize":
@@ -937,7 +937,7 @@ export const dict = {
   "debugBar.direction.tip": "Dwing de lay-outrichting voor de hele app af zonder de geselecteerde taal te wijzigen",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Server",
   "settings.tab.general": "Algemeen",

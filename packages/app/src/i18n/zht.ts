@@ -20,7 +20,7 @@ export const dict = {
   "context.timeline.cacheWrite": "快取寫入",
   "context.timeline.ttft": "首個 token 延遲 {{value}} 毫秒",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "檔案",
   "desktop.menu.edit": "編輯",
   "desktop.menu.view": "檢視",
@@ -60,11 +60,11 @@ export const dict = {
   "desktop.menu.nextProject": "下一個專案",
   "desktop.menu.minimize": "最小化",
   "desktop.menu.maximize": "最大化",
-  "desktop.menu.documentation": "miao 文件",
+  "desktop.menu.documentation": "MiaoDesktop 文件",
   "desktop.menu.supportForum": "支援論壇",
   "desktop.menu.shareFeedback": "提供意見回饋",
   "desktop.menu.reportBug": "回報錯誤",
-  "desktop.menu.ariaLabel": "miao 選單",
+  "desktop.menu.ariaLabel": "MiaoDesktop 選單",
 
   "desktop.updater.dialog.checkFailed.message": "檢查更新失敗。",
   "desktop.updater.dialog.checkFailed.title": "更新錯誤",
@@ -79,9 +79,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "匯出記錄檔",
   "desktop.recovery.action.keepWaiting": "繼續等待",
   "desktop.recovery.action.quit": "結束",
-  "desktop.recovery.loadFailed": "miao 載入失敗",
-  "desktop.recovery.terminated": "miao 視窗意外終止",
-  "desktop.recovery.unresponsive": "miao 沒有回應",
+  "desktop.recovery.loadFailed": "MiaoDesktop 載入失敗",
+  "desktop.recovery.terminated": "MiaoDesktop 視窗意外終止",
+  "desktop.recovery.unresponsive": "MiaoDesktop 沒有回應",
   "desktop.recovery.unresponsive.detail": "你可以重新啟動應用程式、開啟記錄檔，或繼續等待。",
   "desktop.recovery.loadFailed.detail": "視窗：{{window}}\nURL：{{url}}\n錯誤：{{code}} {{description}}",
   "desktop.recovery.terminated.detail": "視窗：{{window}}\n原因：{{reason}}\n代碼：{{code}}",
@@ -555,7 +555,7 @@ export const dict = {
   "help.tabs.title": "分頁功能介紹",
   "help.tabs.description": "使用分頁整理工作和進行中的工作階段",
   "help.tabs.date": "7 月 14 日",
-  "help.tabs.introduction": "miao Desktop 現在以分頁為核心。",
+  "help.tabs.introduction": "MiaoDesktop 現在以分頁為核心。",
   "help.tabs.sessions":
     "在分頁中開始新的工作階段，或從任一專案開啟現有的工作階段。開始新工作時請開啟新分頁，完成後再將其關閉。",
   "help.tabs.organize":
@@ -891,7 +891,7 @@ export const dict = {
   "sidebar.empty.title": "未開啟任何專案",
   "sidebar.empty.description": "開啟專案以開始使用",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "桌面",
   "settings.section.server": "伺服器",
   "settings.tab.general": "一般",

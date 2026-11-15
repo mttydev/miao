@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Cache skriv",
   "context.timeline.ttft": "{{value}} ms till första token",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Arkiv",
   "desktop.menu.edit": "Redigera",
   "desktop.menu.view": "Visa",
@@ -73,9 +73,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Exportera loggar",
   "desktop.recovery.action.keepWaiting": "Fortsätt vänta",
   "desktop.recovery.action.quit": "Avsluta",
-  "desktop.recovery.loadFailed": "miao kunde inte läsas in",
+  "desktop.recovery.loadFailed": "MiaoDesktop kunde inte läsas in",
   "desktop.recovery.terminated": "Miao-fönstret avslutades oväntat",
-  "desktop.recovery.unresponsive": "miao svarar inte",
+  "desktop.recovery.unresponsive": "MiaoDesktop svarar inte",
   "desktop.recovery.unresponsive.detail": "Du kan starta om appen, öppna loggarna eller fortsätta vänta.",
   "desktop.recovery.loadFailed.detail": "Fönster: {{window}}\nURL: {{url}}\nFel: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Fönster: {{window}}\nOrsak: {{reason}}\nKod: {{code}}",
@@ -532,7 +532,7 @@ export const dict = {
   "help.tabs.title": "Vi presenterar flikar",
   "help.tabs.description": "Ordna ditt arbete och dina aktiva sessioner med flikar",
   "help.tabs.date": "14 juli",
-  "help.tabs.introduction": "miao Desktop är nu uppbyggt kring flikar.",
+  "help.tabs.introduction": "MiaoDesktop är nu uppbyggt kring flikar.",
   "help.tabs.sessions":
     "Starta en ny session på en flik eller öppna en befintlig session från något av dina projekt. Öppna en ny flik när du påbörjar något nytt och stäng den när du är klar.",
   "help.tabs.organize":
@@ -933,7 +933,7 @@ export const dict = {
   "debugBar.direction.tip": "Tvinga fram hela appens layoutriktning utan att ändra valt språk",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Skrivbord",
   "settings.section.server": "Server",
   "settings.tab.general": "Allmänt",

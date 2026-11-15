@@ -536,7 +536,7 @@ export const dict = {
   "help.tabs.title": "Pristatome Tab",
   "help.tabs.description": "Tvarkykite savo darbą ir aktyvias sesijas naudodami skirtukus",
   "help.tabs.date": "liepos 14 d",
-  "help.tabs.introduction": "miao Desktop dabar sukurtas iš skirtukų.",
+  "help.tabs.introduction": "MiaoDesktop dabar sukurtas iš skirtukų.",
   "help.tabs.sessions":
     "Pradėkite naują seansą skirtuke arba atidarykite esamą seansą iš bet kurio savo projekto. Atidarykite naują skirtuką, kai pradedate ką nors naujo, ir uždarykite, kai baigsite.",
   "help.tabs.organize":
@@ -941,7 +941,7 @@ export const dict = {
   "debugBar.direction.tip": "Priverskite visą programos išdėstymo kryptį nekeisdami pasirinktos kalbos",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao darbalaukis",
+  "app.name.desktop": "MiaoDesktop darbalaukis",
   "settings.section.desktop": "Darbalaukis",
   "settings.section.server": "Serveris",
   "settings.tab.general": "Bendra",

@@ -935,7 +935,7 @@ export const dict = {
   "debugBar.direction.tip": "Nametnite cijeli smjer izgleda aplikacije bez promjene odabranog jezika",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Radna površina",
+  "app.name.desktop": "MiaoDesktop Radna površina",
   "settings.section.desktop": "Radna površina",
   "settings.section.server": "Poslužitelj",
   "settings.tab.general": "Općenito",

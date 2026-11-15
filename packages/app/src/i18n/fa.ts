@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "نوشتن در حافظه پنهان",
   "context.timeline.ttft": "{{value}} ms به اولین نشانه",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "فایل",
   "desktop.menu.edit": "ویرایش کنید",
   "desktop.menu.view": "مشاهده کنید",
@@ -73,9 +73,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "صادرات سیاهههای مربوط",
   "desktop.recovery.action.keepWaiting": "منتظر باشید",
   "desktop.recovery.action.quit": "ترک کنید",
-  "desktop.recovery.loadFailed": "miao بارگیری نشد",
+  "desktop.recovery.loadFailed": "MiaoDesktop بارگیری نشد",
   "desktop.recovery.terminated": "پنجره miao به طور غیرمنتظره ای خاتمه یافت",
-  "desktop.recovery.unresponsive": "miao پاسخ نمی دهد",
+  "desktop.recovery.unresponsive": "MiaoDesktop پاسخ نمی دهد",
   "desktop.recovery.unresponsive.detail":
     "می‌توانید برنامه را دوباره راه‌اندازی کنید، گزارش‌ها را باز کنید یا منتظر بمانید.",
   "desktop.recovery.loadFailed.detail": "پنجره: {{window}}\nURL: {{url}}\nخطا: {{code}} {{description}}",
@@ -531,7 +531,7 @@ export const dict = {
   "help.tabs.title": "معرفی Tabs",
   "help.tabs.description": "جلسات کاری و فعال خود را با برگه ها سازماندهی کنید",
   "help.tabs.date": "14 جولای",
-  "help.tabs.introduction": "miao Desktop اکنون در اطراف زبانه ها ساخته شده است.",
+  "help.tabs.introduction": "MiaoDesktop اکنون در اطراف زبانه ها ساخته شده است.",
   "help.tabs.sessions":
     "یک جلسه جدید در یک برگه شروع کنید یا یک جلسه موجود را از هر یک از پروژه های خود باز کنید. وقتی کار جدیدی را شروع می کنید یک برگه جدید باز کنید و وقتی کارتان تمام شد آن را ببندید.",
   "help.tabs.organize":
@@ -925,7 +925,7 @@ export const dict = {
   "debugBar.direction.tip": "بدون تغییر زبان انتخابی، جهت طرح بندی کامل برنامه را اجباری کنید",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "دسکتاپ",
   "settings.section.server": "سرور",
   "settings.tab.general": "ژنرال",

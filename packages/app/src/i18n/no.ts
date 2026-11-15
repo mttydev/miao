@@ -19,7 +19,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Cache skriv",
   "context.timeline.ttft": "{{value}} ms til første token",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Arkiv",
   "desktop.menu.edit": "Rediger",
   "desktop.menu.view": "Vis",
@@ -78,9 +78,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Eksporter logger",
   "desktop.recovery.action.keepWaiting": "Fortsett å vente",
   "desktop.recovery.action.quit": "Avslutt",
-  "desktop.recovery.loadFailed": "miao kunne ikke lastes inn",
+  "desktop.recovery.loadFailed": "MiaoDesktop kunne ikke lastes inn",
   "desktop.recovery.terminated": "Miao-vinduet ble uventet avsluttet",
-  "desktop.recovery.unresponsive": "miao svarer ikke",
+  "desktop.recovery.unresponsive": "MiaoDesktop svarer ikke",
   "desktop.recovery.unresponsive.detail": "Du kan starte appen på nytt, åpne loggene eller fortsette å vente.",
   "desktop.recovery.loadFailed.detail": "Vindu: {{window}}\nURL: {{url}}\nFeil: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Vindu: {{window}}\nÅrsak: {{reason}}\nKode: {{code}}",
@@ -775,7 +775,7 @@ export const dict = {
   "sidebar.project.viewAllSessions": "Vis alle sesjoner",
   "sidebar.project.clearNotifications": "Fjern varsler",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "Skrivebord",
   "settings.section.server": "Server",
@@ -1204,7 +1204,7 @@ export const dict = {
   "help.tabs.title": "Vi introduserer faner",
   "help.tabs.description": "Organiser arbeidet og de aktive sesjonene dine med faner",
   "help.tabs.date": "14. juli",
-  "help.tabs.introduction": "miao Desktop er nå bygget rundt faner.",
+  "help.tabs.introduction": "MiaoDesktop er nå bygget rundt faner.",
   "help.tabs.sessions":
     "Start en ny sesjon i en fane, eller åpne en eksisterende sesjon fra et av prosjektene dine. Åpne en ny fane når du skal begynne på noe nytt, og lukk den når du er ferdig.",
   "help.tabs.organize":

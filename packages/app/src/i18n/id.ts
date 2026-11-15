@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Tulis cache",
   "context.timeline.ttft": "{{value}} ms ke token pertama",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Berkas",
   "desktop.menu.edit": "Sunting",
   "desktop.menu.view": "Tampilan",
@@ -75,9 +75,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Ekspor log",
   "desktop.recovery.action.keepWaiting": "Tetap tunggu",
   "desktop.recovery.action.quit": "Keluar",
-  "desktop.recovery.loadFailed": "miao gagal dimuat",
+  "desktop.recovery.loadFailed": "MiaoDesktop gagal dimuat",
   "desktop.recovery.terminated": "Jendela miao berhenti secara tidak terduga",
-  "desktop.recovery.unresponsive": "miao tidak merespons",
+  "desktop.recovery.unresponsive": "MiaoDesktop tidak merespons",
   "desktop.recovery.unresponsive.detail": "Anda dapat meluncurkan ulang aplikasi, membuka log, atau tetap menunggu.",
   "desktop.recovery.loadFailed.detail": "Jendela: {{window}}\nURL: {{url}}\nKesalahan: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Jendela: {{window}}\nAlasan: {{reason}}\nKode: {{code}}",
@@ -568,7 +568,7 @@ export const dict = {
   "help.tabs.title": "Memperkenalkan Tab",
   "help.tabs.description": "Atur pekerjaan dan sesi aktif Anda dengan tab",
   "help.tabs.date": "14 Juli",
-  "help.tabs.introduction": "miao Desktop kini dirancang dengan tab sebagai pusatnya.",
+  "help.tabs.introduction": "MiaoDesktop kini dirancang dengan tab sebagai pusatnya.",
   "help.tabs.sessions":
     "Mulai sesi baru di tab, atau buka sesi yang sudah ada dari proyek Anda. Buka tab baru saat Anda memulai sesuatu yang baru, lalu tutup setelah selesai.",
   "help.tabs.organize":
@@ -1005,7 +1005,7 @@ export const dict = {
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Server",

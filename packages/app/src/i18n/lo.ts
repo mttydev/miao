@@ -15,7 +15,7 @@ export const dict = {
   "context.timeline.cacheWrite": "ຂຽນ cache",
   "context.timeline.ttft": "{{value}} ms ກັບ token ທໍາອິດ",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "ໄຟລ໌",
   "desktop.menu.edit": "ແກ້ໄຂ",
   "desktop.menu.view": "ເບິ່ງ",
@@ -72,9 +72,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "ບັນທຶກການສົ່ງອອກ",
   "desktop.recovery.action.keepWaiting": "ລໍຖ້າຕໍ່ໄປ",
   "desktop.recovery.action.quit": "ອອກ",
-  "desktop.recovery.loadFailed": "miao ລົ້ມເຫລວໃນການໂຫລດ",
+  "desktop.recovery.loadFailed": "MiaoDesktop ລົ້ມເຫລວໃນການໂຫລດ",
   "desktop.recovery.terminated": "ປ່ອງຢ້ຽມ miao ຖືກປິດໂດຍບໍ່ຄາດຄິດ",
-  "desktop.recovery.unresponsive": "miao ບໍ່ຕອບສະໜອງ",
+  "desktop.recovery.unresponsive": "MiaoDesktop ບໍ່ຕອບສະໜອງ",
   "desktop.recovery.unresponsive.detail": "ທ່ານສາມາດເປີດແອັບຄືນໃໝ່, ເປີດບັນທຶກ, ຫຼືລໍຖ້າຕໍ່ໄປ.",
   "desktop.recovery.loadFailed.detail": "ປ່ອງຢ້ຽມ: {{window}}\nURL: {{url}}\nຂໍ້ຜິດພາດ: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "ປ່ອງຢ້ຽມ: {{window}}\nເຫດຜົນ: {{reason}}\nລະຫັດ: {{code}}",
@@ -528,7 +528,7 @@ export const dict = {
   "help.tabs.title": "ແນະນຳແຖບ",
   "help.tabs.description": "ຈັດກອງປະຊຸມການເຮັດວຽກ ແລະການເຄື່ອນໄຫວຂອງທ່ານດ້ວຍແຖບ",
   "help.tabs.date": "ກໍລະກົດ 14",
-  "help.tabs.introduction": "miao Desktop ຕອນນີ້ຖືກສ້າງຂຶ້ນໃນແຖບຕ່າງໆ.",
+  "help.tabs.introduction": "MiaoDesktop ຕອນນີ້ຖືກສ້າງຂຶ້ນໃນແຖບຕ່າງໆ.",
   "help.tabs.sessions":
     "ເລີ່ມເຊດຊັນໃໝ່ໃນແຖບໃດໜຶ່ງ, ຫຼືເປີດເຊດຊັນທີ່ມີຢູ່ແລ້ວຈາກໂຄງການໃດໆກໍຕາມຂອງເຈົ້າ. ເປີດແຖບໃໝ່ເມື່ອທ່ານເລີ່ມອັນໃໝ່, ແລະປິດມັນເມື່ອທ່ານສຳເລັດ.",
   "help.tabs.organize":
@@ -921,7 +921,7 @@ export const dict = {
   "debugBar.direction.tip": "ບັງຄັບທິດທາງການຈັດວາງແອັບເຕັມໂດຍບໍ່ປ່ຽນພາສາທີ່ເລືອກ",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "ເດັສທັອບ",
   "settings.section.server": "ເຊີບເວີ",
   "settings.tab.general": "ທົ່ວໄປ",

@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Ghi bộ nhớ đệm",
   "context.timeline.ttft": "{{value}} ms tới mã thông báo đầu tiên",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Tệp",
   "desktop.menu.edit": "Chỉnh sửa",
   "desktop.menu.view": "Xem",
@@ -77,7 +77,7 @@ export const dict = {
   "desktop.recovery.action.quit": "Thoát",
   "desktop.recovery.loadFailed": "Không tải được miao",
   "desktop.recovery.terminated": "Cửa sổ miao đã bị đóng đột ngột",
-  "desktop.recovery.unresponsive": "miao không phản hồi",
+  "desktop.recovery.unresponsive": "MiaoDesktop không phản hồi",
   "desktop.recovery.unresponsive.detail": "Bạn có thể khởi chạy lại ứng dụng, mở nhật ký hoặc tiếp tục chờ.",
   "desktop.recovery.loadFailed.detail": "Cửa sổ: {{window}}\nURL: {{url}}\nLỗi: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Cửa sổ: {{window}}\nLý do: {{reason}}\nMã: {{code}}",
@@ -537,7 +537,7 @@ export const dict = {
   "help.tabs.title": "Giới thiệu về tab",
   "help.tabs.description": "Sắp xếp công việc và các phiên đang hoạt động bằng tab",
   "help.tabs.date": "14 tháng 7",
-  "help.tabs.introduction": "miao Desktop nay được xây dựng xoay quanh các tab.",
+  "help.tabs.introduction": "MiaoDesktop nay được xây dựng xoay quanh các tab.",
   "help.tabs.sessions":
     "Bắt đầu phiên mới trong một tab hoặc mở phiên hiện có từ bất kỳ dự án nào của bạn. Hãy mở tab mới khi bắt đầu công việc mới và đóng tab khi hoàn tất.",
   "help.tabs.organize":
@@ -939,7 +939,7 @@ export const dict = {
   "debugBar.direction.tip": "Buộc đặt hướng bố cục cho toàn bộ ứng dụng mà không thay đổi ngôn ngữ đã chọn",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Máy chủ",
   "settings.tab.general": "Tổng quan",

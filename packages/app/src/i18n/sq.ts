@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Shkrimi në cache",
   "context.timeline.ttft": "{{value}} ms në shenjën e parë",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Skedari",
   "desktop.menu.edit": "Redakto",
   "desktop.menu.view": "Shiko",
@@ -73,9 +73,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Eksporto regjistrat",
   "desktop.recovery.action.keepWaiting": "Vazhdoni të prisni",
   "desktop.recovery.action.quit": "Hiq dorë",
-  "desktop.recovery.loadFailed": "miao nuk u ngarkua",
+  "desktop.recovery.loadFailed": "MiaoDesktop nuk u ngarkua",
   "desktop.recovery.terminated": "Dritarja miao u mbyll papritur",
-  "desktop.recovery.unresponsive": "miao nuk po përgjigjet",
+  "desktop.recovery.unresponsive": "MiaoDesktop nuk po përgjigjet",
   "desktop.recovery.unresponsive.detail":
     "Mund ta rinisni aplikacionin, të hapni regjistrat ose të vazhdoni të prisni.",
   "desktop.recovery.loadFailed.detail": "Dritarja: {{window}}\nURL: {{url}}\nGabim: {{code}} {{description}}",
@@ -531,7 +531,7 @@ export const dict = {
   "help.tabs.title": "Prezantimi i skedave",
   "help.tabs.description": "Organizoni punën tuaj dhe seancat aktive me skeda",
   "help.tabs.date": "14 korrik",
-  "help.tabs.introduction": "miao Desktop tani është ndërtuar rreth skedave.",
+  "help.tabs.introduction": "MiaoDesktop tani është ndërtuar rreth skedave.",
   "help.tabs.sessions":
     "Filloni një sesion të ri në një skedë ose hapni një sesion ekzistues nga ndonjë prej projekteve tuaja. Hapni një skedë të re kur filloni diçka të re dhe mbylleni kur të keni mbaruar.",
   "help.tabs.organize":
@@ -931,7 +931,7 @@ export const dict = {
   "debugBar.direction.tip": "Forco drejtimin e plotë të paraqitjes së aplikacionit pa ndryshuar gjuhën e zgjedhur",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Serveri",
   "settings.tab.general": "Gjeneral",
