@@ -58,7 +58,17 @@ impl Budget {
         // trigger disagree with the request bound, which only ever uses the
         // window the endpoint or the host actually stated.
         match self.window {
-            Some(window) => ((window as f64 * self.ratio) as u64).max(self.headroom),
+            Some(window) => {
+                // The product's explicit headroom is sized for a large window
+                // (trim protection, summary output and slack). Taken whole it can
+                // exceed a small window, and a threshold past the window is never
+                // crossed: a 32K model would run to its wall with automatic
+                // compaction armed but unreachable. A reserve never takes more
+                // than half the window, so the trigger stays reachable — and a
+                // window that small still keeps room for the summary it writes.
+                let reserve = self.headroom.min(window / 2);
+                ((window as f64 * self.ratio) as u64).max(reserve)
+            }
             None => self.headroom,
         }
     }
@@ -274,12 +284,6 @@ pub struct CompactRequest<'a, P: FnMut(Value)> {
 /// A provider that accepts the request and never answers must not hold a turn.
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The deadline a summarizer call that missed `SUMMARY_TIMEOUT` earns on its
-/// retry. A reasoning model can spend more than twenty seconds on a long
-/// summary, and one slow answer must not discard the minutes a pass already
-/// spent on the segments before it.
-const SUMMARY_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// How long one summarizer call gets before the pass retries it, and how long
 /// that retry gets. A test drives these instead of waiting twenty seconds to
 /// reach the retry path.
@@ -289,10 +293,36 @@ struct Deadlines {
     retry: Duration,
 }
 
-const SUMMARIZER_DEADLINES: Deadlines = Deadlines {
-    first: SUMMARY_TIMEOUT,
-    retry: SUMMARY_RETRY_TIMEOUT,
-};
+/// The longest a summarizer call may take, however much text it carries: a pass
+/// that cannot answer within five minutes is a stalled endpoint, not a slow one.
+const SUMMARY_CEILING: Duration = Duration::from_secs(300);
+
+/// Roughly how many characters one second of summarizer reading covers. The
+/// deadline is derived from this rather than from a flat timeout, because the
+/// history that needs compacting is exactly the history one call cannot read in
+/// twenty seconds.
+const SUMMARY_CHARS_PER_SECOND: usize = 5_000;
+
+/// The budget one summarizer call gets, from the text it has to read.
+///
+/// The flat [`SUMMARY_TIMEOUT`] fits a small slice and is impossible for the
+/// history that actually needs compacting: a pass over a few hundred thousand
+/// tokens spends minutes producing its answer, so the flat deadline reported
+/// every real pass as `Segment::Slow`, fed gate ⑤ through `reject`, and left the
+/// Session told that automatic compaction was paused — in the one situation the
+/// shrink exists for. The budget now grows with the slice, between
+/// [`SUMMARY_TIMEOUT`] and [`SUMMARY_CEILING`]; a retry re-reads the same text
+/// and earns the same budget, because what a second call rescues is a stalled
+/// transport rather than a slow model.
+fn deadlines_for(chars: usize) -> Deadlines {
+    let first = (SUMMARY_TIMEOUT
+        + Duration::from_secs((chars / SUMMARY_CHARS_PER_SECOND.max(1)) as u64))
+    .min(SUMMARY_CEILING);
+    Deadlines {
+        first,
+        retry: first,
+    }
+}
 
 /// Reject one pass and keep the reason. The progress notice is ephemeral by
 /// design, so a Session that keeps failing to compact used to be diagnosable
@@ -495,11 +525,14 @@ where
     }
     // The budget is what keeps a long history to a handful of calls; the message
     // cap only bounds one answer's size, so it is applied when the caller set it.
+    let sizes: Vec<usize> = messages
+        .iter()
+        .map(|message| message_excerpt(message, SUMMARIZER_MESSAGE_CHARS).len() + 1)
+        .collect();
+    // What the prefix attempt would have to read, so its deadline is derived
+    // from the same text the segmented path is.
+    let history_chars = sizes.iter().sum::<usize>();
     let plan = if segment_chars > 0 {
-        let sizes: Vec<usize> = messages
-            .iter()
-            .map(|message| message_excerpt(message, SUMMARIZER_MESSAGE_CHARS).len() + 1)
-            .collect();
         plan_summary_by_size(&sizes, per_pass, segment_chars)
     } else {
         plan_summary(messages.len(), per_pass)
@@ -521,7 +554,7 @@ where
         let outcome = tokio::select! {
             biased;
             _ = cancel.cancelled() => None,
-            outcome = tokio::time::timeout(SUMMARY_TIMEOUT, prefix()) => Some(outcome),
+            outcome = tokio::time::timeout(deadlines_for(history_chars).first, prefix()) => Some(outcome),
         };
         let Some(outcome) = outcome else {
             notify(channel("compaction.cancelled"));
@@ -572,9 +605,8 @@ where
             };
             // A summarizer that never returns must not hold the turn: the call is
             // bounded, and a timeout degrades like any other summary failure.
-            match summarize_segment(&mut summarize, &instruction, &cancel, SUMMARIZER_DEADLINES)
-                .await
-            {
+            let deadline = deadlines_for(body.len());
+            match summarize_segment(&mut summarize, &instruction, &cancel, deadline).await {
                 Segment::Cancelled => {
                     notify(json!({
                         "session_id": session, "run_id": run,
@@ -645,7 +677,7 @@ where
                         &mut summarize,
                         &instruction,
                         &cancel,
-                        SUMMARIZER_DEADLINES,
+                        deadlines_for(instruction.len()),
                     )
                     .await
                     {
@@ -1780,18 +1812,36 @@ mod tests {
 
     #[test]
     fn threshold_prefers_the_later_bound() {
+        // The explicit headroom raises the trigger when it reserves more than
+        // the window ratio does.
         let budget = Budget {
             window: Some(100_000),
-            ratio: 0.8,
-            headroom: 90_000,
+            ratio: 0.3,
+            headroom: 40_000,
         };
-        assert_eq!(budget.threshold(), 90_000);
+        assert_eq!(budget.threshold(), 40_000);
+        // The ratio raises it when the headroom is the smaller reserve.
         let budget = Budget {
             window: Some(100_000),
             ratio: 0.8,
             headroom: 50_000,
         };
         assert_eq!(budget.threshold(), 80_000);
+        // A headroom sized for a large model must not put the trigger past a
+        // small window: the reserve never takes more than half, so a 6K model
+        // still compacts before its wall instead of never reaching the line.
+        let budget = Budget {
+            window: Some(6_000),
+            ratio: 0.8,
+            headroom: 112_048,
+        };
+        assert!(
+            budget.threshold() < 6_000,
+            "the trigger has to be reachable: {}",
+            budget.threshold()
+        );
+        assert_eq!(budget.threshold(), 4_800);
+        // An unknown window is the explicit headroom alone.
         let budget = Budget {
             window: None,
             ratio: 0.8,
@@ -1906,6 +1956,26 @@ mod tests {
             "the retry answers"
         );
         assert_eq!(calls, 2, "exactly one retry after the missed deadline");
+    }
+
+    /// The flat twenty seconds made every real pass look slow: the history that
+    /// needs compacting is the history one call cannot read in twenty seconds.
+    /// The budget follows the slice instead, and stays bounded at both ends.
+    #[test]
+    fn a_summarizer_deadline_follows_the_slice_it_reads() {
+        assert_eq!(deadlines_for(0).first, SUMMARY_TIMEOUT);
+        assert_eq!(deadlines_for(0).retry, SUMMARY_TIMEOUT);
+        let slice = deadlines_for(300_000);
+        assert!(
+            slice.first > SUMMARY_TIMEOUT && slice.first < SUMMARY_CEILING,
+            "a real slice earns more than the floor and less than the ceiling: {:?}",
+            slice.first
+        );
+        assert_eq!(
+            deadlines_for(usize::MAX).first,
+            SUMMARY_CEILING,
+            "a slice nobody could read is still bounded"
+        );
     }
 
     /// A summarizer that never answers spends both deadlines and is reported as

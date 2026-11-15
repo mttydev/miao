@@ -5378,14 +5378,38 @@ command: None,
             // Nothing states this Session's window, so there is nothing to plan
             // against and automatic compaction cannot run for it. Name the model:
             // the fix is an operator `engine.context_limits`, or a provider that
-            // reports an identity, and neither is guessable from silence.
-            crate::diagnostics::warn(
-                "automatic compaction is off: no context window resolved",
-                &[
-                    ("session", session.to_owned()),
-                    ("model", model.unwrap_or_else(|| "*".into())),
-                ],
-            );
+            // reports an identity, and neither is guessable from silence. Said
+            // once per Session: a line per settled turn buries the case it is
+            // meant to explain, and the durable event is what a reader of the
+            // journal can find afterwards.
+            let noticed = inner
+                .store
+                .latest_event(session, "compaction.disabled")
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if !noticed {
+                crate::diagnostics::warn(
+                    "automatic compaction is off: no context window resolved",
+                    &[
+                        ("session", session.to_owned()),
+                        ("model", model.clone().unwrap_or_else(|| "*".into())),
+                    ],
+                );
+                let _ = inner
+                    .store
+                    .record(
+                        session,
+                        "compaction.disabled",
+                        json!({
+                            "reason": "no_window",
+                            "model": model,
+                            "fix": "declare the model's context limit, or set engine.context_limits",
+                        }),
+                    )
+                    .await;
+            }
         }
         let limits = limits.or_else(|| {
             requested
