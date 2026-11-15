@@ -573,8 +573,13 @@ impl Shell {
             self.queued.snapshot(frame, queued_area);
             self.queued.paint(frame);
         }
-        self.composer_text =
-            render_composer(frame, composer_area, &self.composer, &self.transcript.theme);
+        self.composer_text = render_composer(
+            frame,
+            composer_area,
+            &self.composer,
+            &self.transcript.theme,
+            &self.status,
+        );
         match &self.leader_hint {
             Some(menu) => frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -2553,8 +2558,16 @@ fn render_composer(
     area: Rect,
     composer: &Composer,
     theme: &Theme,
+    status: &StatusStrip,
 ) -> Option<ComposerText> {
-    render_composer_in(frame, area, composer, theme, composer_column(area.width))
+    render_composer_in(
+        frame,
+        area,
+        composer,
+        theme,
+        composer_column(area.width),
+        status,
+    )
 }
 
 fn render_composer_in(
@@ -2563,6 +2576,7 @@ fn render_composer_in(
     composer: &Composer,
     theme: &Theme,
     column: u16,
+    status: &StatusStrip,
 ) -> Option<ComposerText> {
     let palette = theme.palette;
     let column = column.min(area.width);
@@ -5174,7 +5188,13 @@ mod tests {
                 .expect("terminal");
             terminal
                 .draw(|frame| {
-                    let _ = render_composer(frame, frame.area(), &composer, &theme);
+                    let _ = render_composer(
+                        frame,
+                        frame.area(),
+                        &composer,
+                        &theme,
+                        &StatusStrip::default(),
+                    );
                 })
                 .expect("draw");
             let text = terminal
@@ -5513,7 +5533,7 @@ mod tests {
             .draw(|frame| {
                 let _ = super::render_composer(
                     frame,
-                    ratatui::layout::Rect::new(0, 0, 80, 6),
+                    ratatui::layout::Rect::new(0, 0, 80, 6 & StatusStrip::default()),
                     &composer,
                     &theme,
                 );
@@ -5530,7 +5550,7 @@ mod tests {
             .draw(|frame| {
                 let _ = super::render_composer(
                     frame,
-                    ratatui::layout::Rect::new(0, 0, 80, 6),
+                    ratatui::layout::Rect::new(0, 0, 80, 6 & StatusStrip::default()),
                     &composer,
                     &theme,
                 );
@@ -5553,7 +5573,7 @@ mod tests {
             .draw(|frame| {
                 let _ = super::render_composer(
                     frame,
-                    ratatui::layout::Rect::new(0, 0, 80, 6),
+                    ratatui::layout::Rect::new(0, 0, 80, 6 & StatusStrip::default()),
                     &composer,
                     &theme,
                 );
@@ -5574,7 +5594,7 @@ mod tests {
             .draw(|frame| {
                 let _ = super::render_composer(
                     frame,
-                    ratatui::layout::Rect::new(0, 0, 80, 6),
+                    ratatui::layout::Rect::new(0, 0, 80, 6 & StatusStrip::default()),
                     &composer,
                     &theme,
                 );
@@ -6216,7 +6236,13 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme);
+                let _ = render_composer(
+                    frame,
+                    frame.area(),
+                    &composer,
+                    &theme,
+                    &StatusStrip::default(),
+                );
             })
             .expect("draw");
         let warning = theme.palette.warning;
@@ -6463,7 +6489,7 @@ mod tests {
                 .expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), composer, theme);
+                let _ = render_composer(frame, frame.area(), composer, theme, &status);
             })
             .expect("draw");
         terminal
@@ -6478,6 +6504,7 @@ mod tests {
     /// Paint the composer at a fixed width and return its top border row,
     /// trimmed, so a test can read the title the box carries.
     fn draw_composer(composer: &mut crate::editor::Composer, theme: &Theme) -> String {
+        let status = StatusStrip::default();
         let width = 40u16;
         let height = 3u16;
         let mut terminal =
@@ -6485,7 +6512,7 @@ mod tests {
                 .expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), composer, theme);
+                let _ = render_composer(frame, frame.area(), composer, theme, &status);
             })
             .expect("draw");
         (0..width)
@@ -7376,7 +7403,13 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 8)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme);
+                let _ = render_composer(
+                    frame,
+                    frame.area(),
+                    &composer,
+                    &theme,
+                    &StatusStrip::default(),
+                );
             })
             .expect("draw");
         let visible = terminal
