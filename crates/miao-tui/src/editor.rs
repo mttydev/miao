@@ -1357,7 +1357,34 @@ impl Composer {
     /// Show an image as `[Image N] ` and keep its bytes for the next prompt.
     /// Returns the new attachment count.
     pub fn attach_image(&mut self, mime: &str, data: &str) -> usize {
-        self.attach_binary(mime, data, "")
+        // A clipboard image has no source name, so two pasted screenshots used
+        // to materialize under the same default name and the transcript showed
+        // "image.png" twice. Number them the way the marker is numbered, so the
+        // name the engine writes is unique per paste.
+        let images = self
+            .attachments
+            .iter()
+            .filter(|attachment| {
+                attachment
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .is_some_and(|mime| mime.starts_with("image/"))
+            })
+            .count();
+        let extension = match mime.rsplit('/').next().unwrap_or("png") {
+            "jpeg" => "jpg",
+            other => other,
+        };
+        self.attach_binary(mime, data, &format!("image-{}.{extension}", images + 1))
+    }
+
+    /// The durable name a clipboard image is materialized under.
+    fn require_name(index: usize, extension: &str) -> Option<String> {
+        let extension = match extension {
+            "jpeg" => "jpg",
+            other => other,
+        };
+        Some(format!("image-{index}.{extension}"))
     }
 
     /// Attach bytes under a marker the operator can see: an image counts as
@@ -2333,9 +2360,10 @@ mod tests {
 
     /// A file-backed attachment carries its name as metadata, so the engine
     /// names the materialized copy after it and durable history matches the
-    /// marker on screen. A clipboard image has no source name and carries none.
+    /// marker on screen. A clipboard image has no source name, so it is named
+    /// after its marker number instead of every paste sharing one default.
     #[test]
-    fn a_pasted_file_names_its_attachment_but_a_clipboard_image_does_not() {
+    fn a_pasted_file_names_its_attachment_and_a_clipboard_image_is_numbered() {
         let dir = std::env::temp_dir().join(format!("miao-tui-attach-name-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(dir.join("plan.pdf"), b"%PDF-1.4").expect("write pdf");
@@ -2347,11 +2375,31 @@ mod tests {
             "the file name rides with the bytes"
         );
         composer.attach_image("image/png", "cG5n");
-        assert!(
-            composer.attachments[1].get("metadata").is_none(),
-            "a clipboard image has no source name"
+        assert_eq!(
+            composer.attachments[1]["metadata"],
+            json!({ "name": "image-1.png" }),
+            "a clipboard image is named after its marker number"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Several screenshots in one prompt must not share a name: the engine
+    /// materializes a file per attachment, and identical names made the
+    /// transcript show the same picture name twice.
+    #[test]
+    fn two_pasted_images_get_distinct_names() {
+        let dir = std::env::temp_dir().join(format!("miao-tui-image-names-{}", std::process::id()));
+        let mut composer = composer(&dir);
+        composer.attach_image("image/png", "b25l");
+        composer.attach_image("image/jpeg", "dHdv");
+        composer.attach_image("image/png", "dGhyZWU=");
+        assert_eq!(composer.editor.text(), "[Image 1] [Image 2] [Image 3] ");
+        let names = composer
+            .attachments
+            .iter()
+            .map(|attachment| attachment["metadata"]["name"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["image-1.png", "image-2.jpg", "image-3.png"]);
     }
 
     #[test]

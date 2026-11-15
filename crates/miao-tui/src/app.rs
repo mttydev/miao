@@ -5167,9 +5167,9 @@ impl App {
             self.notice("Context: the endpoint has not reported a window for this Session yet");
             return;
         };
-        let percent = tokens.saturating_mul(100) / window;
+        let percent = crate::status::context_percent(window, tokens);
         self.notice(&format!(
-            "Context {} of {} · {}% · automatic compaction arms near 90%",
+            "Context {} of {} · {}% of the input ceiling · automatic compaction runs before it is full",
             crate::status::compact_tokens(tokens),
             crate::status::compact_tokens(window),
             percent
