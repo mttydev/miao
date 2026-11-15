@@ -75,6 +75,18 @@ export function createEngineReader(input: {
     async clear(sessionID: string) {
       return transport.request("session_clear", { session_id: sessionID })
     },
+    /** Pin or unpin a Session in the shared catalog. Pinning leaves `updated_at_ms` untouched. */
+    async pin(sessionID: string, pinned: boolean) {
+      return transport.request("pin", { session_id: sessionID, pinned })
+    },
+    /** Archive or restore a Session. Archiving changes no message, run or inbox row. */
+    async archive(sessionID: string, archived: boolean) {
+      return transport.request("archive", { session_id: sessionID, archived })
+    },
+    /** Delete everything the Session owns. Not a tombstone: the identity can be re-created. */
+    async remove(sessionID: string) {
+      return transport.request("remove", { session_id: sessionID })
+    },
     /** Stop the Session's active run. Idle is a no-op the engine accepts. */
     async cancel(sessionID: string) {
       return transport.request("cancel", { session_id: sessionID })
