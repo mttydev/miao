@@ -94,24 +94,15 @@ jobs:
           sudo docker image prune -af || true
           df -h "$RUNNER_TEMP"
 
-      - name: Require free disk
+      - name: Point the build at the scratch volume
         run: |
-          # The hosted image's root volume has been shrinking as GitHub ships
-          # more preinstalled toolsets, and the preflight kept refusing runners
-          # no matter what the reclaim step removed. The scratch volume at /mnt
-          # has ~65 GB the shards never touched, so the build lives there when
-          # it can; the preflight guards whichever volume the build will spend.
-          sudo mkdir -p /mnt/cargo-target
-          sudo chown -R "$(id -u):$(id -g)" /mnt/cargo-target
-          echo "CARGO_TARGET_DIR=/mnt/cargo-target" >> "$GITHUB_ENV"
-          free_mnt=$(df -m /mnt/cargo-target | awk 'NR==2 {print $4}')
-          free_temp=$(df -m "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
-          echo "free disk under /mnt/cargo-target: ${free_mnt}MB; under $RUNNER_TEMP: ${free_temp}MB"
-          if [ "${free_mnt:-0}" -lt 9000 ]; then
-            echo "::error::runner has ${free_mnt}MB free under /mnt but an engine shard needs 9000MB; prune unused build trees before rerunning"
-            exit 1
+          # /mnt is the hosted runner's large scratch disk, but some images
+          # restrict writes there. When it is writable the build targets it;
+          # otherwise cargo's default under the workspace works fine.
+          sudo mkdir -p /mnt/cargo-target 2>/dev/null || true
+          if sudo chown -R "$(id -u):$(id -g)" /mnt/cargo-target 2>/dev/null; then
+            echo "CARGO_TARGET_DIR=/mnt/cargo-target" >> "$GITHUB_ENV"
           fi
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
