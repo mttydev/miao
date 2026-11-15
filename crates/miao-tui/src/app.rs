@@ -733,7 +733,7 @@ impl App {
             drafts: HashMap::new(),
             history_index: 0,
             catalog: Vec::new(),
-            last_catalog_ask: None,
+        last_catalog_ask: None,
             pending_models: false,
             models_filter: None,
             accounts_filter: None,
@@ -6229,9 +6229,6 @@ mod tests {
         app.session = Some(SessionSummary {
             updated_at_ms: Some(now.saturating_sub(2 * 3_600_000)),
             ..summary("ses_a", 1)
-    active_run: None,
-    todos_open: None,
-    goal_armed: None,
         });
         let wait = app.next_repaint().expect("the sidebar shows a timestamp");
         assert!(
@@ -6246,9 +6243,6 @@ mod tests {
             archived_at_ms: Some(1),
             ..summary(id, updated_at_ms)
         }
-    active_run: None,
-    todos_open: None,
-    goal_armed: None,
     }
 
     #[test]
@@ -6352,9 +6346,6 @@ mod tests {
             SessionSummary {
                 pinned_at_ms: Some(10),
                 ..summary("ses_pinned", 100)
-    active_run: None,
-    todos_open: None,
-    goal_armed: None,
             },
             summary("ses_recent", 200),
         ]));
@@ -7147,9 +7138,6 @@ mod tests {
                 variant: None,
             }),
             ..summary("ses_open", 1)
-    active_run: None,
-    todos_open: None,
-    goal_armed: None,
         });
         app.update_status();
         assert_eq!(
