@@ -254,11 +254,17 @@ impl Bus {
 /// answer only shows up after I type again" report. Waiting for a slot is the
 /// right trade here: the render loop is the only consumer and it drains every
 /// queued event before painting.
+///
+/// `Clipboard` is in the same camp: it answers a keystroke the operator
+/// already pressed, and it is the event that clears the clipboard-read flag.
+/// Dropping it wedged that flag, and every later Ctrl+V, Alt+V and `/paste`
+/// went silently dead for the rest of the session.
 fn requires_delivery(event: &AppEvent) -> bool {
     matches!(
         event,
         AppEvent::Key(_)
             | AppEvent::Paste(_)
+            | AppEvent::Clipboard(_)
             | AppEvent::EngineFailure(_)
             | AppEvent::PromptFailed { .. }
             | AppEvent::ActionFailed(_)
@@ -470,5 +476,55 @@ mod backpressure_tests {
             "the keystroke was lost instead of delivered"
         );
         assert_eq!(bus.dropped(), 0, "a keystroke was counted as dropped");
+    }
+
+    /// A clipboard result answers a keystroke the operator already pressed and
+    /// is the event that clears the clipboard-read flag: dropping it wedged
+    /// that flag, and every later Ctrl+V, Alt+V and `/paste` went silently
+    /// dead for the rest of the session — pressed during a streaming turn,
+    /// the queue was full and the result was coalesced away exactly once.
+    #[test]
+    fn a_clipboard_result_is_delivered_even_when_the_queue_is_full() {
+        let (bus, mut rx) = bus();
+        for _ in 0..BUS_CAPACITY {
+            bus.send(AppEvent::Notice("filler".into()));
+        }
+        let reader = {
+            let bus = bus.clone();
+            std::thread::spawn(move || {
+                bus.send(AppEvent::Clipboard(None));
+            })
+        };
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for _ in 0..BUS_CAPACITY + 1 {
+            match rx.try_recv() {
+                Ok(event) => received.lock().expect("received").push(event),
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            if received
+                .lock()
+                .expect("received")
+                .iter()
+                .any(|event| matches!(event, AppEvent::Clipboard(_)))
+            {
+                break;
+            }
+        }
+        reader.join().expect("the reader thread must not panic");
+        assert!(
+            received
+                .lock()
+                .expect("received")
+                .iter()
+                .any(|event| matches!(event, AppEvent::Clipboard(_))),
+            "the clipboard result was lost instead of delivered"
+        );
+        assert_eq!(
+            bus.dropped(),
+            0,
+            "a clipboard result was counted as dropped"
+        );
     }
 }

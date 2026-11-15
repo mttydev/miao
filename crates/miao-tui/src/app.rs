@@ -3491,6 +3491,7 @@ impl App {
     /// image becomes a numbered attachment.
     fn read_clipboard(&mut self) {
         if self.clipboard_busy {
+            self.notice("still reading the clipboard…");
             return;
         }
         let Some(bus) = self.bus.clone() else {
