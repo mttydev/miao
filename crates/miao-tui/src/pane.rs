@@ -1578,7 +1578,13 @@ impl Home {
     /// banner and the version centred in the vertical leftover, the prompt
     /// beneath, and any notice under that. There is no session list here —
     /// history lives in the session dialog, reachable from the prompt.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, composer: &mut Composer) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        composer: &mut Composer,
+        status: &StatusStrip,
+    ) {
         let palette = self.theme.palette;
         let width = area.width as usize;
         // The page ground: every other row is painted by something, and the
@@ -2170,6 +2176,14 @@ const COMPACT_CELLS: usize = 80;
 /// until a Session is open, so the home list keeps its full height.
 #[derive(Default)]
 pub struct StatusStrip {
+    /// The run's state, leading the row under the draft: `Idle` with nothing
+    /// admitted, else the phase a live run announced.
+    pub phase: Option<String>,
+    pub phase_elapsed: Option<String>,
+    /// A run is in flight, so the row spins in front of its phase.
+    pub phase_running: bool,
+    /// The wait has outlasted its threshold: the phase turns warning-colored.
+    pub phase_alert: bool,
     pub model: Option<String>,
     pub usage: Option<String>,
     /// What the run waits on and what the next key does, right-aligned: an

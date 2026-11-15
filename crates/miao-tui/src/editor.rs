@@ -916,6 +916,9 @@ pub struct Composer {
     mode: Mode,
     pub completion: Completion,
     pub notice: Option<String>,
+    /// The queued prompts the engine still holds, painted as a hint beside the
+    /// model on the status row the composer owns.
+    pub queued: usize,
     /// Which placeholder example the empty composer shows. The TS prompt picks
     /// one at random when it mounts and re-rolls on a Session change, so this
     /// is a stored index rather than a clock drift.
