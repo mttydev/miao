@@ -11,6 +11,17 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.74] - 2026-11-15
+
+### Added
+- **engine**: orient the system prompt with the clock and knowledge index (#3047) (`2478d09dee`)
+- **engine**: carry an operating-guidance baseline in the system prompt (#3044) (`919f3da004`)
+
+### Fixed
+- **tui**: stop a taken-back picture from reusing its number (#3049) (`850be9c5a1`)
+- **tui**: give the sidebar the window's whole height (#3048) (`5c8704b0d6`)
+- **nix**: let the node_modules derivation see the desktop workspace (#3043) (`9888fa0df7`)
+
 ## [0.3.73] - 2026-11-15
 
 ### Fixed
