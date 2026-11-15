@@ -3084,11 +3084,31 @@ mod tests {
     fn the_session_list_marks_the_open_session() {
         let rows = vec![
             SessionSummary {
+                id: "ses_a".into(),
+                title: Some("A".into()),
+                parent_id: None,
+                updated_at_ms: None,
+                archived_at_ms: None,
+                pinned_at_ms: None,
+                directory: None,
+                model: None,
+                credential_id: None,
+                preview: None,
                 active_run: None,
                 todos_open: None,
                 goal_armed: None,
             },
             SessionSummary {
+                id: "ses_b".into(),
+                title: Some("B".into()),
+                parent_id: None,
+                updated_at_ms: None,
+                archived_at_ms: None,
+                pinned_at_ms: None,
+                directory: None,
+                model: None,
+                credential_id: None,
+                preview: None,
                 active_run: None,
                 todos_open: None,
                 goal_armed: None,
@@ -3105,6 +3125,16 @@ mod tests {
     #[test]
     fn session_rows_answer_rename_pin_archive_and_delete() {
         let row = SessionSummary {
+            id: "ses_a".into(),
+            title: Some("A".into()),
+            parent_id: None,
+            updated_at_ms: None,
+            archived_at_ms: None,
+            pinned_at_ms: None,
+            directory: None,
+            model: None,
+            credential_id: None,
+            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,

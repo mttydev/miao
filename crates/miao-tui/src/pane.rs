@@ -5142,6 +5142,16 @@ mod tests {
             },
         );
         shell.set_session(Some(&SessionSummary {
+            id: "ses_a".into(),
+            title: Some("offset fix".into()),
+            parent_id: None,
+            updated_at_ms: Some(10),
+            archived_at_ms: None,
+            pinned_at_ms: None,
+            directory: Some("/work/miao".into()),
+            model: None,
+            credential_id: None,
+            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,
@@ -5201,6 +5211,16 @@ mod tests {
             },
         );
         shell.set_session(Some(&SessionSummary {
+            id: "ses_p".into(),
+            title: Some("plan".into()),
+            parent_id: None,
+            updated_at_ms: Some(10),
+            archived_at_ms: None,
+            pinned_at_ms: None,
+            directory: Some("/work/miao".into()),
+            model: None,
+            credential_id: None,
+            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,
@@ -5397,6 +5417,16 @@ mod tests {
         );
         // The sidebar only paints its sections for an open Session.
         shell.set_session(Some(&SessionSummary {
+            id: "ses_a".into(),
+            title: Some("offset fix".into()),
+            parent_id: None,
+            updated_at_ms: Some(10),
+            archived_at_ms: None,
+            pinned_at_ms: None,
+            directory: Some("/work/miao".into()),
+            model: None,
+            credential_id: None,
+            preview: None,
             active_run: None,
             todos_open: None,
             goal_armed: None,
