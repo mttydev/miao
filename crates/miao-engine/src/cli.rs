@@ -1067,7 +1067,9 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     tools = tools.with_mcp_disclosure(mcp_disclosure, mcp_disclosure_allowlist);
     if let Some(path) = options.get("--worker-config") {
         let path = tokio::fs::canonicalize(path).await?;
-        if path.starts_with(std::path::Path::new(tools.location())) {
+        if crate::placement::plain(&path)
+            .starts_with(crate::placement::plain(std::path::Path::new(tools.location())).as_ref())
+        {
             return Err("Worker host config must be outside model-writable workspace".into());
         }
         let bytes = tokio::fs::read(&path).await?;

@@ -30,11 +30,14 @@ fn config() -> Config {
     ];
     #[cfg(windows)]
     let argv = vec![
-        "cmd.exe".into(),
-        "/d".into(),
-        "/s".into(),
-        "/c".into(),
-        "echo formatted>\"$FILE\"".into(),
+        "powershell".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        // `cmd.exe` needs the redirect target quoted, and the quoted command is
+        // then re-parsed by `cmd /s /c`, which is where the fixture wrote the
+        // wrong place and the formatter reported `failed`. PowerShell writes one
+        // literal path and needs no shell re-parse.
+        "Set-Content -LiteralPath \"$FILE\" -Value formatted -NoNewline".into(),
     ];
     Config {
         name: "fixture".into(),
