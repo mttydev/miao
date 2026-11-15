@@ -2594,12 +2594,12 @@ fn render_composer_in(
     } else {
         ""
     };
-    let mut parts = composer.phase.iter().cloned().collect::<Vec<_>>();
+    let mut parts = status.phase.iter().cloned().collect::<Vec<_>>();
     // The elapsed time rides the phase it measures: "Waiting for model · 2.0s"
     // reads as one fact, and the title has room for it once the box carries the
     // state instead of a band above the box.
-    if composer.phase.is_some() {
-        parts.extend(composer.phase_elapsed.iter().cloned());
+    if status.phase.is_some() {
+        parts.extend(status.phase_elapsed.iter().cloned());
     }
     parts.extend(queued);
     parts.extend(composer.notice.iter().cloned());
@@ -2617,12 +2617,12 @@ fn render_composer_in(
         // reads as moving even while the phase name stays the same. Past half a
         // minute of waiting the tone turns warning, which is the one signal
         // that separates "thinking" from "wedged" without reading the words.
-        let tone = match (shell, composer.phase_alert) {
+        let tone = match (shell, status.phase_alert) {
             (true, _) => palette.warning,
             (false, true) => palette.warning,
             (false, false) => palette.accent,
         };
-        if composer.phase.is_some() {
+        if status.phase.is_some() {
             let frame = SPINNER_FRAMES[(now_ms() / 160) as usize % SPINNER_FRAMES.len()];
             title.push(Span::styled(format!("{frame} "), Style::new().fg(tone)));
         }
@@ -6190,7 +6190,7 @@ mod tests {
             "an idle session names nothing"
         );
 
-        composer.phase = Some("Running bash".into());
+        status.phase = Some("Running bash".into());
         composer.queued = 2;
         let titled = draw_composer(&mut composer, &theme);
         assert!(titled.contains("Running bash"), "{titled}");
@@ -6210,8 +6210,8 @@ mod tests {
             palette,
         };
         let mut composer = crate::editor::Composer::new(Path::new("."));
-        composer.phase = Some("Waiting for model".into());
-        composer.phase_alert = true;
+        status.phase = Some("Waiting for model".into());
+        status.phase_alert = true;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).expect("terminal");
         terminal
@@ -7226,8 +7226,8 @@ mod tests {
                 palette,
             },
         );
-        shell.composer.phase = Some("Waiting for model".into());
-        shell.composer.phase_elapsed = Some("2.0s".into());
+        shell.status.phase = Some("Waiting for model".into());
+        shell.status.phase_elapsed = Some("2.0s".into());
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).expect("terminal");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
