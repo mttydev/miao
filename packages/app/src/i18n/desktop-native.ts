@@ -224,7 +224,7 @@ function locale(value: string) {
 }
 
 export const DESKTOP_NATIVE_ENGLISH = {
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "File",
   "desktop.menu.edit": "Edit",
   "desktop.menu.view": "View",
@@ -264,11 +264,11 @@ export const DESKTOP_NATIVE_ENGLISH = {
   "desktop.menu.nextProject": "Next Project",
   "desktop.menu.minimize": "Minimize",
   "desktop.menu.maximize": "Maximize",
-  "desktop.menu.documentation": "miao Documentation",
+  "desktop.menu.documentation": "MiaoDesktop Documentation",
   "desktop.menu.supportForum": "Support Forum",
   "desktop.menu.shareFeedback": "Share Feedback",
   "desktop.menu.reportBug": "Report a Bug",
-  "desktop.menu.ariaLabel": "miao menu",
+  "desktop.menu.ariaLabel": "MiaoDesktop menu",
 
   "desktop.updater.dialog.checkFailed.message": "Update check failed.",
   "desktop.updater.dialog.checkFailed.title": "Update Error",
@@ -283,9 +283,9 @@ export const DESKTOP_NATIVE_ENGLISH = {
   "desktop.recovery.action.exportLogs": "Export Logs",
   "desktop.recovery.action.keepWaiting": "Keep Waiting",
   "desktop.recovery.action.quit": "Quit",
-  "desktop.recovery.loadFailed": "miao failed to load",
-  "desktop.recovery.terminated": "miao window terminated unexpectedly",
-  "desktop.recovery.unresponsive": "miao is not responding",
+  "desktop.recovery.loadFailed": "MiaoDesktop failed to load",
+  "desktop.recovery.terminated": "MiaoDesktop window terminated unexpectedly",
+  "desktop.recovery.unresponsive": "MiaoDesktop is not responding",
   "desktop.recovery.unresponsive.detail": "You can relaunch the app, open the logs, or keep waiting.",
   "desktop.recovery.loadFailed.detail": "Window: {{window}}\nURL: {{url}}\nError: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Window: {{window}}\nReason: {{reason}}\nCode: {{code}}",

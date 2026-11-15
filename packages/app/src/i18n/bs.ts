@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Zapisivanje u keš memoriju",
   "context.timeline.ttft": "{{value}} ms do prvog tokena",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Datoteka",
   "desktop.menu.edit": "Uredi",
   "desktop.menu.view": "Prikaz",
@@ -60,7 +60,7 @@ export const dict = {
   "desktop.menu.supportForum": "Forum za podršku",
   "desktop.menu.shareFeedback": "Pošalji povratne informacije",
   "desktop.menu.reportBug": "Prijavi grešku",
-  "desktop.menu.ariaLabel": "miao meni",
+  "desktop.menu.ariaLabel": "MiaoDesktop meni",
 
   "desktop.updater.dialog.checkFailed.message": "Provjera ažuriranja nije uspjela.",
   "desktop.updater.dialog.checkFailed.title": "Greška pri ažuriranju",
@@ -76,9 +76,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Izvezi zapisnike",
   "desktop.recovery.action.keepWaiting": "Nastavi čekati",
   "desktop.recovery.action.quit": "Izađi",
-  "desktop.recovery.loadFailed": "miao se nije uspio učitati",
+  "desktop.recovery.loadFailed": "MiaoDesktop se nije uspio učitati",
   "desktop.recovery.terminated": "Prozor Miao-a neočekivano je zatvoren",
-  "desktop.recovery.unresponsive": "miao ne reaguje",
+  "desktop.recovery.unresponsive": "MiaoDesktop ne reaguje",
   "desktop.recovery.unresponsive.detail": "Možeš ponovo pokrenuti aplikaciju, otvoriti zapisnike ili nastaviti čekati.",
   "desktop.recovery.loadFailed.detail": "Prozor: {{window}}\nURL: {{url}}\nGreška: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Prozor: {{window}}\nRazlog: {{reason}}\nKod: {{code}}",
@@ -562,7 +562,7 @@ export const dict = {
   "help.tabs.title": "Predstavljamo kartice",
   "help.tabs.description": "Organizuj svoj rad i aktivne sesije pomoću kartica",
   "help.tabs.date": "14. juli",
-  "help.tabs.introduction": "miao Desktop sada je organizovan oko kartica.",
+  "help.tabs.introduction": "MiaoDesktop sada je organizovan oko kartica.",
   "help.tabs.sessions":
     "Započni novu sesiju u kartici ili otvori postojeću sesiju iz bilo kojeg projekta. Otvori novu karticu kada započinješ nešto novo, a zatvori je kada završiš.",
   "help.tabs.organize":
@@ -912,7 +912,7 @@ export const dict = {
   "sidebar.empty.title": "Nema otvorenih projekata",
   "sidebar.empty.description": "Otvori projekat za početak",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Server",

@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "សរសេរឃ្លាំងសម្ងាត់",
   "context.timeline.ttft": "{{value}} ms ទៅសញ្ញាសម្ងាត់ដំបូង",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "ឯកសារ",
   "desktop.menu.edit": "កែសម្រួល",
   "desktop.menu.view": "មើល",
@@ -73,9 +73,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "នាំចេញកំណត់ហេតុ",
   "desktop.recovery.action.keepWaiting": "បន្តរង់ចាំ",
   "desktop.recovery.action.quit": "ឈប់",
-  "desktop.recovery.loadFailed": "miao បានបរាជ័យក្នុងការផ្ទុក",
+  "desktop.recovery.loadFailed": "MiaoDesktop បានបរាជ័យក្នុងការផ្ទុក",
   "desktop.recovery.terminated": "បង្អួច miao ត្រូវបានបញ្ចប់ដោយមិននឹកស្មានដល់",
-  "desktop.recovery.unresponsive": "miao មិនឆ្លើយតបទេ។",
+  "desktop.recovery.unresponsive": "MiaoDesktop មិនឆ្លើយតបទេ។",
   "desktop.recovery.unresponsive.detail": "អ្នកអាចបើកកម្មវិធីឡើងវិញ បើកកំណត់ហេតុ ឬបន្តរង់ចាំ។",
   "desktop.recovery.loadFailed.detail": "បង្អួច៖ {{window}}\nURL៖ {{url}}\nកំហុស៖ {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "បង្អួច៖ {{window}}\nហេតុផល៖ {{reason}}\nលេខកូដ៖ {{code}}",
@@ -530,7 +530,7 @@ export const dict = {
   "help.tabs.title": "ការណែនាំផ្ទាំង",
   "help.tabs.description": "រៀបចំការងារ និងសម័យសកម្មរបស់អ្នកជាមួយផ្ទាំង",
   "help.tabs.date": "ថ្ងៃទី 14 ខែកក្កដា",
-  "help.tabs.introduction": "miao Desktop ឥឡូវនេះត្រូវបានបង្កើតឡើងនៅជុំវិញផ្ទាំង។",
+  "help.tabs.introduction": "MiaoDesktop ឥឡូវនេះត្រូវបានបង្កើតឡើងនៅជុំវិញផ្ទាំង។",
   "help.tabs.sessions":
     "ចាប់ផ្តើមសម័យថ្មីនៅក្នុងផ្ទាំងមួយ ឬបើកសម័យដែលមានស្រាប់ពីគម្រោងណាមួយរបស់អ្នក។ បើកផ្ទាំងថ្មីនៅពេលអ្នកចាប់ផ្តើមអ្វីថ្មី ហើយបិទវានៅពេលអ្នករួចរាល់។",
   "help.tabs.organize":
@@ -925,7 +925,7 @@ export const dict = {
   "debugBar.direction.tip": "បង្ខំទិសដៅប្លង់កម្មវិធីពេញលេញដោយមិនផ្លាស់ប្តូរភាសាដែលបានជ្រើសរើស",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "ផ្ទៃតុ",
   "settings.section.server": "ម៉ាស៊ីនមេ",
   "settings.tab.general": "ទូទៅ",

@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "escritura en caché",
   "context.timeline.ttft": "{{value}} ms al primer token",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Archivo",
   "desktop.menu.edit": "Editar",
   "desktop.menu.view": "Ver",
@@ -77,7 +77,7 @@ export const dict = {
   "desktop.recovery.action.quit": "Salir",
   "desktop.recovery.loadFailed": "No se pudo cargar miao",
   "desktop.recovery.terminated": "La ventana de miao se cerró de forma inesperada",
-  "desktop.recovery.unresponsive": "miao no responde",
+  "desktop.recovery.unresponsive": "MiaoDesktop no responde",
   "desktop.recovery.unresponsive.detail":
     "Puedes volver a iniciar la aplicación, abrir los registros o seguir esperando.",
   "desktop.recovery.loadFailed.detail": "Ventana: {{window}}\nURL: {{url}}\nError: {{code}} {{description}}",
@@ -563,7 +563,7 @@ export const dict = {
   "help.tabs.title": "Presentamos las pestañas",
   "help.tabs.description": "Organiza tu trabajo y las sesiones activas con pestañas",
   "help.tabs.date": "14 de julio",
-  "help.tabs.introduction": "miao Desktop ahora se organiza en torno a pestañas.",
+  "help.tabs.introduction": "MiaoDesktop ahora se organiza en torno a pestañas.",
   "help.tabs.sessions":
     "Inicia una nueva sesión en una pestaña o abre una sesión existente de cualquiera de tus proyectos. Abre una pestaña nueva cuando empieces algo nuevo y ciérrala cuando termines.",
   "help.tabs.organize":
@@ -917,7 +917,7 @@ export const dict = {
   "sidebar.empty.title": "No hay proyectos abiertos",
   "sidebar.empty.description": "Abre un proyecto para empezar",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "Escritorio",
   "settings.section.server": "Servidor",

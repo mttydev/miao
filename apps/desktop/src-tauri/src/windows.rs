@@ -53,7 +53,7 @@ impl MainWindow {
             app,
             decorations,
         )
-        .title("miao")
+        .title("MiaoDesktop")
         .disable_drag_drop_handler()
         .zoom_hotkeys_enabled(false)
         .visible(true)

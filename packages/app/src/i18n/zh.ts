@@ -20,7 +20,7 @@ export const dict = {
   "context.timeline.cacheWrite": "缓存写入",
   "context.timeline.ttft": "首个 token 延迟 {{value}} 毫秒",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "文件",
   "desktop.menu.edit": "编辑",
   "desktop.menu.view": "视图",
@@ -60,11 +60,11 @@ export const dict = {
   "desktop.menu.nextProject": "下一个项目",
   "desktop.menu.minimize": "最小化",
   "desktop.menu.maximize": "最大化",
-  "desktop.menu.documentation": "miao 文档",
+  "desktop.menu.documentation": "MiaoDesktop 文档",
   "desktop.menu.supportForum": "支持论坛",
   "desktop.menu.shareFeedback": "提供反馈",
   "desktop.menu.reportBug": "报告错误",
-  "desktop.menu.ariaLabel": "miao 菜单",
+  "desktop.menu.ariaLabel": "MiaoDesktop 菜单",
 
   "desktop.updater.dialog.checkFailed.message": "检查更新失败。",
   "desktop.updater.dialog.checkFailed.title": "更新错误",
@@ -79,9 +79,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "导出日志",
   "desktop.recovery.action.keepWaiting": "继续等待",
   "desktop.recovery.action.quit": "退出",
-  "desktop.recovery.loadFailed": "miao 加载失败",
-  "desktop.recovery.terminated": "miao 窗口意外终止",
-  "desktop.recovery.unresponsive": "miao 未响应",
+  "desktop.recovery.loadFailed": "MiaoDesktop 加载失败",
+  "desktop.recovery.terminated": "MiaoDesktop 窗口意外终止",
+  "desktop.recovery.unresponsive": "MiaoDesktop 未响应",
   "desktop.recovery.unresponsive.detail": "你可以重新启动应用、打开日志或继续等待。",
   "desktop.recovery.loadFailed.detail": "窗口：{{window}}\nURL：{{url}}\n错误：{{code}} {{description}}",
   "desktop.recovery.terminated.detail": "窗口：{{window}}\n原因：{{reason}}\n代码：{{code}}",
@@ -574,7 +574,7 @@ export const dict = {
   "help.tabs.title": "标签页功能介绍",
   "help.tabs.description": "使用标签页整理工作和进行中的会话",
   "help.tabs.date": "7 月 14 日",
-  "help.tabs.introduction": "miao Desktop 现已采用以标签页为核心的设计。",
+  "help.tabs.introduction": "MiaoDesktop 现已采用以标签页为核心的设计。",
   "help.tabs.sessions":
     "在标签页中开始新会话，或从任意项目打开现有会话。开始处理新任务时打开新标签页，完成后将其关闭。",
   "help.tabs.organize":
@@ -894,7 +894,7 @@ export const dict = {
   "sidebar.empty.title": "没有打开的项目",
   "sidebar.empty.description": "打开一个项目以开始使用",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "桌面",
   "settings.section.server": "服务器",

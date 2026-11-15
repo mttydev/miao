@@ -15,7 +15,7 @@ export const dict = {
   "context.timeline.cacheWrite": "کیش لکھنا",
   "context.timeline.ttft": "پہلے ٹوکن کے لیے {{value}} ms",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "فائل",
   "desktop.menu.edit": "ترمیم",
   "desktop.menu.view": "دیکھیں",
@@ -55,11 +55,11 @@ export const dict = {
   "desktop.menu.nextProject": "اگلا پروجیکٹ",
   "desktop.menu.minimize": "چھوٹا کریں",
   "desktop.menu.maximize": "بڑا کریں",
-  "desktop.menu.documentation": "miao دستاویزات",
+  "desktop.menu.documentation": "MiaoDesktop دستاویزات",
   "desktop.menu.supportForum": "معاونتی فورم",
   "desktop.menu.shareFeedback": "رائے کا اشتراک کریں",
   "desktop.menu.reportBug": "خرابی کی اطلاع دیں",
-  "desktop.menu.ariaLabel": "miao مینو",
+  "desktop.menu.ariaLabel": "MiaoDesktop مینو",
 
   "desktop.updater.dialog.checkFailed.message": "اپ ڈیٹ کی جانچ ناکام ہو گئی۔",
   "desktop.updater.dialog.checkFailed.title": "اپ ڈیٹ کی خرابی",
@@ -74,9 +74,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "لاگز برآمد کریں",
   "desktop.recovery.action.keepWaiting": "انتظار جاری رکھیں",
   "desktop.recovery.action.quit": "بند کریں",
-  "desktop.recovery.loadFailed": "miao لوڈ نہیں ہو سکا",
-  "desktop.recovery.terminated": "miao ونڈو غیر متوقع طور پر بند ہو گئی",
-  "desktop.recovery.unresponsive": "miao جواب نہیں دے رہا",
+  "desktop.recovery.loadFailed": "MiaoDesktop لوڈ نہیں ہو سکا",
+  "desktop.recovery.terminated": "MiaoDesktop ونڈو غیر متوقع طور پر بند ہو گئی",
+  "desktop.recovery.unresponsive": "MiaoDesktop جواب نہیں دے رہا",
   "desktop.recovery.unresponsive.detail":
     "آپ ایپ کو دوبارہ چلا سکتے ہیں، لاگز کھول سکتے ہیں یا انتظار جاری رکھ سکتے ہیں۔",
   "desktop.recovery.loadFailed.detail": "ونڈو: {{window}}\nURL: {{url}}\nخرابی: {{code}} {{description}}",
@@ -539,7 +539,7 @@ export const dict = {
   "help.tabs.title": "ٹیبز کا تعارف",
   "help.tabs.description": "اپنے کام اور فعال سیشنز کو ٹیبز کے ذریعے منظم کریں",
   "help.tabs.date": "14 جولائی",
-  "help.tabs.introduction": "miao Desktop اب ٹیبز پر مبنی ہے۔",
+  "help.tabs.introduction": "MiaoDesktop اب ٹیبز پر مبنی ہے۔",
   "help.tabs.sessions":
     "ٹیب میں نیا سیشن شروع کریں یا اپنے کسی بھی پروجیکٹ سے موجودہ سیشن کھولیں۔ کوئی نیا کام شروع کرتے وقت نیا ٹیب کھولیں اور کام مکمل ہونے پر اسے بند کر دیں۔",
   "help.tabs.organize":
@@ -936,7 +936,7 @@ export const dict = {
   "debugBar.direction.tip": "منتخب زبان تبدیل کیے بغیر پوری ایپ کے لے آؤٹ کی سمت لازماً مقرر کریں",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao ڈیسک ٹاپ",
+  "app.name.desktop": "MiaoDesktop ڈیسک ٹاپ",
   "settings.section.desktop": "ڈیسک ٹاپ",
   "settings.section.server": "سرور",
   "settings.tab.general": "عمومی",

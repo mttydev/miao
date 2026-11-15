@@ -452,7 +452,7 @@ export const dict = {
   "help.tabs.title": "Introducing Tabs",
   "help.tabs.description": "Organize your work and active sessions with tabs",
   "help.tabs.date": "July 14",
-  "help.tabs.introduction": "miao Desktop is now built around tabs.",
+  "help.tabs.introduction": "MiaoDesktop is now built around tabs.",
   "help.tabs.sessions":
     "Start a new session in a tab, or open an existing session from any of your projects. Open a new tab when you're starting something new, and close it when you're done.",
   "help.tabs.organize":
@@ -906,7 +906,7 @@ export const dict = {
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Server",

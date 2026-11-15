@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Gravação em cache",
   "context.timeline.ttft": "{{value}} ms para o primeiro token",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Arquivo",
   "desktop.menu.edit": "Editar",
   "desktop.menu.view": "Visualizar",
@@ -850,7 +850,7 @@ export const dict = {
   "sidebar.project.clearNotifications": "Limpar notificações",
   "sidebar.empty.title": "Nenhum projeto aberto",
   "sidebar.empty.description": "Abra um projeto para começar",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Servidor",
   "settings.tab.general": "Geral",

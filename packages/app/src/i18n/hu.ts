@@ -936,7 +936,7 @@ export const dict = {
     "A teljes alkalmazáselrendezési irány kényszerítése a kiválasztott nyelv megváltoztatása nélkül",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao asztali számítógép",
+  "app.name.desktop": "MiaoDesktop asztali számítógép",
   "settings.section.desktop": "Asztali",
   "settings.section.server": "Kiszolgáló",
   "settings.tab.general": "Általános",

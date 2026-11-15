@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Tulis cache",
   "context.timeline.ttft": "{{value}} ms kepada token pertama",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Fail",
   "desktop.menu.edit": "Sunting",
   "desktop.menu.view": "Paparan",
@@ -73,9 +73,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Eksport Log",
   "desktop.recovery.action.keepWaiting": "Teruskan Menunggu",
   "desktop.recovery.action.quit": "Keluar",
-  "desktop.recovery.loadFailed": "miao gagal dimuatkan",
+  "desktop.recovery.loadFailed": "MiaoDesktop gagal dimuatkan",
   "desktop.recovery.terminated": "Tetingkap miao ditamatkan secara tidak dijangka",
-  "desktop.recovery.unresponsive": "miao tidak memberi respons",
+  "desktop.recovery.unresponsive": "MiaoDesktop tidak memberi respons",
   "desktop.recovery.unresponsive.detail": "Anda boleh lancarkan semula aplikasi, buka log, atau terus menunggu.",
   "desktop.recovery.loadFailed.detail": "Tetingkap: {{window}}\nURL: {{url}}\nRalat: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Tetingkap: {{window}}\nSebab: {{reason}}\nKod: {{code}}",
@@ -531,7 +531,7 @@ export const dict = {
   "help.tabs.title": "Pengenalan Tab",
   "help.tabs.description": "Susun kerja dan sesi aktif anda dengan tab",
   "help.tabs.date": "14 Julai",
-  "help.tabs.introduction": "miao Desktop kini dibina berasaskan tab.",
+  "help.tabs.introduction": "MiaoDesktop kini dibina berasaskan tab.",
   "help.tabs.sessions":
     "Mulakan sesi baharu dalam tab, atau buka sesi sedia ada daripada mana-mana projek anda. Buka tab baharu apabila anda memulakan sesuatu yang baru, dan tutup apabila selesai.",
   "help.tabs.organize":
@@ -927,7 +927,7 @@ export const dict = {
   "debugBar.direction.tip": "Paksa arah tataletak aplikasi penuh tanpa menukar bahasa terpilih",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Pelayan",
   "settings.tab.general": "Umum",

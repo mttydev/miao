@@ -20,7 +20,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Önbelleğe yazma",
   "context.timeline.ttft": "İlk jetona {{value}} ms",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Dosya",
   "desktop.menu.edit": "Düzen",
   "desktop.menu.view": "Görünüm",
@@ -60,11 +60,11 @@ export const dict = {
   "desktop.menu.nextProject": "Sonraki proje",
   "desktop.menu.minimize": "Simge durumuna küçült",
   "desktop.menu.maximize": "Ekranı kapla",
-  "desktop.menu.documentation": "miao belgeleri",
+  "desktop.menu.documentation": "MiaoDesktop belgeleri",
   "desktop.menu.supportForum": "Destek forumu",
   "desktop.menu.shareFeedback": "Geri bildirim paylaş",
   "desktop.menu.reportBug": "Hata bildir",
-  "desktop.menu.ariaLabel": "miao menüsü",
+  "desktop.menu.ariaLabel": "MiaoDesktop menüsü",
 
   "desktop.updater.dialog.checkFailed.message": "Güncellemeler kontrol edilemedi.",
   "desktop.updater.dialog.checkFailed.title": "Güncelleme hatası",
@@ -79,9 +79,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Günlükleri dışa aktar",
   "desktop.recovery.action.keepWaiting": "Beklemeye devam et",
   "desktop.recovery.action.quit": "Çık",
-  "desktop.recovery.loadFailed": "miao yüklenemedi",
-  "desktop.recovery.terminated": "miao penceresi beklenmedik şekilde sonlandırıldı",
-  "desktop.recovery.unresponsive": "miao yanıt vermiyor",
+  "desktop.recovery.loadFailed": "MiaoDesktop yüklenemedi",
+  "desktop.recovery.terminated": "MiaoDesktop penceresi beklenmedik şekilde sonlandırıldı",
+  "desktop.recovery.unresponsive": "MiaoDesktop yanıt vermiyor",
   "desktop.recovery.unresponsive.detail":
     "Uygulamayı yeniden başlatabilir, günlükleri açabilir veya beklemeye devam edebilirsiniz.",
   "desktop.recovery.loadFailed.detail": "Pencere: {{window}}\nURL: {{url}}\nHata: {{code}} {{description}}",
@@ -566,7 +566,7 @@ export const dict = {
   "help.tabs.title": "Sekmelerle tanışın",
   "help.tabs.description": "Çalışmalarınızı ve etkin oturumlarınızı sekmelerle düzenleyin",
   "help.tabs.date": "14 Temmuz",
-  "help.tabs.introduction": "miao Desktop artık sekmeler üzerine kurulu.",
+  "help.tabs.introduction": "MiaoDesktop artık sekmeler üzerine kurulu.",
   "help.tabs.sessions":
     "Bir sekmede yeni oturum başlatın veya projelerinizden mevcut bir oturumu açın. Yeni bir işe başlarken yeni sekme açın, işiniz bittiğinde sekmeyi kapatın.",
   "help.tabs.organize":
@@ -917,7 +917,7 @@ export const dict = {
   "sidebar.empty.title": "Açık proje yok",
   "sidebar.empty.description": "Başlamak için bir proje açın",
 
-  "app.name.desktop": "miao Masaüstü",
+  "app.name.desktop": "MiaoDesktop Masaüstü",
 
   "settings.section.desktop": "Masaüstü",
   "settings.section.server": "Sunucu",

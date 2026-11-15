@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Запись в кэш",
   "context.timeline.ttft": "{{value}} мс до первого токена",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Файл",
   "desktop.menu.edit": "Правка",
   "desktop.menu.view": "Вид",
@@ -77,7 +77,7 @@ export const dict = {
   "desktop.recovery.action.quit": "Выйти",
   "desktop.recovery.loadFailed": "Не удалось загрузить miao",
   "desktop.recovery.terminated": "Окно miao неожиданно завершило работу",
-  "desktop.recovery.unresponsive": "miao не отвечает",
+  "desktop.recovery.unresponsive": "MiaoDesktop не отвечает",
   "desktop.recovery.unresponsive.detail": "Можно снова запустить приложение, открыть журналы или продолжить ожидание.",
   "desktop.recovery.loadFailed.detail": "Окно: {{window}}\nURL: {{url}}\nОшибка: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Окно: {{window}}\nПричина: {{reason}}\nКод: {{code}}",
@@ -915,7 +915,7 @@ export const dict = {
   "sidebar.empty.title": "Нет открытых проектов",
   "sidebar.empty.description": "Откройте проект, чтобы начать",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Приложение",
   "settings.section.server": "Сервер",
   "settings.tab.general": "Основные",

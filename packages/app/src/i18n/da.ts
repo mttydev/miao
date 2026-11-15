@@ -789,7 +789,7 @@ export const dict = {
   "sidebar.empty.title": "Ingen åbne projekter",
   "sidebar.empty.description": "Åbn et projekt for at komme i gang",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Desktop",
   "settings.section.server": "Server",
   "settings.tab.general": "Generelt",
@@ -1160,7 +1160,7 @@ export const dict = {
   "error.childStore.storeCreateFailed": "Kunne ikke oprette lager",
   "terminal.connectionLost.abnormalClose": "WebSocket lukkede unormalt: {{code}}",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Arkiv",
   "desktop.menu.edit": "Rediger",
   "desktop.menu.view": "Oversigt",
@@ -1219,9 +1219,9 @@ export const dict = {
   "desktop.recovery.action.exportLogs": "Eksportér logfiler",
   "desktop.recovery.action.keepWaiting": "Vent fortsat",
   "desktop.recovery.action.quit": "Afslut",
-  "desktop.recovery.loadFailed": "miao kunne ikke indlæses",
+  "desktop.recovery.loadFailed": "MiaoDesktop kunne ikke indlæses",
   "desktop.recovery.terminated": "Miao-vinduet blev uventet afsluttet",
-  "desktop.recovery.unresponsive": "miao svarer ikke",
+  "desktop.recovery.unresponsive": "MiaoDesktop svarer ikke",
   "desktop.recovery.unresponsive.detail": "Du kan starte appen igen, åbne logfilerne eller fortsætte med at vente.",
   "desktop.recovery.loadFailed.detail": "Vindue: {{window}}\nURL: {{url}}\nFejl: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Vindue: {{window}}\nÅrsag: {{reason}}\nKode: {{code}}",
@@ -1266,7 +1266,7 @@ export const dict = {
   "help.tabs.title": "Introduktion til faner",
   "help.tabs.description": "Organiser dit arbejde og dine aktive sessioner med faner",
   "help.tabs.date": "14. juli",
-  "help.tabs.introduction": "miao Desktop er nu bygget op omkring faner.",
+  "help.tabs.introduction": "MiaoDesktop er nu bygget op omkring faner.",
   "help.tabs.sessions":
     "Start en ny session i en fane, eller åbn en eksisterende session fra et af dine projekter. Åbn en ny fane, når du går i gang med noget nyt, og luk den, når du er færdig.",
   "help.tabs.organize":

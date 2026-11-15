@@ -534,7 +534,7 @@ export const dict = {
   "help.tabs.title": "Við kynnum Tab",
   "help.tabs.description": "Skipuleggðu vinnu þína og virkar lotur með flipa",
   "help.tabs.date": "14. júlí",
-  "help.tabs.introduction": "miao Desktop er nú byggt í kringum flipa.",
+  "help.tabs.introduction": "MiaoDesktop er nú byggt í kringum flipa.",
   "help.tabs.sessions":
     "Byrjaðu nýja lotu í flipa eða opnaðu fyrirliggjandi lotu úr einhverju verkefnanna þinna. Opnaðu nýjan flipa þegar þú ert að byrja á einhverju nýju og lokaðu honum þegar þú ert búinn.",
   "help.tabs.organize":
@@ -929,7 +929,7 @@ export const dict = {
   "debugBar.direction.tip": "Þvingaðu stefnu útlits forritsins í heild sinni án þess að breyta valnu tungumáli",
   "debugBar.direction.ltr": "LTR",
   "debugBar.direction.rtl": "RTL",
-  "app.name.desktop": "miao skjáborð",
+  "app.name.desktop": "MiaoDesktop skjáborð",
   "settings.section.desktop": "Skrifborð",
   "settings.section.server": "Netþjónn",
   "settings.tab.general": "Almennt",

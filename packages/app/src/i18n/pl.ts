@@ -16,7 +16,7 @@ export const dict = {
   "context.timeline.cacheWrite": "Zapisz w pamięci podręcznej",
   "context.timeline.ttft": "{{value}} ms do pierwszego tokena",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "Plik",
   "desktop.menu.edit": "Edycja",
   "desktop.menu.view": "Widok",
@@ -77,7 +77,7 @@ export const dict = {
   "desktop.recovery.action.quit": "Zakończ",
   "desktop.recovery.loadFailed": "Nie udało się wczytać miao",
   "desktop.recovery.terminated": "Okno miao zostało nieoczekiwanie zamknięte",
-  "desktop.recovery.unresponsive": "miao nie odpowiada",
+  "desktop.recovery.unresponsive": "MiaoDesktop nie odpowiada",
   "desktop.recovery.unresponsive.detail": "Możesz ponownie uruchomić aplikację, otworzyć dzienniki lub nadal czekać.",
   "desktop.recovery.loadFailed.detail": "Okno: {{window}}\nURL: {{url}}\nBłąd: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "Okno: {{window}}\nPrzyczyna: {{reason}}\nKod: {{code}}",
@@ -533,7 +533,7 @@ export const dict = {
   "help.tabs.title": "Przedstawiamy karty",
   "help.tabs.description": "Organizuj pracę i aktywne sesje za pomocą kart",
   "help.tabs.date": "14 lipca",
-  "help.tabs.introduction": "miao Desktop korzysta teraz z układu opartego na kartach.",
+  "help.tabs.introduction": "MiaoDesktop korzysta teraz z układu opartego na kartach.",
   "help.tabs.sessions":
     "Rozpocznij nową sesję na karcie lub otwórz istniejącą sesję z dowolnego projektu. Otwórz nową kartę, gdy zaczynasz coś nowego, i zamknij ją po zakończeniu.",
   "help.tabs.organize":
@@ -851,7 +851,7 @@ export const dict = {
   "sidebar.project.clearNotifications": "Wyczyść powiadomienia",
   "sidebar.empty.title": "Brak otwartych projektów",
   "sidebar.empty.description": "Otwórz projekt, aby rozpocząć",
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
   "settings.section.desktop": "Aplikacja komputerowa",
   "settings.section.server": "Serwer",
   "settings.tab.general": "Ogólne",

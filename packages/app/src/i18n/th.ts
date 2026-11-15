@@ -15,7 +15,7 @@ export const dict = {
   "context.timeline.cacheWrite": "แคชเขียน",
   "context.timeline.ttft": "{{value}} มิลลิวินาทีถึงโทเค็นแรก",
 
-  "desktop.menu.app": "miao",
+  "desktop.menu.app": "MiaoDesktop",
   "desktop.menu.file": "ไฟล์",
   "desktop.menu.edit": "แก้ไข",
   "desktop.menu.view": "มุมมอง",
@@ -76,7 +76,7 @@ export const dict = {
   "desktop.recovery.action.quit": "ออก",
   "desktop.recovery.loadFailed": "โหลด miao ไม่สำเร็จ",
   "desktop.recovery.terminated": "หน้าต่าง miao หยุดทำงานโดยไม่คาดคิด",
-  "desktop.recovery.unresponsive": "miao ไม่ตอบสนอง",
+  "desktop.recovery.unresponsive": "MiaoDesktop ไม่ตอบสนอง",
   "desktop.recovery.unresponsive.detail": "คุณสามารถเปิดแอปอีกครั้ง เปิดบันทึก หรือรอต่อไป",
   "desktop.recovery.loadFailed.detail": "หน้าต่าง: {{window}}\nURL: {{url}}\nข้อผิดพลาด: {{code}} {{description}}",
   "desktop.recovery.terminated.detail": "หน้าต่าง: {{window}}\nสาเหตุ: {{reason}}\nรหัส: {{code}}",
@@ -897,7 +897,7 @@ export const dict = {
   "sidebar.empty.title": "ไม่มีโปรเจกต์ที่เปิดอยู่",
   "sidebar.empty.description": "เปิดโปรเจกต์เพื่อเริ่มต้น",
 
-  "app.name.desktop": "miao Desktop",
+  "app.name.desktop": "MiaoDesktop",
 
   "settings.section.desktop": "เดสก์ท็อป",
   "settings.section.server": "เซิร์ฟเวอร์",
