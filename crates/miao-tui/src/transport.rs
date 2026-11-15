@@ -143,7 +143,8 @@ impl EngineClient {
         spawn: &EngineSpawn,
         request_timeout: Duration,
     ) -> Result<(Self, EventRx), TransportError> {
-        spawn_engine(spawn, request_timeout, Cursors::default())
+        let (client, events_rx, _child) = spawn_engine(spawn, request_timeout, Cursors::default())?;
+        Ok((client, events_rx))
     }
 
     /// Run the engine inside this process instead of spawning `miao-engine`.
@@ -624,7 +625,7 @@ fn spawn_engine(
     spawn: &EngineSpawn,
     request_timeout: Duration,
     cursors: Cursors,
-) -> Result<(EngineClient, EventRx), TransportError> {
+) -> Result<(EngineClient, EventRx, Arc<Mutex<Child>>), TransportError> {
     let mut command = Command::new(&spawn.program);
     command
         .args(&spawn.args)
@@ -637,6 +638,7 @@ fn spawn_engine(
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let child = Arc::new(Mutex::new(child));
+    let child_for_return = child.clone();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (events_tx, events_rx) = mpsc::unbounded_channel::<TransportEvent>();
     let (exited_tx, exited_rx) = watch::channel(false);
@@ -757,7 +759,7 @@ fn spawn_engine(
         request_timeout,
         exited: exited_rx,
     };
-    Ok((client, events_rx))
+    Ok((client, events_rx, child_for_return))
 }
 
 /// How long the reader waits for the exit status once the engine's output
@@ -1016,9 +1018,32 @@ pub struct Connection {
     cursors: Cursors,
     events: EventTx,
     client: Option<EngineClient>,
+    /// The spawned engine's process. The TUI kills it on exit so an engine
+    /// daemon never outlives the TUI update: an engine running an older
+    /// binary silently uses old arithmetic and every fix the update carried
+    /// is wasted.
+    child: Option<Arc<Mutex<Child>>>,
     /// The engine runs in this process, so there is no child to respawn. A
     /// dead in-process engine is a terminal state, not a restart.
     embedded: bool,
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // Kill the spawned engine so it never outlives the TUI update. An
+        // engine daemon running an older binary is invisible to the operator:
+        // the TUI reports the new version, the old engine silently uses the
+        // old arithmetic, and every fix the update carried is wasted.
+        if self.embedded {
+            return;
+        }
+        if let Some(child) = &self.child {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
 }
 
 impl Connection {
@@ -1033,6 +1058,7 @@ impl Connection {
             cursors: Cursors::default(),
             events,
             client: None,
+            child: None,
             embedded: false,
         };
         connection.spawn()?;
@@ -1069,6 +1095,7 @@ impl Connection {
                 cursors: Cursors::default(),
                 events,
                 client: Some(client),
+                child: None,
                 embedded: true,
             },
             events_rx,
@@ -1131,8 +1158,9 @@ impl Connection {
                 "the in-process engine stopped; restart miao-tui".into(),
             ));
         }
-        let (client, events) =
+        let (client, events, child) =
             spawn_engine(&self.spawn, self.request_timeout, self.cursors.clone())?;
+        self.child = Some(child);
         let sink = self.events.clone();
         tokio::spawn(async move {
             let mut events = events;

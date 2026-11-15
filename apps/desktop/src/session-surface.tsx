@@ -1,9 +1,10 @@
 import {
   createEngineReader,
   type EngineEvent,
-  type EngineSessionState,
   type EngineModelRow,
+  type EngineSessionState,
   type EngineSessionSummary,
+  progressDeltaText,
   useLanguage,
 } from "@miao/app"
 import { Markdown } from "@miao/session-ui/markdown"
@@ -290,8 +291,8 @@ export function SessionSurface(props: { url: string; token: string }) {
     detach = unsubscribe
     detachProgress?.()
     detachProgress = reader.subscribeProgress(session.id, (event) => {
-      if (event.kind === "text.delta" && typeof event.text === "string")
-        setStreaming((current) => current + event.text)
+      const delta = progressDeltaText(event)
+      if (delta) setStreaming((current) => current + delta)
     })
     await reader
       .events(session.id, after)
