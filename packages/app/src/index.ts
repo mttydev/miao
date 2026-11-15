@@ -39,6 +39,7 @@ export {
   createEngineReader,
   type EngineEvent,
   type EngineModelRow,
+  progressDeltaText,
   type EngineReader,
   type EngineSessionState,
   type EngineSessionSummary,

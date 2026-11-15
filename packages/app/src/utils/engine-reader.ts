@@ -28,6 +28,21 @@ export type EngineModelRow = {
 /** The engine caps one `events` page at 100; a shorter page ends the tail. */
 const EVENT_PAGE = 100
 
+/**
+ * The streamed text one progress frame carries, if any. Captured frames wrap
+ * the normalized delta ({kind: "provider.delta", data: {delta: {kind:
+ * "text.delta", text}}}); tolerate the bare normalized shape too.
+ */
+export function progressDeltaText(event: EngineProgress): string | undefined {
+  if (event.kind === "text.delta" && typeof event.text === "string") return event.text
+  if (event.kind === "provider.delta") {
+    const data = event.data as { delta?: { kind?: string; text?: string } } | undefined
+    const delta = data?.delta
+    if (delta?.kind === "text.delta" && typeof delta.text === "string") return delta.text
+  }
+  return undefined
+}
+
 export type EngineTransport = {
   request(method: string, params?: unknown): Promise<unknown>
   subscribe(session: string, after?: number): Promise<void>
