@@ -1287,6 +1287,7 @@ export const dict = {
   "desktop.surface.action.retry": "重试",
   "desktop.surface.action.close": "关闭",
   "desktop.surface.header.selectTask": "选择一个任务",
+  "desktop.surface.header.pickModel": "选择模型",
   "desktop.surface.header.messages": "{{count}} messages",
   "desktop.surface.header.pending": "{{count}} pending",
   "desktop.surface.header.approvals": "{{count}} approvals",

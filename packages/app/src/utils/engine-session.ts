@@ -95,6 +95,8 @@ export type EngineSessionState = {
   hasMessages: boolean
   pending: number
   approvals: number
+  /** The model identity the Session's next provider turns will use, if any. */
+  modelSelection?: { protocol: string; model: string }
 }
 
 /**
@@ -109,6 +111,14 @@ function clearCut(selection: unknown) {
   if (Reflect.get(selection, "summary") !== "") return 0
   const through = Reflect.get(selection, "through_seq")
   return typeof through === "number" && Number.isSafeInteger(through) ? through : 0
+}
+
+/** The model identity a snapshot's selection carries, or undefined. */
+function modelSelection(value: unknown) {
+  if (typeof value !== "object" || value === null) return undefined
+  const protocol = Reflect.get(value, "protocol")
+  const model = Reflect.get(value, "model")
+  return typeof protocol === "string" && typeof model === "string" ? { protocol, model } : undefined
 }
 
 /** One snapshot message's sequence, or 0 when it carries none. */
@@ -130,6 +140,7 @@ export function snapshotToState(snapshot: EngineSnapshot): EngineSessionState {
   const count = (value: unknown) => (Array.isArray(value) ? value.length : 0)
   const clearedThrough = clearCut(snapshot.selection)
   const messages = Array.isArray(snapshot.messages) ? snapshot.messages : undefined
+  const model = modelSelection(snapshot.model_selection)
   return {
     id: snapshot.session_id,
     title: snapshot.title,
@@ -144,5 +155,6 @@ export function snapshotToState(snapshot: EngineSnapshot): EngineSessionState {
     hasMessages: snapshot.has_messages === true,
     pending: count(snapshot.pending),
     approvals: count(snapshot.approvals),
+    ...(model ? { modelSelection: model } : {}),
   }
 }

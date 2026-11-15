@@ -1211,6 +1211,7 @@ export const dict = {
   "desktop.surface.action.retry": "Retry",
   "desktop.surface.action.close": "Close",
   "desktop.surface.header.selectTask": "Select a task",
+  "desktop.surface.header.pickModel": "Pick a model",
   "desktop.surface.header.messages": "{{count}} messages",
   "desktop.surface.header.pending": "{{count}} pending",
   "desktop.surface.header.approvals": "{{count}} approvals",

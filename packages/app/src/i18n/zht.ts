@@ -1283,6 +1283,7 @@ export const dict = {
   "desktop.surface.action.retry": "重試",
   "desktop.surface.action.close": "關閉",
   "desktop.surface.header.selectTask": "選擇一個任務",
+  "desktop.surface.header.pickModel": "選擇模型",
   "desktop.surface.header.messages": "{{count}} 則訊息",
   "desktop.surface.header.pending": "{{count}} 個待處理",
   "desktop.surface.header.approvals": "{{count}} 個待審批",
