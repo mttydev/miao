@@ -11,6 +11,26 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.76] - 2026-11-15
+
+### Added
+- **tui**: fold the status strip into the composer's border (#3067) (`e6fab2109d`)
+- **engine**: record compaction starts and open-breaker skips durably (#3065) (`88f47a1d93`)
+- **desktop**: stream assistant output from the engine's progress frames (#3063) (`4f6a187fa7`)
+- **desktop**: make the conversation view read like a chat product (#3062) (`f06d4257bb`)
+- **desktop**: pick the Session's model from the header (#3061) (`faef5fdf3c`)
+- **desktop**: route the window's copy through the shared i18n layer (#3059) (`ffa9492c84`)
+
+### Fixed
+- **tui**: kill the engine child process on TUI exit (#3072) (`ef720fc648`)
+- **desktop**: read the wrapped delta shape progress frames actually carry (#3070) (`dc234b4a7d`)
+- **tui**: the held paste-image prompt empties the composer when it sends (#3069) (`d272ea8c39`)
+- **desktop**: swallow the IME confirm-Enter with a post-composition window (#3066) (`03d622b467`)
+- **desktop**: never submit an IME composition, and use real menus (#3064) (`d582865c18`)
+
+### Performance
+- **engine**: skip the usage report scan when the journal has not grown (#3068) (`59e6952ea7`)
+
 ## [0.3.75] - 2026-11-15
 
 ### Added
