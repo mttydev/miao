@@ -1395,6 +1395,47 @@ impl Composer {
     /// Show an image as `[Image N] ` and keep its bytes for the next prompt.
     /// Returns the new attachment count.
     pub fn attach_image(&mut self, mime: &str, data: &str) -> usize {
+        // A clipboard read that lands late — a fast Enter held the prompt while
+        // the bytes were still in flight, and the held draft was restored —
+        // must not insert a second marker: the draft already shows the one
+        // these bytes belong to. Fill the first unmatched image marker, and
+        // only a draft without one gets a new marker at the cursor.
+        let shown = self
+            .editor
+            .markers()
+            .iter()
+            .filter(|(_, _, kind, inner)| {
+                *kind == Placeholder::Attachment && inner.starts_with("Image ")
+            })
+            .count();
+        let carried = self
+            .attachments
+            .iter()
+            .filter(|attachment| {
+                attachment
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .is_some_and(|mime| mime.starts_with("image/"))
+            })
+            .count();
+        if shown > carried {
+            let number = carried + 1;
+            let extension = match mime.rsplit('/').next().unwrap_or("png") {
+                "jpeg" => "jpg",
+                other => other,
+            };
+            self.push_attachment(
+                mime,
+                data,
+                &format!("image-{number}.{extension}"),
+                &format!("[Image {number}]"),
+            );
+            // The filled marker spends its number: a later paste must not
+            // reuse it.
+            self.next_image = self.next_image.max(number);
+            self.refresh_completion();
+            return number;
+        }
         self.attach_binary(mime, data, "")
     }
 
@@ -1434,6 +1475,13 @@ impl Composer {
             false => name.to_string(),
         };
         self.editor.insert_str(&marker);
+        self.push_attachment(mime, data, &name, marker.trim_end());
+        self.refresh_completion();
+        number
+    }
+
+    /// Queue bytes beside the draft under `marker`'s label.
+    fn push_attachment(&mut self, mime: &str, data: &str, name: &str, marker: &str) {
         let mut attachment = json!({ "mime": mime, "data": data });
         if !name.is_empty() {
             // The name rides as metadata so the engine names the materialized
@@ -1441,9 +1489,7 @@ impl Composer {
             attachment["metadata"] = json!({ "name": name });
         }
         self.attachments.push(attachment);
-        self.attachment_markers.push(marker.trim_end().to_string());
-        self.refresh_completion();
-        number
+        self.attachment_markers.push(marker.to_string());
     }
 
     /// Take the marker the cursor touches as one unit, and the payload it
@@ -2259,6 +2305,34 @@ mod tests {
             composer.attachments.is_empty(),
             "the bytes go with the marker"
         );
+    }
+
+    /// A clipboard read that lands after a fast Enter fills the marker the
+    /// held draft already shows. Inserting a second one at the cursor left the
+    /// draft with two markers for one picture, so the next submit held again —
+    /// the composer never cleared and the prompt could not go out.
+    #[test]
+    fn a_late_clipboard_landing_fills_the_marker_the_draft_already_shows() {
+        let dir = std::env::temp_dir().join(format!("miao-tui-attach-late-{}", std::process::id()));
+        let mut composer = composer(&dir);
+        // The held draft came back with the marker on screen and the bytes
+        // still in flight.
+        composer.editor.set_text("[Image 1] please look");
+        composer.attach_image("image/png", "b25l");
+        assert_eq!(
+            composer.editor.text(),
+            "[Image 1] please look",
+            "no second marker is inserted"
+        );
+        assert_eq!(composer.attachments.len(), 1);
+        assert_eq!(
+            composer.attachments[0]["metadata"]["name"], "image-1.png",
+            "the bytes take the shown marker's number"
+        );
+        // The next picture numbers forward from the filled marker.
+        composer.attach_image("image/png", "dHdv");
+        assert!(composer.editor.text().ends_with("[Image 2] "));
+        assert_eq!(composer.attachments.len(), 2);
     }
 
     #[test]
