@@ -624,7 +624,7 @@ fn read_part<T: serde::de::DeserializeOwned>(
     label: &str,
     workspace: &Path,
 ) -> Result<T, String> {
-    if path.starts_with(workspace) {
+    if crate::placement::plain(path).starts_with(crate::placement::plain(workspace).as_ref()) {
         return Err(format!(
             "{}: {label} host config must be outside model-writable workspace",
             path.display()

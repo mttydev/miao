@@ -120,6 +120,22 @@ pub fn canonical(workspace: &Path) -> PathBuf {
     }
 }
 
+/// The same path without the Windows verbatim prefix.
+///
+/// `canonicalize` answers with `\\?\C:\…` while a path handed in by a caller or
+/// recorded earlier keeps the plain form. Containment checks that compare the
+/// two must compare the de-prefixed spellings, or a file plainly inside the
+/// workspace reads as outside it. On Unix the prefix never appears.
+pub fn plain(path: &Path) -> std::borrow::Cow<'_, Path> {
+    match path
+        .to_string_lossy()
+        .strip_prefix(crate::runtime::VERBATIM)
+    {
+        Some(rest) => std::borrow::Cow::Owned(Path::new(rest).to_path_buf()),
+        None => std::borrow::Cow::Borrowed(path),
+    }
+}
+
 /// The ledger for one workspace, under `root`.
 pub fn database_for(root: &Path, workspace: &Path) -> Option<PathBuf> {
     let directory = identity(workspace);

@@ -232,7 +232,7 @@ async fn read(
     path: &Path,
     workspace: &Path,
 ) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
-    if path.starts_with(workspace) {
+    if crate::placement::plain(path).starts_with(crate::placement::plain(workspace).as_ref()) {
         return Err("Model routes host config must be outside model-writable workspace".into());
     }
     let mut bytes = Vec::new();
