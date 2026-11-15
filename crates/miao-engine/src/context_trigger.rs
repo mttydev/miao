@@ -502,6 +502,20 @@ where
             }),
             true,
         );
+        // The trip itself is durable through the `compaction.rejected` streak,
+        // but the stretches this Session spent unable to try were log-only: a
+        // per-workspace store that outlives the channel's log keeps the answer
+        // to "why did this Session grow without compacting".
+        let _ = store
+            .record(
+                session,
+                "compaction.skipped",
+                json!({
+                    "run_id": run, "gate": 5, "reason": "breaker_open",
+                    "context_tokens": context, "pending_tokens": pending_tokens,
+                }),
+            )
+            .await;
         return Ok(false);
     }
     // The summary covers the warm prefix the next turn would re-send, which is
@@ -541,6 +555,17 @@ where
         "session_id": session, "run_id": run,
         "kind": "compaction.started", "segments": plan.segments.len(),
     }));
+    // A pass can take minutes over a long history, and its outcome lands in the
+    // store only on success (`compaction.settled`) or on a summarizer failure
+    // (`compaction.rejected`); the start itself was progress-only, so a pass the
+    // turn abandoned mid-flight left no trace at all.
+    let _ = store
+        .record(
+            session,
+            "compaction.started",
+            json!({"run_id": run, "segments": plan.segments.len()}),
+        )
+        .await;
     let mut parts = Vec::new();
     // The prefix path retains the exact last provider request, which describes
     // one particular cut. A scoped request names its own range and target, so it

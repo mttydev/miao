@@ -294,3 +294,87 @@ async fn a_tripped_breaker_stays_with_the_session_whose_summarizer_failed() {
             .collect::<Vec<_>>()
     );
 }
+
+// A stuck compaction used to be reconstructible only from the engine's log:
+// the start of every refused pass and the stretches the breaker spent open
+// were progress-only, so a per-workspace store kept no answer to "why did this
+// Session grow without compacting".
+#[tokio::test]
+async fn stuck_passes_and_an_open_breaker_reach_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(Refusing {
+        summaries: AtomicUsize::new(0),
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        Policy::new(Config::default()).unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .set_context_limits(Some(ContextLimits {
+            window: 1_000_000,
+            ratio: 0.5,
+            headroom: 100_000,
+            per_pass: 1000,
+            fold_ratio: 0.0,
+            prune_chars: None,
+            prune_total_chars: None,
+            protect_turns: 2,
+            prefix_scope: Default::default(),
+            retention: None,
+        }))
+        .await;
+
+    for (index, id) in ["one", "two", "three"].iter().enumerate() {
+        drain(&runtime, &store, id, index + 1).await;
+    }
+
+    let started: Vec<_> = store
+        .events("s", 0, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "compaction.started")
+        .collect();
+    assert_eq!(
+        started.len(),
+        3,
+        "each refused pass records its start durably"
+    );
+    assert_eq!(started[0].data["segments"], json!(1));
+    let rejected: Vec<_> = store
+        .events("s", 0, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "compaction.rejected")
+        .collect();
+    assert_eq!(rejected.len(), 3);
+
+    drain(&runtime, &store, "four", 4).await;
+    let skipped: Vec<_> = store
+        .events("s", 0, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "compaction.skipped")
+        .collect();
+    assert_eq!(skipped.len(), 1, "the open breaker's skip is durable");
+    assert_eq!(skipped[0].data["gate"], json!(5));
+    assert_eq!(skipped[0].data["reason"], json!("breaker_open"));
+    assert_eq!(
+        store
+            .events("s", 0, 500)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "compaction.started")
+            .count(),
+        3,
+        "an open breaker starts no pass"
+    );
+}
