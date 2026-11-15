@@ -35,7 +35,7 @@
 ### 2.3 剪贴板与图片
 
 - 写入：先写 OSC 52（tmux/ST 透传），再调用平台命令（macOS `pbcopy`；Linux `wl-copy` / `xclip` / `xsel`；Windows PowerShell `Set-Clipboard`）。平台命令失败不报错，OSC 52 仍是有效通道。
-- 读取：`MTTY_CLIPBOARD_FILE` 只在 10 秒内且读取后删除；否则 macOS osascript JXA、Windows/WSL PowerShell、Linux `wl-paste` / `xclip` 取图；都没有则读文本（`pbpaste` / PowerShell / `wl-paste` / `xclip`）。
+- 读取：`MTTY_CLIPBOARD_FILE` 按内容哈希去重、每张图只服务一次，文件不被删除（宿主每次粘贴都会重写它）；否则 macOS osascript JXA、Windows/WSL PowerShell、Linux `wl-paste` / `xclip` 取图；都没有则读文本（`pbpaste` / PowerShell / `wl-paste` / `xclip`）。
 - 空 bracketed paste 与 `Ctrl+V` 都触发读取；读取在后台线程完成，UI 不阻塞。
 - 图片以 `[Image N] ` 文本标记留在 composer，附件单独随 `admit` 的 `attachments` 发送；提交失败时文本与附件一起恢复。
 

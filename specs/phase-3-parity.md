@@ -166,7 +166,7 @@
 | 内置音包（`miao.default` 的 6 个 mp3） | 有意偏离（资源） | 不随二进制打包；配置了 `sounds.<name>` 就播放文件，否则终端铃 |
 | 插件音包注册（`registerPack` / `activate`） | 有意偏离（Phase 4 宿主移植） | 属插件宿主能力 |
 | 剪贴板写入：OSC 52（tmux/ST 透传）+ pbcopy / wl-copy / xclip / xsel / PowerShell | 已对齐 | `platform/clipboard.rs:copy` |
-| 剪贴板读取：`MTTY_CLIPBOARD_FILE`（10 秒、读后消费）→ 平台图片 → 平台文本 | 已对齐 | `clipboard::read`；读取在后台线程，空粘贴与 `Ctrl+V` 触发 |
+| 剪贴板读取：`MTTY_CLIPBOARD_FILE`（按内容去重、每张图一次）→ 平台图片 → 平台文本 | 已对齐 | `clipboard::read`；读取在后台线程，空粘贴与 `Ctrl+V` 触发 |
 | 图片附件：`[Image N] ` 标记 + `{mime,data}` 随 admit 发送，失败随文本恢复 | 已对齐 | `editor::Composer::attach_image` / `restore_with`、`engine::Handle::prompt` |
 | 外编 `<leader>e`：`$VISUAL`/`$EDITOR`、临时 0600 文件、挂起/恢复终端、退出码 0 读回并删除 | 已对齐 | `platform/editor.rs`、`terminal::suspend/resume`、drive 循环 |
 | Zed 选区：`ZED_TERM`/`TERM_PROGRAM=zed` 下读活动编辑器选区，UTF-8 偏移→行列，格式化前缀，同一选区只发一次 | 已对齐 | `platform/zed.rs`；用系统 `sqlite3 -readonly -json`，无 SQLite C 依赖，`sqlite3` 缺失时静默不可用 |
