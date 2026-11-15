@@ -3,6 +3,7 @@ import {
   type EngineEvent,
   type EngineSessionState,
   type EngineSessionSummary,
+  useLanguage,
 } from "@miao/app"
 import { Markdown } from "@miao/session-ui/markdown"
 import { Icon } from "@miao/ui/v2/icon"
@@ -21,7 +22,14 @@ import { PinIcon, SendIcon, SparklesIcon, StopIcon, TrashIcon } from "./icons"
 
 type Turn = { role: "user" | "assistant" | "tool"; text: string }
 
-const SUGGESTIONS = ["分析一份调查数据", "创作一篇产品文档", "做一份深度研究", "写一份周报", "审查一段代码", "策划一个方案"]
+const SUGGESTION_KEYS = [
+  "desktop.surface.suggestion.data",
+  "desktop.surface.suggestion.doc",
+  "desktop.surface.suggestion.research",
+  "desktop.surface.suggestion.report",
+  "desktop.surface.suggestion.code",
+  "desktop.surface.suggestion.plan",
+] as const
 
 // The shell styles the window with an overlay title bar on macOS, so the
 // traffic lights sit on top of the web content and the top-left strip must
@@ -36,9 +44,9 @@ const isToday = (updatedAt: number) => {
   return then.toDateString() === now.toDateString()
 }
 
-const dayLabel = (updatedAt: number) =>
+const dayLabel = (updatedAt: number, justNow: string) =>
   updatedAt === 0
-    ? "刚刚"
+    ? justNow
     : new Date(updatedAt).toLocaleDateString("zh-CN", { month: "long", day: "numeric" })
 
 /** The conversation a viewer reads, derived from the raw event stream. */
@@ -152,6 +160,7 @@ const running = (events: EngineEvent[]): boolean => {
 
 /** Copies one message's text; the label flips to a confirmation for a moment. */
 function CopyButton(props: { text: string }) {
+  const language = useLanguage()
   const [copied, setCopied] = createSignal(false)
   return (
     <button
@@ -165,7 +174,7 @@ function CopyButton(props: { text: string }) {
       }}
     >
       <Icon name="outline-copy" size="small" />
-      {copied() ? "已复制" : "复制"}
+      {copied() ? language.t("desktop.surface.action.copied") : language.t("desktop.surface.action.copy")}
     </button>
   )
 }
@@ -184,6 +193,7 @@ export function SessionSurface(props: { url: string; token: string }) {
   const [query, setQuery] = createSignal("")
   const [menu, setMenu] = createSignal<{ session: EngineSessionSummary; x: number; y: number }>()
   const [dialog, setDialog] = createSignal<{ kind: "rename" | "delete"; session: EngineSessionSummary; title: string }>()
+  const language = useLanguage()
 
   // Pinned rows float above the time buckets, the same order the TUI sidebar keeps.
   // The filter runs on title only: that is the one field every row always has.
@@ -193,9 +203,9 @@ export function SessionSurface(props: { url: string; token: string }) {
     const pinned = rows.filter((row) => row.pinned)
     const others = rows.filter((row) => !row.pinned)
     return [
-      { label: "置顶", rows: pinned },
-      { label: "今天", rows: others.filter((row) => isToday(row.updatedAt)) },
-      { label: "更早", rows: others.filter((row) => !isToday(row.updatedAt)) },
+      { label: language.t("desktop.surface.group.pinned"), rows: pinned },
+      { label: language.t("desktop.surface.group.today"), rows: others.filter((row) => isToday(row.updatedAt)) },
+      { label: language.t("desktop.surface.group.earlier"), rows: others.filter((row) => !isToday(row.updatedAt)) },
     ]
   })
 
@@ -482,7 +492,7 @@ export function SessionSurface(props: { url: string; token: string }) {
             onClick={() => void newSession()}
           >
             <Icon name="plus" size="small" />
-            新的任务
+            {language.t("desktop.surface.sidebar.newSession")}
           </button>
           <div class="relative mt-2">
             <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-v2-icon-icon-muted">
@@ -491,7 +501,7 @@ export function SessionSurface(props: { url: string; token: string }) {
             <input
               type="search"
               class="w-full rounded-lg border border-v2-border-border-weak bg-v2-background-bg-layer-01 py-1.5 pl-8 pr-2 text-12-regular outline-none placeholder:text-v2-text-text-faint"
-              placeholder="搜索任务"
+              placeholder={language.t("desktop.surface.sidebar.search")}
               value={query()}
               onInput={(event) => setQuery(event.currentTarget.value)}
             />
@@ -520,7 +530,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                         </Show>
                         <span class="min-w-0 flex-1 truncate text-12-regular">{session.title}</span>
                       </span>
-                      <span class="shrink-0 text-10-regular text-v2-text-text-faint">{dayLabel(session.updatedAt)}</span>
+                      <span class="shrink-0 text-10-regular text-v2-text-text-faint">{dayLabel(session.updatedAt, language.t("desktop.surface.group.justNow"))}</span>
                     </button>
                   )}
                 </For>
@@ -528,11 +538,11 @@ export function SessionSurface(props: { url: string; token: string }) {
             )}
           </For>
           <Show when={groups().every((group) => group.rows.length === 0)}>
-            <p class="px-4 py-3 text-11-regular text-v2-text-text-faint">{query() ? "没有匹配的任务" : "暂无任务"}</p>
+            <p class="px-4 py-3 text-11-regular text-v2-text-text-faint">{query() ? language.t("desktop.surface.sidebar.noMatch") : language.t("desktop.surface.sidebar.empty")}</p>
           </Show>
         </div>
         <div class="border-t border-v2-border-border-weak px-4 py-3 text-10-regular text-v2-text-text-faint">
-          由本机 miao 引擎驱动
+          {language.t("desktop.surface.sidebar.engineNote")}
         </div>
       </aside>
       <main class="flex min-w-0 flex-1 flex-col">
@@ -544,13 +554,13 @@ export function SessionSurface(props: { url: string; token: string }) {
               <span class="mb-5 flex size-12 items-center justify-center rounded-2xl bg-v2-background-bg-accent text-v2-text-text-inverse shadow-sm">
                 <SparklesIcon class="size-6" />
               </span>
-              <h1 class="text-24-medium">miao，我帮你</h1>
-              <p class="mt-2 text-13-regular text-v2-text-text-muted">一句话交代任务，剩下的交给我</p>
+              <h1 class="text-24-medium">{language.t("desktop.surface.welcome.title")}</h1>
+              <p class="mt-2 text-13-regular text-v2-text-text-muted">{language.t("desktop.surface.welcome.subtitle")}</p>
               <div class="mt-8 flex w-full max-w-2xl flex-col rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 shadow-sm transition-colors focus-within:border-v2-border-border-muted">
                 <textarea
                   ref={composer}
                   class="max-h-48 min-h-28 w-full resize-none bg-transparent px-4 pt-3.5 text-13-regular outline-none placeholder:text-v2-text-text-faint"
-                  placeholder="今天帮你做些什么？"
+                  placeholder={language.t("desktop.surface.welcome.placeholder")}
                   value={draft()}
                   rows={4}
                   onInput={(event) => setDraft(event.currentTarget.value)}
@@ -569,33 +579,33 @@ export function SessionSurface(props: { url: string; token: string }) {
                   }}
                 />
                 <div class="flex items-center justify-between px-4 pb-3.5">
-                  <span class="text-11-regular text-v2-text-text-faint">Enter 发送 · Shift+Enter 换行</span>
+                  <span class="text-11-regular text-v2-text-text-faint">{language.t("desktop.surface.welcome.hint")}</span>
                   <button
                     type="button"
                     class="flex h-8 items-center gap-1.5 rounded-full bg-v2-background-bg-accent px-4 text-12-medium text-v2-text-text-inverse transition-opacity hover:opacity-90 disabled:opacity-40"
                     disabled={sendDisabled()}
                     onClick={() => void submit(draft())}
                   >
-                    {busy() ? "发送中" : "发送"}
+                    {busy() ? language.t("desktop.surface.action.sending") : language.t("desktop.surface.action.send")}
                     <SendIcon class="size-3.5" />
                   </button>
                 </div>
               </div>
               <div class="mt-5 flex flex-wrap justify-center gap-2">
-                <For each={SUGGESTIONS}>
+                <For each={SUGGESTION_KEYS}>
                   {(suggestion) => (
                     <button
                       type="button"
                       class="rounded-full border border-v2-border-border-weak px-3.5 py-1.5 text-12-regular text-v2-text-text-muted transition-colors hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
                       onClick={() => void submit(suggestion)}
                     >
-                      {suggestion}
+                      {language.t(suggestion)}
                     </button>
                   )}
                 </For>
               </div>
               </div>
-              <div class="pb-3 pt-2 text-center text-11-regular text-v2-text-text-faint">内容由 AI 生成，请核对重要信息</div>
+              <div class="pb-3 pt-2 text-center text-11-regular text-v2-text-text-faint">{language.t("desktop.surface.disclaimer")}</div>
             </div>
           }
         >
@@ -603,7 +613,7 @@ export function SessionSurface(props: { url: string; token: string }) {
             class={`flex h-12 shrink-0 items-center gap-2 border-b border-v2-border-border-weak px-4 ${isMac ? "pl-20" : ""}`}
             data-tauri-drag-region={isMac}
           >
-            <Show when={state()} fallback={<span class="text-12-regular text-v2-text-text-faint">选择一个任务</span>}>
+            <Show when={state()} fallback={<span class="text-12-regular text-v2-text-text-faint">{language.t("desktop.surface.header.selectTask")}</span>}>
               {(current) => (
                 <div class="flex min-w-0 flex-1 items-center gap-2">
                   <h1 class="min-w-0 truncate text-13-medium" data-tauri-drag-region={isMac}>
@@ -616,18 +626,18 @@ export function SessionSurface(props: { url: string; token: string }) {
                   </Show>
                   <Show when={current().pending > 0}>
                     <span class="inline-flex shrink-0 items-center rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
-                      {current().pending} pending
+                      {language.t("desktop.surface.header.pending", { count: current().pending })}
                     </span>
                   </Show>
                   <Show when={current().approvals > 0}>
                     <span class="inline-flex shrink-0 items-center rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
-                      {current().approvals} approvals
+                      {language.t("desktop.surface.header.approvals", { count: current().approvals })}
                     </span>
                   </Show>
                   <Show when={live()}>
                     <span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-v2-background-bg-layer-01 px-2 py-0.5 text-10-regular text-v2-text-text-muted">
                       <Icon name="status-active" size="small" />
-                      live
+                      {language.t("desktop.surface.header.live")}
                     </span>
                   </Show>
                 </div>
@@ -685,14 +695,14 @@ export function SessionSurface(props: { url: string; token: string }) {
               <For each={failures(events())}>
                 {(reason) => (
                   <div class="my-1 inline-flex items-center gap-1.5 rounded-lg bg-v2-background-bg-layer-01 px-2.5 py-1.5 text-11-regular text-v2-state-fg-danger">
-                    运行失败：{reason}
+                    {language.t("desktop.surface.transcript.runFailed", { reason })}
                   </div>
                 )}
               </For>
               <Show when={running(events()) && !streamingText(events())}>
                 <div class="flex items-center gap-2 py-2 text-12-regular text-v2-text-text-faint">
                   <span class="size-1.5 animate-pulse rounded-full bg-v2-background-bg-accent" />
-                  thinking…
+                  {language.t("desktop.surface.transcript.thinking")}
                 </div>
               </Show>
             </div>
@@ -704,7 +714,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                 <button
                   type="button"
                   class="shrink-0 opacity-70 hover:opacity-100"
-                  aria-label="关闭"
+                  aria-label={language.t("desktop.surface.action.close")}
                   onClick={() => setError(undefined)}
                 >
                   <Icon name="xmark-small" size="small" />
@@ -716,7 +726,7 @@ export function SessionSurface(props: { url: string; token: string }) {
             <div class="flex items-end gap-2 rounded-2xl border border-v2-border-border-weak bg-v2-background-bg-layer-01 px-3 py-2 transition-colors focus-within:border-v2-border-border-muted">
               <textarea
                 class="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-1.5 text-13-regular outline-none placeholder:text-v2-text-text-faint"
-                placeholder="继续这个任务…"
+                placeholder={language.t("desktop.surface.composer.placeholder")}
                 value={draft()}
                 rows={2}
                 onInput={(event) => setDraft(event.currentTarget.value)}
@@ -755,12 +765,12 @@ export function SessionSurface(props: { url: string; token: string }) {
                   fallback={
                     <>
                       <StopIcon class="size-3.5" />
-                      停止
+                      {language.t("desktop.surface.action.stop")}
                     </>
                   }
                 >
                   <>
-                    {busy() ? "发送中" : "发送"}
+                    {busy() ? language.t("desktop.surface.action.sending") : language.t("desktop.surface.action.send")}
                     <SendIcon class="size-3.5" />
                   </>
                 </Show>
@@ -768,7 +778,7 @@ export function SessionSurface(props: { url: string; token: string }) {
             </div>
           </div>
           <div class="shrink-0 pb-2 pt-1 text-center text-10-regular text-v2-text-text-faint">
-            内容由 AI 生成，请核对重要信息
+            {language.t("desktop.surface.disclaimer")}
           </div>
         </Show>
       </main>
@@ -787,7 +797,7 @@ export function SessionSurface(props: { url: string; token: string }) {
               onClick={() => void togglePin(current().session)}
             >
               <PinIcon class="size-3.5 text-v2-icon-icon-muted" />
-              {current().session.pinned ? "取消置顶" : "置顶"}
+              {current().session.pinned ? language.t("desktop.surface.action.unpin") : language.t("desktop.surface.action.pin")}
             </button>
             <button
               type="button"
@@ -796,7 +806,7 @@ export function SessionSurface(props: { url: string; token: string }) {
               onClick={() => renameSession(current().session)}
             >
               <Icon name="edit" size="small" />
-              重命名
+              {language.t("desktop.surface.action.rename")}
             </button>
             <button
               type="button"
@@ -805,7 +815,7 @@ export function SessionSurface(props: { url: string; token: string }) {
               onClick={() => void toggleArchive(current().session)}
             >
               <Icon name="archive" size="small" />
-              {current().session.archived ? "恢复" : "归档"}
+              {current().session.archived ? language.t("desktop.surface.action.restore") : language.t("desktop.surface.action.archive")}
             </button>
             <button
               type="button"
@@ -817,7 +827,7 @@ export function SessionSurface(props: { url: string; token: string }) {
               }}
             >
               <TrashIcon class="size-3.5" />
-              删除
+              {language.t("desktop.surface.action.delete")}
             </button>
           </div>
         )}
@@ -837,14 +847,14 @@ export function SessionSurface(props: { url: string; token: string }) {
                 when={current().kind === "rename"}
                 fallback={
                   <>
-                    <h2 class="text-14-medium">删除任务</h2>
+                    <h2 class="text-14-medium">{language.t("desktop.surface.dialog.deleteTitle")}</h2>
                     <p class="mt-2 text-12-regular leading-relaxed text-v2-text-text-muted">
-                      「{current().title}」及其全部消息、运行记录将被永久删除，且无法恢复。
+                      {language.t("desktop.surface.dialog.deleteWarning", { title: current().title })}
                     </p>
                   </>
                 }
               >
-                <h2 class="text-14-medium">重命名任务</h2>
+                <h2 class="text-14-medium">{language.t("desktop.surface.dialog.renameTitle")}</h2>
                 <input
                   class="mt-3 w-full rounded-lg border border-v2-border-border-weak bg-v2-background-bg-deep px-3 py-2 text-13-regular outline-none focus:border-v2-border-border-muted"
                   value={current().title}
@@ -861,7 +871,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                   class="rounded-full px-4 py-1.5 text-12-medium text-v2-text-text-muted hover:bg-v2-background-bg-layer-02"
                   onClick={() => setDialog(undefined)}
                 >
-                  取消
+                  {language.t("desktop.surface.action.cancel")}
                 </button>
                 <button
                   type="submit"
@@ -871,7 +881,7 @@ export function SessionSurface(props: { url: string; token: string }) {
                     "bg-v2-background-bg-accent text-v2-text-text-inverse": current().kind === "rename",
                   }}
                 >
-                  {current().kind === "delete" ? "删除" : "保存"}
+                  {current().kind === "delete" ? language.t("desktop.surface.action.delete") : language.t("desktop.surface.action.save")}
                 </button>
               </div>
             </form>
