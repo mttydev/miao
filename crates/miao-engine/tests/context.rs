@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use miao_engine::{
     context::{assemble, SkillDirectory},
-    permission::{context_digest, digest, Config, Decision, Policy, Rule},
+    permission::{context_digest, digest, Config, Decision, Mode, Policy, Rule},
     protocol::{ContextBundle, Delivery, Input, ModelRequest},
     provider::{Provider, ProviderError, Reply},
     runtime::Runtime,
@@ -669,4 +669,137 @@ async fn the_system_prompt_carries_the_operating_guidance_baseline() {
         .system
         .contains("once you have the material it needs"));
     assert!(context.system.contains("<session-task-list>"));
+}
+
+#[derive(Default)]
+struct Notes {
+    requests: std::sync::Mutex<Vec<ModelRequest>>,
+}
+
+#[async_trait]
+impl Provider for Notes {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(Reply {
+            content: json!([{"type":"text","text":"done"}]),
+            usage: json!({}),
+            needs_tools: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn the_clock_and_the_knowledge_index_ride_the_system_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let tools = Tools::new(&workspace).await.unwrap();
+    let location = digest(tools.location().as_bytes());
+    std::fs::create_dir_all(workspace.join(".miao")).unwrap();
+    let knowledge = serde_json::json!({
+        "version": 1,
+        "revision": 1,
+        "notes": {
+            "prefer-bun": {
+                "revision": 1,
+                "title": "Prefer bun",
+                "kind": "preference",
+                "body": "Use bun, not npm.",
+                "derivation": "",
+                "sources": [],
+                "location": location,
+                "origin_session": "s",
+                "updated_at_ms": 0,
+                "expires_at_ms": null,
+                "disabled": false
+            }
+        }
+    });
+    std::fs::write(
+        workspace.join(".miao/knowledge.json"),
+        serde_json::to_vec(&knowledge).unwrap(),
+    )
+    .unwrap();
+
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(Notes::default());
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        tools,
+        Policy::new(Config {
+            mode: Mode::Workspace,
+            rules: vec![Rule {
+                tool: "*".into(),
+                path: "**".into(),
+                decision: Decision::Allow,
+            }],
+            ..Config::default()
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "s".into(),
+                input_id: "one".into(),
+                prompt: "read a".into(),
+                delivery: Delivery::Steer,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if store
+                .events("s", 0, 1000)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "run.finished")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.shutdown().await;
+
+    let requests = provider.requests.lock().unwrap();
+    let first = &requests[0];
+    // Orientation rides the system prompt, byte-stable across turns, and the
+    // user's message stays untouched.
+    assert!(first.system.contains("<session-clock>"), "{}", first.system);
+    assert!(
+        first.system.contains("Current local date"),
+        "{}",
+        first.system
+    );
+    assert!(
+        first.system.contains("<knowledge-index>"),
+        "{}",
+        first.system
+    );
+    assert!(
+        first
+            .system
+            .contains("- prefer-bun: Prefer bun [preference]"),
+        "{}",
+        first.system
+    );
+    let blocks = first.messages.last().unwrap().content.as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["text"], "read a");
 }
