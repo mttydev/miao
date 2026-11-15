@@ -96,8 +96,15 @@ jobs:
 
       - name: Require free disk
         run: |
-          free=$(df -m "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
-          echo "free disk under $RUNNER_TEMP: ${free}MB"
+          # The hosted image's root volume has been shrinking as GitHub ships
+          # more preinstalled toolsets, and the preflight kept refusing runners
+          # no matter what the reclaim step removed. The scratch volume mounted
+          # at /mnt has ~65 GB the shards never touched, so the build lives
+          # there now and the preflight guards the volume the build spends.
+          mkdir -p /mnt/cargo-target
+          echo "CARGO_TARGET_DIR=/mnt/cargo-target" >> "$GITHUB_ENV"
+          free=$(df -m /mnt/cargo-target | awk 'NR==2 {print $4}')
+          echo "free disk under /mnt/cargo-target: ${free}MB"
           if [ "${free:-0}" -lt 9000 ]; then
             echo "::error::runner has ${free}MB free but an engine shard needs 9000MB; prune unused build trees before rerunning"
             exit 1
