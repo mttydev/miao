@@ -11,6 +11,13 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.77] - 2026-11-15
+
+### Fixed
+- **tui**: keep the clipboard handoff file and serve each picture once (#3080) (`57badb781d`)
+- **app**: read the provider's context budget instead of summing parts (#3079) (`2c722a795a`)
+- **engine**: compact against the input ceiling the bound already uses (#3078) (`4b975ce54a`)
+
 ## [0.3.76] - 2026-11-15
 
 ### Added
