@@ -34,7 +34,10 @@ async fn lost_ack_is_exact_retry_and_conflicts_do_not_change_history() {
         },
         input("one", Delivery::Queue),
     ] {
-        assert!(matches!(store.admit(conflict).await, Err(Error::AdmissionConflict(_))));
+        assert!(matches!(
+            store.admit(conflict).await,
+            Err(Error::AdmissionConflict(_))
+        ));
     }
     assert!(store.history("s").await.unwrap().is_empty());
     assert_eq!(store.events("s", 0, 100).await.unwrap().len(), 1);
