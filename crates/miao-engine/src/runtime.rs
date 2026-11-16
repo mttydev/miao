@@ -4974,6 +4974,44 @@ command: None,
                 // so both bypass the refusal and are counted at settlement.
                 let repeat_key =
                     serde_json::to_string(&json!({"name":name,"input":block["input"]}))?;
+                // A call identical to one a crash interrupted mid-execution
+                // consumes the one-time unknown guard: the model learns what
+                // happened to the earlier attempt instead of silently
+                // repeating its side effect. The next identical call is the
+                // model's informed choice and executes.
+                if !batched
+                    && name != "terminal_read"
+                    && repeats.get(&repeat_key).copied().unwrap_or(0) == 0
+                {
+                    let fingerprint = crate::permission::digest(repeat_key.as_bytes());
+                    if inner
+                        .store
+                        .tool_unknown_consume(session, &fingerprint)
+                        .await?
+                        .is_some()
+                    {
+                        inner
+                            .store
+                            .tool_result_fenced(
+                                session,
+                                run,
+                                id,
+                                json!({"error": "The previous attempt of this exact call was interrupted mid-execution and its outcome is unknown. Verify what it actually did (files written, commands run, anything sent) before repeating it. This one-time notice is consumed; issuing the call again is an explicit choice."}),
+                                true,
+                                lease,
+                            )
+                            .await?;
+                        inner
+                            .store
+                            .record(
+                                session,
+                                "tool.idempotency_guard",
+                                json!({"run_id":run,"call_id":id,"tool":name}),
+                            )
+                            .await?;
+                        continue;
+                    }
+                }
                 let mut replayed_call = false;
                 if !batched
                     && name != "terminal_read"

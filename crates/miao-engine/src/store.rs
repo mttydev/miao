@@ -521,6 +521,10 @@ impl Store {
                         [],
                     )?;
                 }
+                let has_fingerprint:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_tool') WHERE name='fingerprint')",[],|r|r.get(0))?;
+                if !has_fingerprint {
+                    conn.execute("ALTER TABLE engine_tool ADD COLUMN fingerprint TEXT", [])?;
+                }
                 let has_owner_pid: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_lease') WHERE name='owner_pid')",
                     [], |row| row.get(0),
@@ -2751,6 +2755,51 @@ impl Store {
         .await
     }
 
+    /// The content identity of a tool call: the digest of its name and input,
+    /// so an identical re-issue in a later run links to the attempt it repeats.
+    fn tool_fingerprint(name: &str, input: &Value) -> String {
+        let canonical =
+            serde_json::to_vec(&json!({"name": name, "input": input})).unwrap_or_default();
+        crate::permission::digest(&canonical)
+    }
+
+    /// Consume the one-time unknown-outcome guard for `fingerprint`. A tool
+    /// interrupted mid-execution stays `unknown`; the first later re-issue of
+    /// an identical call consumes it and the caller settles a corrective
+    /// result instead of silently repeating the side effect. Further repeats
+    /// are the model's informed choice.
+    pub async fn tool_unknown_consume(
+        &self,
+        session: &str,
+        fingerprint: &str,
+    ) -> Result<Option<String>, Error> {
+        let (session, fingerprint) = (session.to_owned(), fingerprint.to_owned());
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            let prior: Option<String> = tx
+                .query_row(
+                    "SELECT t.id FROM engine_tool t JOIN engine_run r ON r.id=t.run_id \
+                     WHERE r.session_id=?1 AND t.state='unknown' AND t.fingerprint=?2 \
+                     ORDER BY t.id LIMIT 1",
+                    params![session, fingerprint],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = &prior {
+                let changed = tx.execute(
+                    "UPDATE engine_tool SET state='consumed' WHERE id=?1 AND state='unknown'",
+                    params![id],
+                )?;
+                if changed != 1 {
+                    return Ok(None);
+                }
+                tx.commit()?;
+            }
+            Ok(prior)
+        })
+        .await
+    }
+
     pub(crate) async fn start_run_inner(
         &self,
         session: &str,
@@ -2843,8 +2892,8 @@ impl Store {
                 require_lease(&tx, &session, lease)?;
             }
             tx.execute(
-                "INSERT INTO engine_tool VALUES(?1,?2,?3,?4,'dispatched')",
-                params![id, run, name, serde_json::to_string(&input)?],
+                "INSERT INTO engine_tool(id,run_id,name,input,state,fingerprint) VALUES(?1,?2,?3,?4,'dispatched',?5)",
+                params![id, run, name, serde_json::to_string(&input)?, Self::tool_fingerprint(&name, &input)],
             )?;
             let e = append(
                 &tx,
@@ -3135,7 +3184,8 @@ impl Store {
                 let id=block["id"].as_str().filter(|s|!s.is_empty()).ok_or_else(||Error::Invalid("tool id".into()))?;
                 let name=block["name"].as_str().ok_or_else(||Error::Invalid("tool name".into()))?;
                 let key=format!("{run}/{id}");
-                tx.execute("INSERT INTO engine_tool VALUES(?1,?2,?3,?4,'planned')",params![key,run,name,serde_json::to_string(&json!({"provider_id":id,"input":block["input"]}))?])?;
+                let fingerprint=Self::tool_fingerprint(name,&block["input"]);
+                tx.execute("INSERT INTO engine_tool(id,run_id,name,input,state,fingerprint) VALUES(?1,?2,?3,?4,'planned',?5)",params![key,run,name,serde_json::to_string(&json!({"provider_id":id,"input":block["input"]}))?,fingerprint])?;
                 append(&tx,&session,"tool.planned",json!({"run_id":run,"call_id":key,"provider_id":id,"name":name}))?;
             }
             let event=project_message(&tx,&session,"assistant",content,None,anchor)?;
