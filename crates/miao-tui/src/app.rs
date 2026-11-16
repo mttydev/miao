@@ -650,6 +650,9 @@ pub struct App {
     /// with no clock and no colour, so a run that was demonstrably moving
     /// looked exactly like one that had wedged.
     run_since: Option<(String, Instant)>,
+    /// How long the run that just settled worked. The composer keeps it after
+    /// the run ends, so an idle Session still says what just happened.
+    last_worked: Option<Duration>,
     /// The answer streaming in ahead of its committed message.
     draft: Option<Draft>,
     /// Assistant entries in the last projection, so a draft can name the
@@ -778,6 +781,7 @@ impl App {
             tool_running: None,
             backpressure: None,
             run_since: None,
+            last_worked: None,
             draft: None,
             committed: 0,
         }
@@ -1269,6 +1273,9 @@ impl App {
                 // figure moves are worth naming before the projection lands:
                 // a different Session opening, and a run settling.
                 let previous_id = self.session.as_ref().map(|session| session.id.clone());
+                if previous_id.as_deref() != summary.as_ref().map(|session| session.id.as_str()) {
+                    self.last_worked = None;
+                }
                 let was_running = self.state.active_run.is_some();
                 self.swap_draft(summary.as_ref().map(|session| session.id.as_str()));
                 self.shell.set_goal(state.goal.as_ref());
@@ -4520,6 +4527,7 @@ impl App {
             self.shell.title.set_status_alert(false);
             self.shell.composer.queued = 0;
             self.shell.composer.phase = None;
+            self.shell.composer.idle = None;
             // The launcher names the model the next prompt would run on: the
             // operator's last choice, labelled from the catalog. Nothing else
             // is in play before a Session exists, and the product's home status
@@ -4605,13 +4613,23 @@ impl App {
         // "Working" for as long as the first frame took — which reads the same
         // as a stuck turn.
         let run_id = self.state.active_run.clone();
-        self.run_since = match (&run_id, self.run_since.take()) {
+        match (&run_id, self.run_since.take()) {
             (Some(current), Some((tracked, since))) if &tracked == current => {
-                Some((tracked, since))
+                self.run_since = Some((tracked, since));
             }
-            (Some(current), _) => Some((current.clone(), now)),
-            (None, _) => None,
-        };
+            // A run replaced another: the old turn's clock is the last one this
+            // composer can report, and the new run starts its own.
+            (Some(current), Some((_, since))) => {
+                self.last_worked = Some(now.duration_since(since));
+                self.run_since = Some((current.clone(), now));
+            }
+            (Some(current), None) => self.run_since = Some((current.clone(), now)),
+            (None, Some((_, since))) => {
+                self.last_worked = Some(now.duration_since(since));
+                self.run_since = None;
+            }
+            (None, None) => {}
+        }
         let run_elapsed = self
             .run_since
             .as_ref()
@@ -4709,6 +4727,20 @@ impl App {
             false => None,
         };
         self.shell.composer.phase_alert = alert && self.shell.composer.phase.is_some();
+        // The title outlives the phase: once the run settles, say what it did
+        // instead of going blank. The duration is the wall clock of the run the
+        // engine reported, not a guess from the transcript.
+        self.shell.composer.idle = if self.shell.composer.phase.is_some() {
+            None
+        } else {
+            Some(match self.last_worked {
+                Some(worked) => format!(
+                    "Worked for {}",
+                    crate::pane::duration_ms(worked.as_millis() as u64)
+                ),
+                None => "Idle".to_string(),
+            })
+        };
         // Which model answers, and what the Session has cost so far. A pin on
         // the Session wins, then the model the newest assistant message ran on,
         // labelled with the catalog's protocol so the strip names the provider
@@ -7629,9 +7661,25 @@ mod tests {
         assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
         app.state.active_run = None;
         app.update_status();
+        assert!(app.shell.composer.phase.is_none());
         assert!(
-            app.shell.composer.phase.is_none(),
-            "an idle Session keeps the composer title quiet"
+            app.shell.composer.idle.is_some(),
+            "the settled turn speaks in the composer title"
+        );
+    }
+
+    #[test]
+    fn a_settled_run_leaves_its_worked_duration_in_the_composer() {
+        let mut app = session_app();
+        app.state.active_run = Some("run-1".into());
+        app.run_since = Some(("run-1".into(), Instant::now() - Duration::from_secs(95)));
+        app.update_status();
+        assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
+        app.state.active_run = None;
+        app.update_status();
+        assert_eq!(
+            app.shell.composer.idle.as_deref(),
+            Some("Worked for 1m 35s")
         );
     }
 
@@ -7644,6 +7692,7 @@ mod tests {
         let mut app = session_app();
         app.update_status();
         assert_eq!(strip_hints(&app), vec!["idle"]);
+        assert_eq!(app.shell.composer.idle.as_deref(), Some("Idle"));
 
         app.state.active_run = Some("run-1".into());
         app.update_status();

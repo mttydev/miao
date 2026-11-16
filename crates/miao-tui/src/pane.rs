@@ -2732,6 +2732,8 @@ fn render_composer_in(
     // state instead of a band above the box.
     if composer.phase.is_some() {
         parts.extend(composer.phase_elapsed.iter().cloned());
+    } else if let Some(idle) = &composer.idle {
+        parts.push(idle.clone());
     }
     parts.extend(queued);
     parts.extend(composer.notice.iter().cloned());
@@ -2744,15 +2746,24 @@ fn render_composer_in(
         title.push(Span::styled(format!(" {name} "), title_style));
     }
     if !parts.is_empty() {
-        title.push(Span::styled("· ", Style::new().fg(palette.border)));
+        // The separator introduces a label the box carries; a Session title
+        // has no widget name, so the state starts the border instead of
+        // hanging off a leading dot.
+        if !name.is_empty() {
+            title.push(Span::styled("· ", Style::new().fg(palette.border)));
+        }
         // A run in flight gets the braille spinner beside its phase, so the box
         // reads as moving even while the phase name stays the same. Past half a
         // minute of waiting the tone turns warning, which is the one signal
         // that separates "thinking" from "wedged" without reading the words.
-        let tone = match (shell, composer.phase_alert) {
-            (true, _) => palette.warning,
-            (false, true) => palette.warning,
-            (false, false) => palette.accent,
+        let tone = if composer.phase.is_none() {
+            palette.text_muted
+        } else {
+            match (shell, composer.phase_alert) {
+                (true, _) => palette.warning,
+                (false, true) => palette.warning,
+                (false, false) => palette.accent,
+            }
         };
         if composer.phase.is_some() {
             let frame = SPINNER_FRAMES[(now_ms() / 160) as usize % SPINNER_FRAMES.len()];
@@ -6536,6 +6547,12 @@ mod tests {
         let titled = draw_composer(&mut composer, &theme);
         assert!(titled.contains("Running bash"), "{titled}");
         assert!(titled.contains("2 queued"), "{titled}");
+
+        composer.phase = None;
+        composer.queued = 0;
+        composer.idle = Some("Worked for 1m 35s".into());
+        let settled = draw_composer(&mut composer, &theme);
+        assert!(settled.contains("Worked for 1m 35s"), "{settled}");
     }
 
     #[test]

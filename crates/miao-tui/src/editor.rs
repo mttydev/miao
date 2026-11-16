@@ -947,6 +947,9 @@ pub struct Composer {
     /// The wait has gone long enough that the TS row turns its spinner
     /// warning-colored (30s while waiting for the model).
     pub phase_alert: bool,
+    /// What an idle composer says about the turn that just settled: "Idle",
+    /// or "Worked for 2m 30s" once a run completes.
+    pub idle: Option<String>,
     /// Which placeholder example the empty composer shows. The TS prompt picks
     /// one at random when it mounts and re-rolls on a Session change, so this
     /// is a stored index rather than a clock drift.
@@ -999,6 +1002,7 @@ impl Composer {
             phase: None,
             phase_elapsed: None,
             phase_alert: false,
+            idle: None,
             placeholder: random_pick(),
             suggestion: None,
             attachments: Vec::new(),
@@ -1900,6 +1904,7 @@ mod tests {
             phase: None,
             phase_elapsed: None,
             phase_alert: false,
+            idle: None,
             placeholder: 0,
             suggestion: None,
             attachments: Vec::new(),
