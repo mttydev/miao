@@ -73,6 +73,7 @@ Usage:
   miao db retention     report events a snapshot-then-truncate could drop (report-only)
   miao db blob-gc       report or remove blob files nothing references (--db PATH, --apply)
   miao db backup        copy the ledger and its blobs into a verified backup (--db PATH, --to PATH)
+  miao import-claude    list or import Claude Code sessions (--session ID, --db PATH, --base DIR, --settings; credentials are never read)
   miao completion SHELL print a completion script (bash or zsh)
   miao debug paths|info|mcp|lsp|routes
                         read-only diagnostics
@@ -3543,6 +3544,152 @@ fn providers() -> Result<(), String> {
     Ok(())
 }
 
+/// `miao import-claude`: list or import Claude Code sessions from
+/// `~/.claude/projects` into native Sessions in the store. The list is the
+/// default; `--session` imports one; `--settings` reports Claude's settings
+/// file. Nothing here runs on its own and credential files are never read —
+/// identities stay with Claude.
+fn import_claude(rest: &[String]) -> Result<(), String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is unset")?;
+    let mut base = home.join(".claude").join("projects");
+    let mut db = None;
+    let mut session = None;
+    let mut workspace_override = None;
+    let mut settings = false;
+    let mut index = 0;
+    while index < rest.len() {
+        let value = |offset: usize| rest.get(offset + 1).cloned();
+        match rest[index].as_str() {
+            "--base" => {
+                base = value(index)
+                    .map(PathBuf::from)
+                    .ok_or("--base needs a value")?;
+                index += 2;
+            }
+            "--db" => {
+                db = Some(
+                    value(index)
+                        .map(PathBuf::from)
+                        .ok_or("--db needs a value")?,
+                );
+                index += 2;
+            }
+            "--session" => {
+                session = value(index).filter(|value| !value.starts_with("--"));
+                if session.is_none() {
+                    return Err("--session needs an id".to_string());
+                }
+                index += 2;
+            }
+            "--workspace" => {
+                workspace_override = value(index).map(PathBuf::from);
+                index += 2;
+            }
+            "--settings" => {
+                settings = true;
+                index += 1;
+            }
+            other => return Err(format!("unknown flag {other}")),
+        }
+    }
+    if settings {
+        println!("{}", miao_engine::claude_import::report_settings(&home));
+        return Ok(());
+    }
+    let entries = miao_engine::claude_import::scan(&base);
+    let Some(wanted) = session else {
+        if entries.is_empty() {
+            println!("import-claude  none ({})", base.display());
+            println!("note      credentials are never read");
+            return Ok(());
+        }
+        println!(
+            "import-claude  {} session(s) under {}",
+            entries.len(),
+            base.display()
+        );
+        for entry in &entries {
+            let id: String = entry.session_id.chars().take(8).collect();
+            println!(
+                "  {}  {:>4} msgs  {}  {}",
+                id,
+                entry.messages,
+                entry.last_timestamp.as_deref().unwrap_or("-"),
+                entry.first_prompt.as_deref().unwrap_or("-")
+            );
+        }
+        println!("note      import one with --session <id prefix>; credentials are never read");
+        return Ok(());
+    };
+    let entry = entries
+        .iter()
+        .find(|entry| entry.session_id == wanted || entry.session_id.starts_with(&wanted))
+        .ok_or_else(|| {
+            format!(
+                "no Claude session matching {wanted} under {}",
+                base.display()
+            )
+        })?;
+    let import_id = format!(
+        "claude-{}",
+        entry.session_id.chars().take(8).collect::<String>()
+    );
+    let workspace = workspace_override.unwrap_or_else(|| {
+        let decoded = PathBuf::from(&entry.workspace);
+        if decoded.is_dir() {
+            decoded
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        }
+    });
+    let db = db.unwrap_or_else(|| default_db(&workspace));
+    let target = workspace.to_string_lossy().into_owned();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let outcome = runtime.block_on(async {
+        let store = miao_engine::store::Store::open(&db)
+            .await
+            .map_err(|error| format!("cannot open the store: {error}"))?;
+        if miao_engine::claude_import::already_imported(&store, &import_id).await {
+            return Ok(None);
+        }
+        let title = entry.first_prompt.as_deref().map(|prompt| {
+            let title: String = prompt.chars().take(80).collect();
+            title
+        });
+        miao_engine::claude_import::import_session(
+            &store,
+            &entry.path,
+            &import_id,
+            &target,
+            title.as_deref(),
+        )
+        .await
+        .map(Some)
+        .map_err(|error| error.to_string())
+    })?;
+    match outcome {
+        Some(report) => println!(
+            "imported  {} -> {} ({} msgs, {} sidechain skipped, {} non-text skipped) in {}",
+            entry.session_id,
+            report.session,
+            report.imported,
+            report.skipped_sidechain,
+            report.skipped_non_text,
+            report.workspace
+        ),
+        None => println!(
+            "skipped   {} already imported as {import_id}",
+            entry.session_id
+        ),
+    }
+    Ok(())
+}
+
 /// Summarise `.miao/knowledge.json` in the workspace. Advisory notes only; this
 /// never writes, so it stays safe to run anywhere.
 fn memory(rest: &[String]) -> Result<(), String> {
@@ -5562,6 +5709,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(message) => {
                 eprintln!("miao memory: {message}");
+                std::process::ExitCode::from(1)
+            }
+        },
+        Some("import-claude") => match import_claude(&args.collect::<Vec<_>>()) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("miao import-claude: {message}");
                 std::process::ExitCode::from(1)
             }
         },
