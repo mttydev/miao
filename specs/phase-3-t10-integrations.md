@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | 配置链 | `packages/miao/src/config/tui.ts`：全局 `~/.config/miao/tui.json` → `MIAO_TUI_CONFIG` → 项目 `.miao/tui.json`（由远及近） | 新增 `config` 模块按同样顺序合并 `attention` 段；主题仍走现有 `theme::load` | 单测：优先级、JSONC、默认值 |
 | 通知/声音 | `attention.ts` + `feature-plugins/system/notifications.ts`：焦点感知、OSC 通知、音效、title 80 / message 240 截断、`enabled=false` 默认 | `platform::attention`：Focus 事件、OSC 9 / OSC 777（tmux 透传）、配置音文件播放，否则终端铃；触发点对齐 `approval.requested` / `question.requested` / `run.finished(reason)` | 单测：序列、截断、焦点门控、音量；pty 冒烟不启用通知 |
-| 剪贴板 | `clipboard.ts`：OSC 52 + 平台命令写入；图片优先读 `MTTY_CLIPBOARD_FILE`，再 osascript / PowerShell / wl-paste / xclip，最后文本 | `platform::clipboard`：`copy` 写 OSC 52 并调用平台命令；`read` 返回图片（png base64）或文本；空粘贴与 Ctrl+V 触发 | 单测：命令选择、OSC 52、10 秒新鲜度；冒烟：Ctrl+V 文本进入 composer |
+| 剪贴板 | `clipboard.ts`：OSC 52 + 平台命令写入；图片优先读 `MTTY_CLIPBOARD_FILE`，再 osascript / PowerShell / wl-paste / xclip，最后文本 | `platform::clipboard`：`copy` 写 OSC 52 并调用平台命令；`read` 返回图片（png base64）或文本；空粘贴与 Ctrl+V 触发 | 单测：命令选择、OSC 52、写入身份去重、失效 handoff 发现；冒烟：Ctrl+V 文本进入 composer |
 | 图片附件 | prompt 以 `[Image N]` 标记 + file part 提交 | composer 保存附件列表、插入 `[Image N] ` 标记，`admit` 的 `attachments` 参数带上 `{mime,data}`；提交失败按原样恢复 | 单测：标记计数、失败恢复；传输测试：admit 帧含 attachments |
 | 外编 | `<leader>e`，`$VISUAL`/`$EDITOR`，临时 md 文件，挂起/恢复终端 | 新增 `platform::editor`：leader `e` 挂起 TUI 启动编辑器，退出后把内容写回 composer；临时文件 0600 并删除 | 单测：命令解析、临时文件清理；pty 冒烟用假编辑器 |
 | Zed 选区 | `editor-zed.ts`：`ZED_TERM` 下读 Zed SQLite 的活动编辑器与选区，形成 `<system-reminder>` 前缀 | `platform::zed`：用系统 `sqlite3 -readonly -json` 读同一查询（避免引入 SQLite C 依赖）；提交时按选区 key 去重后前置上下文 | 单测：字节偏移→行列、上下文格式、去重；无 `sqlite3` 时静默不可用 |
@@ -35,7 +35,7 @@
 ### 2.3 剪贴板与图片
 
 - 写入：先写 OSC 52（tmux/ST 透传），再调用平台命令（macOS `pbcopy`；Linux `wl-copy` / `xclip` / `xsel`；Windows PowerShell `Set-Clipboard`）。平台命令失败不报错，OSC 52 仍是有效通道。
-- 读取：`MTTY_CLIPBOARD_FILE` 按内容哈希去重、每张图只服务一次，文件不被删除（宿主每次粘贴都会重写它）；否则 macOS osascript JXA、Windows/WSL PowerShell、Linux `wl-paste` / `xclip` 取图；都没有则读文本（`pbpaste` / PowerShell / `wl-paste` / `xclip`）。
+- 读取：`MTTY_CLIPBOARD_FILE` 按写入身份（mtime + 长度 + 内容哈希）去重，每次写只服务一次；同一张图再次粘贴是新写入，仍会挂载。文件不被删除（宿主每次粘贴都会重写它）。配置路径失效时（宿主重启后 restored pane 仍指向旧 PID），读取同目录里最新鲜的 `mtty-clipboard-*.png`；超过 10 秒的旧文件不当作本次粘贴。否则 macOS osascript JXA、Windows/WSL PowerShell、Linux `wl-paste` / `xclip` 取图；都没有则读文本（`pbpaste` / PowerShell / `wl-paste` / `xclip`）。
 - 空 bracketed paste 与 `Ctrl+V` 都触发读取；读取在后台线程完成，UI 不阻塞。
 - 图片以 `[Image N] ` 文本标记留在 composer，附件单独随 `admit` 的 `attachments` 发送；提交失败时文本与附件一起恢复。
 
