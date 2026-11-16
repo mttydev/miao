@@ -122,10 +122,11 @@ identity to a sibling `miao-remote` through the environment, then stops it when 
 exits. `/remote-control` remains the TUI entry point; the two do not share a runtime
 identity.
 
-1. Build the sidecar with `bun run build:remote` and put `dist/miao-remote` beside the
-   `miao` executable (or point `MIAO_REMOTE_HOST_BIN` at it). A source checkout can set
-   `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts` instead,
-   and the host runs under `bun run`.
+1. The release archive puts `miao-remote` beside the `miao` executable. A source checkout
+   builds it with `bun run build:remote` and places `dist/miao-remote` there. You can also
+   point `MIAO_REMOTE_HOST_BIN` at it, or set
+   `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts` and let the
+   host run under `bun run`.
 2. Write `control.json`:
 
    ```json

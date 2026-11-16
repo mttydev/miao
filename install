@@ -391,7 +391,21 @@ download_and_install() {
     fi
 
     publish_binary "$tmp_dir/${APP}${EXE}"
+    publish_remote "$tmp_dir/${APP}-remote${EXE}"
     rm -rf "$tmp_dir"
+}
+
+# The optional Remote Control sidecar ships beside the binary. An archive from
+# before sidecars existed remains a valid install.
+publish_remote() {
+    local source="$1"
+    [ -f "$source" ] || return 0
+    local stage
+    stage=$(mktemp -d "$INSTALL_DIR/.remote-XXXXXXXX")
+    trap 'rm -rf "$stage"; trap - RETURN' RETURN
+    cp "$source" "$stage/${APP}-remote${EXE}"
+    chmod 755 "$stage/${APP}-remote${EXE}"
+    mv -f "$stage/${APP}-remote${EXE}" "$INSTALL_DIR/${APP}-remote${EXE}"
 }
 
 publish_binary() {

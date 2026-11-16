@@ -107,9 +107,9 @@ loopback，并把本次 serve 的 URL、token 和一次性 runtimeID 通过环�
 `miao-remote`；serve 退出时一并回收宿主进程。`/remote-control` 仍然是 TUI 的入口，
 两者不共享 runtime 身份。
 
-1. 构建 sidecar：`bun run build:remote`，把 `dist/miao-remote` 放到 `miao` 同目录
-   （或用 `MIAO_REMOTE_HOST_BIN` 指路）。源码检出也可以设
-   `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts`，由 `bun run` 启动。
+1. 发布归档已把 `miao-remote` 放在 `miao` 同目录；源码检出用 `bun run build:remote`
+   生成 `dist/miao-remote` 并放到 `miao` 同目录。也可以用 `MIAO_REMOTE_HOST_BIN` 指路，
+   或设 `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts` 由 `bun run` 启动。
 2. 写 `control.json`：
 
    ```json
