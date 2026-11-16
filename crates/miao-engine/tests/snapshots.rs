@@ -404,3 +404,230 @@ async fn ignored_file_captures_content_not_git() {
         "secret"
     );
 }
+
+/// A clean tracked path the Session touched but did not change: its newest
+/// record is the git reference itself and the disk holds exactly the
+/// committed bytes, so the plan reads the path as this Session's own state,
+/// not as an outside edit — no force, nothing to restore.
+#[tokio::test]
+async fn reverting_an_unmodified_clean_tracked_file_needs_no_force() {
+    let big = "y".repeat(8 * 1024 * 1024 + 1);
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("big.bin"), &big).unwrap();
+    git(&workspace, &["add", "big.bin"]);
+    git(&workspace, &["commit", "-q", "-m", "big"]);
+    store.record_file_touch("s", "big.bin").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+
+    let preview = store.revert_preview("s", 1).await.unwrap();
+    assert_eq!(preview["restore"], serde_json::json!([]));
+    assert_eq!(preview["remove"], serde_json::json!([]));
+    assert_eq!(preview["conflicts"], serde_json::json!([]));
+    let staged = store
+        .revert_stage("s", 1, true, false, false)
+        .await
+        .unwrap();
+    assert_eq!(staged["restored"], serde_json::json!([]));
+    assert_eq!(fs::read(workspace.join("big.bin")).unwrap(), big.as_bytes());
+}
+
+/// The core fix end to end and without force: the oversized tracked file was
+/// recorded from HEAD, and the revert brings those bytes back.
+#[tokio::test]
+async fn an_oversized_tracked_file_restores_without_force() {
+    let big = "x".repeat(8 * 1024 * 1024 + 1);
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("big.bin"), &big).unwrap();
+    git(&workspace, &["add", "big.bin"]);
+    git(&workspace, &["commit", "-q", "-m", "big"]);
+    store.record_file_touch("s", "big.bin").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    fs::write(workspace.join("big.bin"), "changed").unwrap();
+    store.record_file_touch("s", "big.bin").await.unwrap();
+    store.capture_file_snapshot("s", 2).await.unwrap();
+
+    let preview = store.revert_preview("s", 1).await.unwrap();
+    assert_eq!(preview["restore"], serde_json::json!(["big.bin"]));
+    assert_eq!(preview["conflicts"], serde_json::json!([]));
+    let staged = store
+        .revert_stage("s", 1, true, false, false)
+        .await
+        .unwrap();
+    assert_eq!(staged["restored"], serde_json::json!(["big.bin"]));
+    assert_eq!(fs::read_to_string(workspace.join("big.bin")).unwrap(), big);
+}
+
+/// The realistic small-file flow: the Session's own later write is captured
+/// at its own boundary, so reverting to the earlier one is this Session's
+/// undo — preview and stage agree, and clear brings the rewrite back.
+#[tokio::test]
+async fn reverting_a_tracked_file_after_its_own_write_needs_no_force() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("a.txt"), "committed").unwrap();
+    git(&workspace, &["add", "a.txt"]);
+    git(&workspace, &["commit", "-q", "-m", "one"]);
+    store.record_file_touch("s", "a.txt").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    fs::write(workspace.join("a.txt"), "rewritten").unwrap();
+    store.record_file_touch("s", "a.txt").await.unwrap();
+    store.capture_file_snapshot("s", 2).await.unwrap();
+
+    let preview = store.revert_preview("s", 1).await.unwrap();
+    assert_eq!(preview["restore"], serde_json::json!(["a.txt"]));
+    assert_eq!(preview["conflicts"], serde_json::json!([]));
+    let staged = store
+        .revert_stage("s", 1, true, false, false)
+        .await
+        .unwrap();
+    assert_eq!(staged["restored"], serde_json::json!(["a.txt"]));
+    assert_eq!(
+        fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "committed"
+    );
+    store.revert_clear("s").await.unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "rewritten"
+    );
+}
+
+/// Untracked paths are invisible to git tracking, so a fresh file stores its
+/// own bytes exactly as it would outside a repository.
+#[tokio::test]
+async fn an_untracked_file_still_stores_its_own_bytes() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("a.txt"), "committed").unwrap();
+    git(&workspace, &["add", "a.txt"]);
+    git(&workspace, &["commit", "-q", "-m", "one"]);
+    fs::write(workspace.join("fresh.txt"), "untracked").unwrap();
+    store.record_file_touch("s", "fresh.txt").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    // The blob, not a git reference, carries the content.
+    let blobs = _dir.path().join("engine.snapshots").join("s");
+    assert_eq!(fs::read_dir(&blobs).unwrap().count(), 1);
+    fs::write(workspace.join("fresh.txt"), "rewritten").unwrap();
+    store.record_file_touch("s", "fresh.txt").await.unwrap();
+    store.capture_file_snapshot("s", 2).await.unwrap();
+    let staged = store
+        .revert_stage("s", 1, true, false, false)
+        .await
+        .unwrap();
+    assert_eq!(staged["restored"], serde_json::json!(["fresh.txt"]));
+    assert_eq!(
+        fs::read_to_string(workspace.join("fresh.txt")).unwrap(),
+        "untracked"
+    );
+}
+
+/// Outside a repository nothing changed: an oversized file is recorded as
+/// unrecoverable, no blob is stored, and the revert removes what it cannot
+/// bring back.
+#[tokio::test]
+async fn outside_a_repository_an_oversized_file_stays_unrecoverable() {
+    let (_dir, store, workspace) = fixture().await;
+    fs::write(workspace.join("a.txt"), vec![3u8; 8 * 1024 * 1024 + 1]).unwrap();
+    store.record_file_touch("s", "a.txt").await.unwrap();
+    let captured = store.capture_file_snapshot("s", 1).await.unwrap();
+    assert_eq!(captured["available"], true);
+    assert!(captured["head"].is_null(), "{captured}");
+    assert!(!_dir.path().join("engine.snapshots").join("s").exists());
+    let staged = store
+        .revert_stage("s", 1, true, false, false)
+        .await
+        .unwrap();
+    assert_eq!(staged["removed"], serde_json::json!(["a.txt"]));
+    assert!(!workspace.join("a.txt").exists());
+}
+
+/// A workspace may sit inside a repository rather than at its root; manifest
+/// paths are workspace-relative, and `git show` must resolve them the same
+/// way.
+#[tokio::test]
+async fn a_workspace_nested_in_a_repository_still_restores() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let workspace = repo.join("sub");
+    fs::create_dir_all(&workspace).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(workspace.join("a.txt"), "committed").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "one"]);
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store
+        .initialize("s", "fixture", workspace.to_str().unwrap())
+        .await
+        .unwrap();
+    store.record_file_touch("s", "a.txt").await.unwrap();
+    let captured = store.capture_file_snapshot("s", 1).await.unwrap();
+    assert!(captured["head"].is_string(), "{captured}");
+    fs::write(workspace.join("a.txt"), "rewritten").unwrap();
+    store.record_file_touch("s", "a.txt").await.unwrap();
+    store.capture_file_snapshot("s", 2).await.unwrap();
+    let staged = store
+        .revert_stage("s", 1, true, false, false)
+        .await
+        .unwrap();
+    assert_eq!(staged["restored"], serde_json::json!(["a.txt"]));
+    assert_eq!(
+        fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "committed"
+    );
+}
+
+/// A touched name that reads like a glob pattern must still match itself and
+/// take the git reference rather than a blob.
+#[tokio::test]
+async fn a_glob_shaped_name_still_captures_as_git() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("weird[1].txt"), "committed").unwrap();
+    git(&workspace, &["add", "--", ":(literal)weird[1].txt"]);
+    git(&workspace, &["commit", "-q", "-m", "one"]);
+    store.record_file_touch("s", "weird[1].txt").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    // No blob: the literal path matched itself and took the git reference.
+    assert!(!_dir.path().join("engine.snapshots").join("s").exists());
+    fs::write(workspace.join("weird[1].txt"), "rewritten").unwrap();
+    store.record_file_touch("s", "weird[1].txt").await.unwrap();
+    store.capture_file_snapshot("s", 2).await.unwrap();
+    let staged = store
+        .revert_stage("s", 1, true, false, false)
+        .await
+        .unwrap();
+    assert_eq!(staged["restored"], serde_json::json!(["weird[1].txt"]));
+    assert_eq!(
+        fs::read_to_string(workspace.join("weird[1].txt")).unwrap(),
+        "committed"
+    );
+}
+
+/// A clean tracked symlink stores through its target like the blob branch
+/// always has: `git show` would answer the link string, not the content.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tracked_symlink_still_stores_its_target_bytes() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("target.txt"), "pointed at").unwrap();
+    std::os::unix::fs::symlink("target.txt", workspace.join("link.txt")).unwrap();
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-q", "-m", "one"]);
+    store.record_file_touch("s", "link.txt").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    // The blob carries the target's bytes, not the link string.
+    let blobs = _dir.path().join("engine.snapshots").join("s");
+    assert_eq!(fs::read_dir(&blobs).unwrap().count(), 1);
+    fs::remove_file(workspace.join("link.txt")).unwrap();
+    // Removing the recorded path outside a capture reads as an outside edit,
+    // which this test forces past: it pins the content branch, not the gate.
+    let staged = store.revert_stage("s", 1, true, false, true).await.unwrap();
+    assert_eq!(staged["restored"], serde_json::json!(["link.txt"]));
+    assert_eq!(
+        fs::read_to_string(workspace.join("link.txt")).unwrap(),
+        "pointed at"
+    );
+}
