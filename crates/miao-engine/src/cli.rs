@@ -1297,6 +1297,14 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     // The mechanisms this start keeps. Set here, before the first drain, so
     // every run in this Location reads the same arm.
     runtime.set_optimizations(optimizations);
+    // Turn-boundary memory auto-extraction. Missing or malformed flags fall
+    // back to the defaults: an optional enrichment never refuses a start.
+    runtime.set_memory_auto_extract(miao_engine::memory::AutoExtract::from_flags(
+        options.get("--memory-auto-extract").map(String::as_str),
+        options
+            .get("--memory-auto-extract-every-turns")
+            .map(String::as_str),
+    ));
     if let Some(origin) = &lsp_origin {
         runtime.set_lsp_origin(origin.clone()).await;
     }
@@ -1400,6 +1408,8 @@ fn parse_options(
         "--codegraph",
         "--context-limits",
         "--optimizations",
+        "--memory-auto-extract",
+        "--memory-auto-extract-every-turns",
         "--hooks-config",
         "--context-config",
         "--workspace-instructions",

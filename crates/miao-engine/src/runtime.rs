@@ -303,6 +303,10 @@ struct Inner {
     /// Which optimization mechanisms this run keeps (VAL-04). Copy and read
     /// once per gate, so an ablation arm removes exactly one mechanism.
     optimization: StdRwLock<crate::optimization::Optimizations>,
+    /// Turn-boundary memory auto-extraction. Off by default and set once at
+    /// startup, like the optimization arms; the lock mirrors them so a future
+    /// reload can swap it without touching the drains in flight.
+    memory_auto_extract: StdRwLock<crate::memory::AutoExtract>,
     roles: Mutex<crate::roles::Bindings>,
     route_limits: Mutex<crate::model_routes::RouteLimits>,
     /// What the configuration charges per million tokens, keyed by the logical
@@ -939,6 +943,7 @@ impl Runtime {
                 product: Arc::new(std::sync::RwLock::new(crate::product::State::default())),
                 context: Mutex::new(None),
                 optimization: StdRwLock::new(crate::optimization::Optimizations::defaults()),
+                memory_auto_extract: StdRwLock::new(crate::memory::AutoExtract::default()),
                 roles: Mutex::new(crate::roles::Bindings::default()),
                 route_limits: Mutex::new(crate::model_routes::RouteLimits::default()),
                 prices: Mutex::new(crate::pricing::Table::default()),
@@ -1606,6 +1611,14 @@ impl Runtime {
     /// attribute the difference to that mechanism alone.
     pub fn set_optimizations(&self, optimizations: crate::optimization::Optimizations) {
         self.inner.set_optimizations(optimizations);
+    }
+
+    pub fn set_memory_auto_extract(&self, config: crate::memory::AutoExtract) {
+        *self
+            .inner
+            .memory_auto_extract
+            .write()
+            .unwrap_or_else(|held| held.into_inner()) = config;
     }
 
     pub fn optimizations(&self) -> crate::optimization::Optimizations {
@@ -4768,6 +4781,32 @@ command: None,
             .store
             .capture_file_snapshot(session, assistant_boundary)
             .await;
+        // Reaching this point means the reply settled normally, so this is the
+        // boundary the auto-extraction stride counts. The pass is spawned and
+        // never awaited: it must not block the turn, and every failure inside
+        // is swallowed. It rides the process stop token, not this run's — a
+        // run's token dies with the drain and would kill the pass right after
+        // the turn that spawned it.
+        let memory_config = *inner
+            .memory_auto_extract
+            .read()
+            .unwrap_or_else(|held| held.into_inner());
+        if memory_config.enabled {
+            let turns = inner
+                .store
+                .assistant_message_count(session)
+                .await
+                .unwrap_or(0);
+            if crate::memory::extraction_due(turns, memory_config.every_turns) {
+                tokio::spawn(crate::memory::auto_extract(
+                    inner.store.clone(),
+                    std::sync::Arc::clone(&provider),
+                    inner.stop.child_token(),
+                    std::path::PathBuf::from(inner.tools.location()),
+                    session.to_owned(),
+                ));
+            }
+        }
         let invalid_input = reply
             .content
             .as_array()
@@ -5065,6 +5104,8 @@ command: None,
                                     read_peer_context(inner, session, &prepared).await
                                 }
                                 "knowledge"=>inner.tools.execute_knowledge(prepared,&policy,session,cancel.child_token()).await,
+                                "memory_save"=>inner.tools.execute_memory_save(prepared,session,cancel.child_token()).await,
+                                "memory_recall"=>inner.tools.execute_memory_recall(prepared,cancel.child_token()).await,
                                 "todowrite" | "goal" | "planwrite" => match crate::state::Mutation::parse(
                                     name,
                                     prepared.input().clone(),

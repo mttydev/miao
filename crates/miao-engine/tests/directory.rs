@@ -34,6 +34,8 @@ async fn directory_catalog_and_execution_have_bounded_workspace_scope() {
             "read_image",
             "load_skill",
             "knowledge",
+            "memory_save",
+            "memory_recall",
             "recall",
             "session_state",
             "todowrite",
