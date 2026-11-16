@@ -159,6 +159,10 @@ mod tests {
                         "gpt-5": {
                             "currency": "USD",
                             "cost": {"input": 1.25, "output": 10.0, "cache_read": 0.125}
+                        },
+                        "cache-writer": {
+                            "currency": "USD",
+                            "cost": {"input": 1.0, "output": 10.0, "cache_read": 0.1, "cache_write": 1.25}
                         }
                     }
                 }
@@ -172,7 +176,7 @@ mod tests {
         assert!(table.price("deepseek/unpriced").is_none());
         assert!(table.price("deepseek/tiered").is_none());
         assert!(table.price("deepseek/missing").is_none());
-        assert_eq!(table.prices.len(), 2);
+        assert_eq!(table.prices.len(), 3);
     }
 
     #[test]
@@ -225,5 +229,29 @@ mod tests {
         let charge = table.charge("deepseek/deepseek-chat", tokens).unwrap();
         // 0.1M × 2.0 + 0.9M × 0.5 = 0.2 + 0.45
         assert_eq!(charge.amount, 0.65);
+    }
+
+    /// A prefix write and an extended-thinking turn are priced by the axes the
+    /// provider bills: cache creation at its own (usually higher) rate, while
+    /// reasoning stays inside output because it is a subset of it. Billing
+    /// reasoning again would charge the same tokens twice.
+    #[test]
+    fn cache_writes_are_priced_at_their_own_rate_and_reasoning_rides_output() {
+        let tokens = Tokens::from_usage(&json!({
+            "inputTokens": 1_000_000,
+            "nonCachedInputTokens": 400_000,
+            "cacheReadInputTokens": 500_000,
+            "cacheWriteInputTokens": 100_000,
+            "outputTokens": 200_000,
+            "reasoningTokens": 150_000,
+        }));
+        assert_eq!(tokens.input, 400_000);
+        assert_eq!(tokens.cache_write, 100_000);
+        let charge = Table::from_config(&config())
+            .charge("openai/cache-writer", tokens)
+            .unwrap();
+        // 0.4M × 1.0 + 0.2M × 10.0 + 0.5M × 0.1 + 0.1M × 1.25 = 2.575.
+        assert_eq!(charge.amount, 2.575);
+        assert_eq!(charge.rates.cache_write, 1.25);
     }
 }

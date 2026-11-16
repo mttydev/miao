@@ -4925,8 +4925,8 @@ impl Store {
             // The sequence of the usage event that set `context`. An explicit
             // clear later in the journal supersedes that reading.
             let mut context_seq = 0u64;
-            let mut tokens = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0});
-            let mut coverage = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0});
+            let mut tokens = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0,"reasoning":0});
+            let mut coverage = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0,"reasoning":0});
             let mut requests = 0u64;
             let mut invalid_cache_rows = 0u64;
             let mut changes = std::collections::BTreeMap::<String,u64>::new();
@@ -5167,6 +5167,7 @@ impl Store {
                             ("cacheReadInputTokens", "cacheRead"),
                             ("cacheWriteInputTokens", "cacheWrite"),
                             ("nonCachedInputTokens", "nonCached"),
+                            ("reasoningTokens", "reasoning"),
                         ] {
                             if let Some(value) = usage[field].as_u64() {
                                 tokens[key] = json!(tokens[key].as_u64().unwrap_or(0) + value);
@@ -5246,7 +5247,7 @@ impl Store {
                 ids
             };
             let mut subagent_tokens =
-                json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0});
+                json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"nonCached":0,"reasoning":0});
             let mut subagent_turns = 0u64;
             // A delegated Session pays for its own retries. Counting only its
             // settled turns answers "what did the child cost" with the work that
@@ -5296,6 +5297,7 @@ impl Store {
                                 ("cacheReadInputTokens", "cacheRead"),
                                 ("cacheWriteInputTokens", "cacheWrite"),
                                 ("nonCachedInputTokens", "nonCached"),
+                                ("reasoningTokens", "reasoning"),
                             ] {
                                 if let Some(value) = data["usage"][field].as_u64() {
                                     subagent_tokens[key] =
@@ -5522,7 +5524,7 @@ impl Store {
                 .unwrap_or(0);
             let current = now_ms - now_ms.rem_euclid(HOUR_MS);
             let first = current - (hours as i64 - 1) * HOUR_MS;
-            let mut buckets: std::collections::BTreeMap<i64, [u64; 5]> =
+            let mut buckets: std::collections::BTreeMap<i64, [u64; 6]> =
                 std::collections::BTreeMap::new();
             let mut cost_micros: std::collections::BTreeMap<i64, u64> =
                 std::collections::BTreeMap::new();
@@ -5535,6 +5537,7 @@ impl Store {
                             COALESCE(SUM(json_extract(data,'$.usage.outputTokens')),0),
                             COALESCE(SUM(json_extract(data,'$.usage.cacheReadInputTokens')),0),
                             COALESCE(SUM(json_extract(data,'$.usage.cacheWriteInputTokens')),0),
+                            COALESCE(SUM(json_extract(data,'$.usage.reasoningTokens')),0),
                             COUNT(*)
                      FROM engine_event
                      WHERE kind='usage' AND recorded_at_ms >= ?1
@@ -5551,6 +5554,7 @@ impl Store {
                             row.get::<_, i64>(3)?.max(0) as u64,
                             row.get::<_, i64>(4)?.max(0) as u64,
                             row.get::<_, i64>(5)?.max(0) as u64,
+                            row.get::<_, i64>(6)?.max(0) as u64,
                         ],
                     );
                 }
@@ -5594,7 +5598,7 @@ impl Store {
             // all (custom providers without an identity, or events that
             // predate attribution) stay out of the array and are still
             // counted in the totals above.
-            let mut model_tokens: std::collections::BTreeMap<(Option<String>, String), [u64; 4]> =
+            let mut model_tokens: std::collections::BTreeMap<(Option<String>, String), [u64; 6]> =
                 std::collections::BTreeMap::new();
             {
                 let mut stmt = conn.prepare(
@@ -5603,6 +5607,8 @@ impl Store {
                             COALESCE(SUM(json_extract(data,'$.usage.inputTokens')),0),
                             COALESCE(SUM(json_extract(data,'$.usage.outputTokens')),0),
                             COALESCE(SUM(json_extract(data,'$.usage.cacheReadInputTokens')),0),
+                            COALESCE(SUM(json_extract(data,'$.usage.cacheWriteInputTokens')),0),
+                            COALESCE(SUM(json_extract(data,'$.usage.reasoningTokens')),0),
                             COUNT(*)
                      FROM engine_event
                      WHERE kind='usage' AND recorded_at_ms >= ?1
@@ -5622,6 +5628,8 @@ impl Store {
                             row.get::<_, i64>(3)?.max(0) as u64,
                             row.get::<_, i64>(4)?.max(0) as u64,
                             row.get::<_, i64>(5)?.max(0) as u64,
+                            row.get::<_, i64>(6)?.max(0) as u64,
+                            row.get::<_, i64>(7)?.max(0) as u64,
                         ],
                     );
                 }
@@ -5659,17 +5667,17 @@ impl Store {
                 |row| row.get(0),
             )?;
             let mut out = Vec::with_capacity(hours as usize);
-            let mut totals = [0u64; 5];
+            let mut totals = [0u64; 6];
             let mut total_cost_micros = 0u64;
             let mut total_cost_turns = 0u64;
             let mut peak: Option<(i64, u64)> = None;
             for hour in 0..hours as i64 {
                 let start = first + hour * HOUR_MS;
-                let counts = buckets.get(&start).copied().unwrap_or([0; 5]);
+                let counts = buckets.get(&start).copied().unwrap_or([0; 6]);
                 let cost = cost_micros.get(&start).copied().unwrap_or(0);
                 let cost_tally = cost_turns.get(&start).copied().unwrap_or(0);
                 // `input` already counts the cache axes, so the volume this
-                // hour carried is prompt plus completion, not four sums.
+                // hour carried is prompt plus completion, not the axes again.
                 let tokens = counts[0].saturating_add(counts[1]);
                 for (total, value) in totals.iter_mut().zip(counts.iter()) {
                     *total = total.saturating_add(*value);
@@ -5685,7 +5693,8 @@ impl Store {
                     "output": counts[1],
                     "cache_read": counts[2],
                     "cache_write": counts[3],
-                    "turns": counts[4],
+                    "reasoning": counts[4],
+                    "turns": counts[5],
                     "tokens": tokens,
                     "cost_micros": cost,
                     "cost_turns": cost_tally,
@@ -5706,7 +5715,9 @@ impl Store {
                             "input": counts[0],
                             "output": counts[1],
                             "cache_read": counts[2],
-                            "turns": counts[3],
+                            "cache_write": counts[3],
+                            "reasoning": counts[4],
+                            "turns": counts[5],
                             "tokens": counts[0].saturating_add(counts[1]),
                             "cost_micros": cost,
                         }),
@@ -5726,7 +5737,8 @@ impl Store {
                     "output": totals[1],
                     "cache_read": totals[2],
                     "cache_write": totals[3],
-                    "turns": totals[4],
+                    "reasoning": totals[4],
+                    "turns": totals[5],
                     "tokens": totals[0]+totals[1],
                     "cache_hit_ratio": crate::usage::hit_ratio(totals[0], totals[2]),
                     "cost_micros": total_cost_micros,
@@ -6615,7 +6627,7 @@ mod usage_hourly_tests {
                 "usage",
                 // `inputTokens` is the whole prompt, so the cache read sits
                 // inside the 100 rather than beside it.
-                json!({"usage":{"inputTokens":100,"outputTokens":50,"cacheReadInputTokens":40,"nonCachedInputTokens":60}}),
+                json!({"usage":{"inputTokens":100,"outputTokens":50,"cacheReadInputTokens":40,"cacheWriteInputTokens":25,"reasoningTokens":10,"nonCachedInputTokens":60}}),
             )
             .await
             .expect("usage");
@@ -6651,6 +6663,11 @@ mod usage_hourly_tests {
         assert_eq!(report["totals"]["turns"], 2, "the 26h row is outside");
         assert_eq!(report["totals"]["input"], 110);
         assert_eq!(report["totals"]["cache_read"], 40);
+        // Cache creation is its own axis; reading it as cache-read traffic
+        // would hide what the prefix write cost, and dropping reasoning would
+        // hide the thinking the output counter already includes.
+        assert_eq!(report["totals"]["cache_write"], 25);
+        assert_eq!(report["totals"]["reasoning"], 10);
         assert_eq!(
             report["totals"]["cache_hit_ratio"].as_f64().expect("ratio"),
             40.0 / 110.0,
@@ -6658,6 +6675,8 @@ mod usage_hourly_tests {
         );
         assert_eq!(report["totals"]["cost_turns"], 1);
         assert_eq!(buckets.last().expect("last")["turns"], 2);
+        assert_eq!(buckets.last().expect("last")["cache_write"], 25);
+        assert_eq!(buckets.last().expect("last")["reasoning"], 10);
         // Prompt plus completion: counting the cache read again would bill the
         // same 40 tokens twice and inflate every cached hour.
         assert_eq!(report["totals"]["tokens"], 165);
@@ -6742,7 +6761,7 @@ mod usage_hourly_tests {
             .record(
                 "s",
                 "usage",
-                json!({"usage":{"inputTokens":10,"outputTokens":5},
+                json!({"usage":{"inputTokens":10,"outputTokens":5,"cacheWriteInputTokens":7,"reasoningTokens":3},
                        "route":"zhipuai-coding-plan/glm-5",
                        "model":"glm-5","cost":{"amount":0.01,"currency":"USD"}}),
             )
@@ -6763,6 +6782,8 @@ mod usage_hourly_tests {
         );
         assert_eq!(models[0]["input"], 1_210);
         assert_eq!(models[0]["output"], 305);
+        assert_eq!(models[0]["cache_write"], 7);
+        assert_eq!(models[0]["reasoning"], 3);
         assert_eq!(models[0]["tokens"], 1_515);
         assert_eq!(models[0]["cost_micros"], 10_000);
         assert_eq!(models[1]["model"], "claude-opus");

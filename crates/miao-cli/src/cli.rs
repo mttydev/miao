@@ -3885,8 +3885,15 @@ fn stats(rest: &[String]) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         store.sessions().await.map_err(|error| error.to_string())
     })?;
-    let (mut input, mut output, mut cache_read, mut non_cached, mut turns) =
-        (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (
+        mut input,
+        mut output,
+        mut cache_read,
+        mut cache_write,
+        mut reasoning,
+        mut non_cached,
+        mut turns,
+    ) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut json = false;
     let mut only: Option<String> = None;
     let mut via_engine = false;
@@ -3936,6 +3943,8 @@ fn stats(rest: &[String]) -> Result<(), String> {
             input += usage["inputTokens"].as_u64().unwrap_or(0);
             output += usage["outputTokens"].as_u64().unwrap_or(0);
             cache_read += data["cache"]["read"].as_u64().unwrap_or(0);
+            cache_write += data["cache"]["write"].as_u64().unwrap_or(0);
+            reasoning += usage["reasoningTokens"].as_u64().unwrap_or(0);
             non_cached += data["cache"]["nonCached"].as_u64().unwrap_or(0);
         }
     }
@@ -3986,6 +3995,8 @@ fn stats(rest: &[String]) -> Result<(), String> {
                 "input_tokens": input,
                 "output_tokens": output,
                 "cache_read": cache_read,
+                "cache_write": cache_write,
+                "reasoning": reasoning,
                 "cache_fresh": non_cached,
                 "cache_hit_ratio": hit,
                 "ttft_ms_p50": percentile(0.5),
@@ -4045,6 +4056,8 @@ fn stats(rest: &[String]) -> Result<(), String> {
                 "input_tokens": input,
                 "output_tokens": output,
                 "cache_read": cache_read,
+                "cache_write": cache_write,
+                "reasoning": reasoning,
                 "cache_fresh": non_cached,
                 "cache_hit_ratio": hit,
                 "ttft_ms_p50": percentile(0.5),
@@ -4055,9 +4068,10 @@ fn stats(rest: &[String]) -> Result<(), String> {
         return Ok(());
     }
     println!(
-        "cache     {cache_read} read / {non_cached} fresh ({:.1}% hit)",
+        "cache     {cache_read} read / {cache_write} written / {non_cached} fresh ({:.1}% hit)",
         hit * 100.0
     );
+    println!("reasoning {reasoning}");
     if !ttfts.is_empty() {
         println!(
             "ttft      p50 {} ms / p95 {} ms ({} samples)",
@@ -4947,6 +4961,7 @@ fn step_finish_part(data: &serde_json::Value) -> serde_json::Value {
             "reasoning": token("reasoningTokens"),
             "cache": {
                 "read": token("cacheReadInputTokens"),
+                "write": token("cacheWriteInputTokens"),
             },
         },
     })
@@ -6185,12 +6200,16 @@ mod tests {
                 "inputTokens": 12183,
                 "outputTokens": 154,
                 "cacheReadInputTokens": 12096,
+                "cacheWriteInputTokens": 320,
                 "reasoningTokens": 122,
             },
         }));
         assert_eq!(part["tokens"]["input"], 12183);
         assert_eq!(part["tokens"]["output"], 154);
         assert_eq!(part["tokens"]["cache"]["read"], 12096);
+        // Cache creation is its own bucket: billing it as a cache read (or
+        // dropping it) hides what the prefix write cost.
+        assert_eq!(part["tokens"]["cache"]["write"], 320);
         assert_eq!(part["tokens"]["reasoning"], 122);
         assert_eq!(part["cost"], 0.01);
         let unpriced = step_finish_part(&serde_json::json!({
