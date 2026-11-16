@@ -11,6 +11,28 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.80] - 2026-11-16
+
+### Added
+- **engine**: carry cache-write and reasoning buckets through usage telemetry (#3100) (`7b564f320b`)
+- **eval**: budgeted pass@k harness with regression records (#3103) (`64bf263829`)
+- **engine**: fan-in child reports, per-task child model, and durable joins (#3102) (`4fd210ca93`)
+- **engine**: warm provider connections and join independent startup work (#3101) (`e9acb8832d`)
+- **cli**: import Claude Code sessions and report its settings (#3094) (`af07c755e9`)
+- **engine**: guard a re-issued call whose attempt was interrupted (#3099) (`68d5825839`)
+
+### Fixed
+- **tui**: map mouse clicks through line numbers, not byte offsets (#3098) (`1e68d82a7e`)
+- **engine**: stop re-requesting a model that is only waiting (#3097) (`4505d8e14e`)
+- **tui**: paste the second screenshot after a host restart (#3096) (`70c6782265`)
+- **engine**: deduplicate replayed Responses stream events (#3095) (`472f673bc5`)
+- **engine**: resolve one reachable input ceiling for compaction (#3093) (`66065b3b60`)
+- **tui**: hold a prompt submitted while the clipboard is still reading (#3092) (`e0ef01c495`)
+- **engine**: harden git-backed file snapshots against path frames (#3091) (`21af46d9ba`)
+
+### Performance
+- **tui**: wrap transcript rows incrementally (#3104) (`19538dd25c`)
+
 ## [0.3.79] - 2026-11-16
 
 ### Added
