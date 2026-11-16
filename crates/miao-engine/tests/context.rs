@@ -663,6 +663,9 @@ async fn the_system_prompt_carries_the_operating_guidance_baseline() {
         .contains("rather than reading files one by one"));
     assert!(context
         .system
+        .contains("only a dedicated edit carries its diff"));
+    assert!(context
+        .system
         .contains("never read a file back just to verify it"));
     assert!(context.system.contains("no reader is present"));
     assert!(context
