@@ -1,4 +1,4 @@
-use crate::tools::ToolError;
+use crate::{session_model::Binding, tools::ToolError};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -34,6 +34,11 @@ pub const EXPLORE_TIME_LIMIT_SECS: u64 = 300;
 /// value is refused rather than silently clamped.
 pub const TURN_CEILING: u32 = 10_000;
 pub const WALLCLOCK_CEILING_MS: u64 = 86_400_000;
+/// How long one `task_result` join waits when the caller states no timeout,
+/// and the most it may ask for. The ceiling matches a child's own wall-clock
+/// ceiling, so a join can never outlive the work it is waiting on.
+pub const WAIT_TIMEOUT_MS: u64 = 120_000;
+pub const WAIT_CEILING_MS: u64 = WALLCLOCK_CEILING_MS;
 /// How many tool names one delegation may deny, and how long one name may be.
 pub const DENY_TOOL_LIMIT: usize = 32;
 const MAX_TOOL_NAME: usize = 128;
@@ -179,6 +184,11 @@ impl Boundary {
 pub struct Input {
     #[serde(default)]
     pub agent: Option<String>,
+    /// The model this child runs on, when it must differ from the parent's.
+    /// A named agent's own pinned model still wins; otherwise this binding is
+    /// recorded as the child's durable selection before its first wake.
+    #[serde(default)]
+    pub model: Option<Binding>,
     pub prompt: String,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -300,6 +310,9 @@ impl Input {
         if let Some(budget) = &parsed.budget {
             budget.validate()?;
         }
+        if let Some(model) = &parsed.model {
+            model.validate().map_err(|_| ToolError::InvalidInput)?;
+        }
         Ok(parsed)
     }
 }
@@ -317,6 +330,37 @@ impl Selector {
         if selector.id.is_empty()
             || selector.id.len() > 256
             || selector.id.chars().any(char::is_control)
+        {
+            return Err(ToolError::InvalidInput);
+        }
+        Ok(selector)
+    }
+}
+
+/// Identifies one background child and asks to join it. A `task_result` that
+/// only reads stays a snapshot; `wait` turns the same call into a bounded wait
+/// for the child to settle, so a parent that fanned out several background
+/// tasks can collect each report as it arrives instead of polling.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultSelector {
+    pub id: String,
+    #[serde(default)]
+    pub wait: bool,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+impl ResultSelector {
+    pub fn parse(input: Value) -> Result<Self, ToolError> {
+        let selector: Self = serde_json::from_value(input).map_err(|_| ToolError::InvalidInput)?;
+        if selector.id.is_empty()
+            || selector.id.len() > 256
+            || selector.id.chars().any(char::is_control)
+            || selector
+                .timeout_ms
+                .is_some_and(|ms| ms == 0 || ms > WAIT_CEILING_MS)
+            || (selector.timeout_ms.is_some() && !selector.wait)
         {
             return Err(ToolError::InvalidInput);
         }
@@ -527,5 +571,65 @@ mod tests {
         assert_eq!(benefit.verdict, VERDICT_INSUFFICIENT);
         assert_eq!(benefit.reason, BENEFIT_REWORK);
         assert_eq!(benefit.recommendation, RECOMMEND_SINGLE_AGENT);
+    }
+
+    /// A child may run on its own model. The binding is validated before any
+    /// child Session exists, so an empty model name is a wire mistake rather
+    /// than a selection the engine would record.
+    #[test]
+    fn a_child_model_is_validated_with_the_input() {
+        let input = Input::parse(json!({
+            "prompt": "p",
+            "model": {"protocol": "openai-chat", "model": "fixture-alt"}
+        }))
+        .unwrap();
+        assert_eq!(
+            input.model.as_ref().map(|model| model.model.as_str()),
+            Some("fixture-alt")
+        );
+        assert!(Input::parse(json!({
+            "prompt": "p",
+            "model": {"protocol": "openai-chat", "model": ""}
+        }))
+        .is_err());
+        assert!(Input::parse(json!({
+            "prompt": "p",
+            "model": {"model": "fixture"}
+        }))
+        .is_err());
+        // A plain delegation still names no model and inherits as before.
+        assert!(Input::parse(json!({"prompt": "p"}))
+            .unwrap()
+            .model
+            .is_none());
+    }
+
+    /// A join is the same selector plus a bounded wait: a timeout without the
+    /// flag is ambiguous, and the ceiling matches the child's wall clock.
+    #[test]
+    fn a_join_selector_waits_only_when_asked() {
+        let plain = ResultSelector::parse(json!({"id": "kid"})).unwrap();
+        assert!(!plain.wait);
+        assert_eq!(plain.timeout_ms, None);
+        let join =
+            ResultSelector::parse(json!({"id": "kid", "wait": true, "timeout_ms": 5_000})).unwrap();
+        assert!(join.wait);
+        assert_eq!(join.timeout_ms, Some(5_000));
+        assert!(ResultSelector::parse(json!({"id": "kid", "timeout_ms": 5_000})).is_err());
+        assert!(
+            ResultSelector::parse(json!({"id": "kid", "wait": true, "timeout_ms": 0})).is_err()
+        );
+        assert!(ResultSelector::parse(json!({
+            "id": "kid",
+            "wait": true,
+            "timeout_ms": WAIT_CEILING_MS + 1
+        }))
+        .is_err());
+        assert!(ResultSelector::parse(json!({
+            "id": "kid",
+            "wait": true,
+            "timeout_ms": WAIT_CEILING_MS
+        }))
+        .is_ok());
     }
 }

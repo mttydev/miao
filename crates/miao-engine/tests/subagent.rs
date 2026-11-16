@@ -2,15 +2,16 @@ use async_trait::async_trait;
 use miao_engine::{
     permission::{Config, Decision, Mode, Policy, Rule},
     protocol::{Delivery, Input, ModelRequest},
-    provider::{Provider, ProviderError, Reply},
+    provider::{Identity, Provider, ProviderError, Reply},
     recall::Query,
     runtime::Runtime,
+    session_model::Binding,
     store::Store,
     tools::Tools,
 };
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -2245,4 +2246,650 @@ async fn an_exploration_branch_leaves_the_mainline_to_finish_its_own_work() {
         Some("parent"),
         "the branch belongs to the mainline it copied"
     );
+}
+
+/// A parent that fans out one background child and then joins it before its
+/// turn ends. The child answers only after a pause, so a `task_result` that did
+/// not actually wait would return the "still running" placeholder instead.
+struct Joining {
+    step: AtomicUsize,
+    joined: Mutex<Option<Value>>,
+}
+
+impl Joining {
+    fn new() -> Self {
+        Self {
+            step: AtomicUsize::new(0),
+            joined: Mutex::new(None),
+        }
+    }
+}
+
+fn last_user_text(request: &ModelRequest) -> String {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .and_then(|message| {
+            message
+                .content
+                .as_array()
+                .and_then(|parts| parts.iter().find_map(|part| part["text"].as_str()))
+        })
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn tool_results(request: &ModelRequest) -> Vec<Value> {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.as_array().into_iter().flatten())
+        .filter(|part| part["type"] == "tool_result")
+        .cloned()
+        .collect()
+}
+
+/// Whether any text part of the request names the marker. A tool-result turn
+/// has no text of its own, so a phase must be recognised from the whole
+/// request rather than the newest user message alone.
+fn any_text(request: &ModelRequest, needle: &str) -> bool {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .any(|text| text.contains(needle))
+}
+
+#[async_trait]
+impl Provider for Joining {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        let text = last_user_text(&request);
+        if text.contains("slow hello") {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            return Ok(Reply {
+                content: json!([{"type":"text","text":"slow child report"}]),
+                usage: json!({}),
+                needs_tools: false,
+            });
+        }
+        let results = tool_results(&request);
+        let step = self.step.fetch_add(1, Ordering::SeqCst);
+        let content = match step {
+            0 => {
+                json!([{"type":"tool_use","id":"start","name":"task","input":{"prompt":"slow hello","background":true}}])
+            }
+            1 => {
+                let started: Value =
+                    serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
+                let id = started["session_id"].as_str().unwrap();
+                json!([{"type":"tool_use","id":"join","name":"task_result","input":{"id":id,"wait":true}}])
+            }
+            _ => {
+                let joined: Value =
+                    serde_json::from_str(results[1]["content"].as_str().unwrap()).unwrap();
+                *self.joined.lock().unwrap() = Some(joined);
+                json!([{"type":"text","text":"parent joined"}])
+            }
+        };
+        Ok(Reply {
+            content,
+            usage: json!({}),
+            needs_tools: step < 2,
+        })
+    }
+}
+
+/// A parent that asks for one child on an explicitly different model. The base
+/// provider answers the parent and the routed provider answers the child, so
+/// the started-turn identity proves which binding the child actually ran under.
+struct ModelPicking {
+    step: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for ModelPicking {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        if last_user_text(&request).contains("child model probe") {
+            return Ok(Reply {
+                content: json!([{"type":"text","text":"base answered the child"}]),
+                usage: json!({}),
+                needs_tools: false,
+            });
+        }
+        let step = self.step.fetch_add(1, Ordering::SeqCst);
+        let content = match step {
+            0 => json!([{"type":"tool_use","id":"pick","name":"task","input":{
+                "prompt":"child model probe",
+                "model":{"protocol":"openai-chat","model":"fixture-alt","route_id":"alt/shared"}
+            }}]),
+            _ => json!([{"type":"text","text":"parent done"}]),
+        };
+        Ok(Reply {
+            content,
+            usage: json!({}),
+            needs_tools: step == 0,
+        })
+    }
+
+    fn identity(&self) -> Option<Identity> {
+        Some(Identity {
+            protocol: "openai-chat".into(),
+            model: "fixture".into(),
+        })
+    }
+
+    fn for_route(&self, route_id: &str) -> Option<Arc<dyn Provider>> {
+        (route_id == "alt/shared").then(|| Arc::new(RoutedChild) as Arc<dyn Provider>)
+    }
+}
+
+struct RoutedChild;
+
+#[async_trait]
+impl Provider for RoutedChild {
+    async fn stream(
+        &self,
+        _: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        Ok(Reply {
+            content: json!([{"type":"text","text":"child on its own model"}]),
+            usage: json!({}),
+            needs_tools: false,
+        })
+    }
+
+    fn identity(&self) -> Option<Identity> {
+        Some(Identity {
+            protocol: "openai-chat".into(),
+            model: "fixture-alt".into(),
+        })
+    }
+}
+
+/// A parent that starts a background child in one turn, is compacted between
+/// turns, and only then reads the report. The report lives in the durable
+/// journal, not in the parent's context, so compaction cannot lose it.
+struct ReportAfterCompaction {
+    start: AtomicUsize,
+    read: AtomicUsize,
+    observed: Mutex<Option<Value>>,
+}
+
+#[async_trait]
+impl Provider for ReportAfterCompaction {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        if any_text(&request, "say hello") {
+            return Ok(Reply {
+                content: json!([{"type":"text","text":"hello from child"}]),
+                usage: json!({}),
+                needs_tools: false,
+            });
+        }
+        if !any_text(&request, "read report") {
+            let step = self.start.fetch_add(1, Ordering::SeqCst);
+            return Ok(Reply {
+                content: match step {
+                    0 => {
+                        json!([{"type":"tool_use","id":"start","name":"task","input":{"prompt":"say hello","background":true}}])
+                    }
+                    _ => json!([{"type":"text","text":"watch started"}]),
+                },
+                usage: json!({}),
+                needs_tools: step == 0,
+            });
+        }
+        let results = tool_results(&request);
+        let step = self.read.fetch_add(1, Ordering::SeqCst);
+        let content = match step {
+            0 => json!([{"type":"tool_use","id":"list","name":"task_list","input":{}}]),
+            1 => {
+                let listed: Value =
+                    serde_json::from_str(results.last().unwrap()["content"].as_str().unwrap())
+                        .unwrap();
+                let id = listed["tasks"][0]["id"].as_str().unwrap();
+                json!([{"type":"tool_use","id":"result","name":"task_result","input":{"id":id}}])
+            }
+            _ => {
+                let joined: Value =
+                    serde_json::from_str(results.last().unwrap()["content"].as_str().unwrap())
+                        .unwrap();
+                *self.observed.lock().unwrap() = Some(joined);
+                json!([{"type":"text","text":"report read"}])
+            }
+        };
+        Ok(Reply {
+            content,
+            usage: json!({}),
+            needs_tools: step < 2,
+        })
+    }
+}
+
+#[tokio::test]
+async fn task_result_can_join_a_background_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(Joining::new());
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        policy(true),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "parent".into(),
+                input_id: "one".into(),
+                prompt: "delegate and join".into(),
+                delivery: Delivery::Steer,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if store
+                .events("parent", 0, 500)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "run.finished")
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the parent turn finished");
+    runtime.shutdown().await;
+    let joined = provider.joined.lock().unwrap().clone().unwrap();
+    assert_eq!(joined["waited"], true, "{joined}");
+    assert_eq!(joined["timed_out"], false, "{joined}");
+    assert_eq!(joined["task"]["status"], "completed", "{joined}");
+    assert_eq!(joined["text"], "slow child report", "{joined}");
+}
+
+#[tokio::test]
+async fn a_task_can_pick_a_child_model_without_an_agent_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        Arc::new(ModelPicking {
+            step: AtomicUsize::new(0),
+        }),
+        Tools::new(dir.path()).await.unwrap(),
+        policy(true),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "parent".into(),
+                input_id: "one".into(),
+                prompt: "delegate on a different model".into(),
+                delivery: Delivery::Steer,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if store
+                .events("parent", 0, 500)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "run.finished")
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the parent turn finished");
+    runtime.shutdown().await;
+    let child = store
+        .events("parent", 0, 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "subagent_start")
+        .unwrap()
+        .data["subagent_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        store.model_selection(&child).await.unwrap(),
+        Some(Binding {
+            protocol: "openai-chat".into(),
+            model: "fixture-alt".into(),
+            route_id: Some("alt/shared".into()),
+            variant: None,
+        })
+    );
+    let started_model = |events: Vec<miao_engine::protocol::Event>| {
+        events
+            .into_iter()
+            .rfind(|event| event.kind == "provider.started")
+            .and_then(|event| event.data["identity"]["model"].as_str().map(str::to_owned))
+    };
+    assert_eq!(
+        started_model(store.events(&child, 0, 500).await.unwrap()).as_deref(),
+        Some("fixture-alt"),
+        "the child actually ran on the picked route"
+    );
+    assert_eq!(
+        started_model(store.events("parent", 0, 500).await.unwrap()).as_deref(),
+        Some("fixture"),
+        "the parent kept its own model"
+    );
+    assert_eq!(
+        store.history(&child).await.unwrap().last().unwrap().content[0]["text"],
+        "child on its own model"
+    );
+}
+
+#[tokio::test]
+async fn a_compacted_parent_can_still_read_a_child_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(ReportAfterCompaction {
+        start: AtomicUsize::new(0),
+        read: AtomicUsize::new(0),
+        observed: Mutex::new(None),
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        policy(true),
+    )
+    .await
+    .unwrap();
+    for (input_id, prompt) in [("one", "start watch"), ("two", "read report")] {
+        runtime
+            .admit(
+                Input {
+                    agent_references: Default::default(),
+                    command: None,
+                    session_id: "parent".into(),
+                    input_id: input_id.into(),
+                    prompt: prompt.into(),
+                    delivery: Delivery::Steer,
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        if input_id == "one" {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if store
+                        .events("parent", 0, 500)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.kind == "subagent_stop")
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the background child settled");
+            // Compaction is idle-only: the turn that started the child must
+            // have finished before its transcript can be cut.
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if store
+                        .events("parent", 0, 500)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.kind == "run.finished")
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the parent turn finished");
+            // Compact through the newest assistant boundary, which removes the
+            // delegation exchange from the provider's context.
+            let page = store.history_page("parent", None, 500).await.unwrap();
+            let boundary = page["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rfind(|message| {
+                    message["role"] == "assistant"
+                        && message["content"].to_string().contains("watch started")
+                })
+                .and_then(|message| message["seq"].as_u64())
+                .unwrap();
+            store
+                .compact("parent", "cut", boundary, "watch context compacted".into())
+                .await
+                .unwrap();
+            let selected = store.selected_history("parent").await.unwrap();
+            assert_eq!(selected.len(), 1, "the compaction dropped the exchange");
+            assert!(
+                selected[0]
+                    .content
+                    .to_string()
+                    .contains("<history-summary>"),
+                "{selected:?}"
+            );
+            assert!(
+                !selected[0].content.to_string().contains("start watch"),
+                "the original prompt is gone from the compacted context"
+            );
+        }
+        let expected_runs = if input_id == "one" { 1 } else { 2 };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let finished = store
+                    .events("parent", 0, 500)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.kind == "run.finished")
+                    .count();
+                if finished >= expected_runs {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the parent turn finished");
+    }
+    runtime.shutdown().await;
+    let reported = provider.observed.lock().unwrap().clone().unwrap();
+    assert_eq!(reported["waited"], false, "{reported}");
+    assert_eq!(reported["timed_out"], false, "{reported}");
+    assert_eq!(reported["task"]["status"], "completed", "{reported}");
+    assert_eq!(reported["text"], "hello from child", "{reported}");
+    let tasks = store.subagents("parent").await.unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["text"], "hello from child");
+}
+
+/// Two background children that only answer once both have started. A barrier
+/// that the engine cannot satisfy would time the test out, so a pass means the
+/// two delegations really were in flight together; the parent then joins both.
+struct FanOut {
+    step: AtomicUsize,
+    started: AtomicUsize,
+    joined: Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl Provider for FanOut {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        let text = last_user_text(&request);
+        let report = if text.contains("child alpha") {
+            "alpha report"
+        } else if text.contains("child beta") {
+            "beta report"
+        } else {
+            ""
+        };
+        if !report.is_empty() {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            while self.started.load(Ordering::SeqCst) < 2 {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(ProviderError::Stream(
+                        "the two background children did not run together".into(),
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            return Ok(Reply {
+                content: json!([{"type":"text","text":report}]),
+                usage: json!({}),
+                needs_tools: false,
+            });
+        }
+        let results = tool_results(&request);
+        let step = self.step.fetch_add(1, Ordering::SeqCst);
+        let content = match step {
+            0 => json!([
+                {"type":"tool_use","id":"alpha","name":"task","input":{"prompt":"child alpha","background":true}},
+                {"type":"tool_use","id":"beta","name":"task","input":{"prompt":"child beta","background":true}}
+            ]),
+            1 => {
+                let started: Value =
+                    serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
+                let id = started["session_id"].as_str().unwrap();
+                json!([{"type":"tool_use","id":"join-a","name":"task_result","input":{"id":id,"wait":true}}])
+            }
+            2 => {
+                let started: Value =
+                    serde_json::from_str(results[1]["content"].as_str().unwrap()).unwrap();
+                let id = started["session_id"].as_str().unwrap();
+                json!([{"type":"tool_use","id":"join-b","name":"task_result","input":{"id":id,"wait":true}}])
+            }
+            _ => {
+                for result in &results[2..] {
+                    let joined: Value =
+                        serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+                    self.joined.lock().unwrap().push(joined);
+                }
+                json!([{"type":"text","text":"both joined"}])
+            }
+        };
+        Ok(Reply {
+            content,
+            usage: json!({}),
+            needs_tools: step < 3,
+        })
+    }
+}
+
+#[tokio::test]
+async fn two_background_children_run_together_and_are_joined() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(FanOut {
+        step: AtomicUsize::new(0),
+        started: AtomicUsize::new(0),
+        joined: Mutex::new(Vec::new()),
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        policy(true),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "parent".into(),
+                input_id: "one".into(),
+                prompt: "fan out and join".into(),
+                delivery: Delivery::Steer,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if store
+                .events("parent", 0, 500)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "run.finished")
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the parent turn finished");
+    runtime.shutdown().await;
+    let joined = provider.joined.lock().unwrap().clone();
+    assert_eq!(joined.len(), 2, "{joined:?}");
+    let texts = joined
+        .iter()
+        .map(|result| result["text"].as_str().unwrap_or(""))
+        .collect::<Vec<_>>();
+    assert!(texts.contains(&"alpha report"), "{joined:?}");
+    assert!(texts.contains(&"beta report"), "{joined:?}");
+    for result in &joined {
+        assert_eq!(result["waited"], true, "{result}");
+        assert_eq!(result["timed_out"], false, "{result}");
+        assert_eq!(result["task"]["status"], "completed", "{result}");
+    }
+    assert_eq!(store.subagents("parent").await.unwrap().len(), 2);
 }

@@ -5235,23 +5235,33 @@ command: None,
                                     Err(error) => Err(ToolError::External(error.to_string())),
                                 },
                                 "task_result" => {
-                                    match crate::subagent::Selector::parse(prepared.input().clone()) {
-                                        Ok(selector) => match inner.store.subagents(session).await {
-                                            Ok(tasks) => match tasks.into_iter().find(|task| task["id"].as_str() == Some(&selector.id)) {
-                                                Some(task) => {
-                                                    let text = task["text"].as_str().filter(|text| !text.is_empty()).unwrap_or(
-                                                        // A failed task's answer is its cause: an empty report
-                                                        // would read as one that finished saying nothing.
-                                                        task["message"]
-                                                            .as_str()
-                                                            .unwrap_or(if task["status"] == "running" { "Background task is still running." } else { "(no output)" }),
-                                                    );
-                                                    Ok(json!({"task":task,"text":text}))
-                                                }
-                                                None => Err(ToolError::External("Unknown background task for this Session.".into())),
-                                            },
-                                            Err(error) => Err(ToolError::External(error.to_string())),
-                                        },
+                                    match crate::subagent::ResultSelector::parse(prepared.input().clone()) {
+                                        Ok(selector) => {
+                                            let timed_out = if selector.wait {
+                                                wait_for_subagent(inner, session, &selector, cancel.child_token()).await?
+                                            } else {
+                                                false
+                                            };
+                                            match inner.store.subagents(session).await {
+                                                Ok(tasks) => match tasks.into_iter().find(|task| task["id"].as_str() == Some(&selector.id)) {
+                                                    Some(task) => {
+                                                        // The child may have settled between the last poll and
+                                                        // the deadline; a completed row is not a timeout.
+                                                        let timed_out = timed_out && task["status"] == "running";
+                                                        let text = task["text"].as_str().filter(|text| !text.is_empty()).unwrap_or(
+                                                            // A failed task's answer is its cause: an empty report
+                                                            // would read as one that finished saying nothing.
+                                                            task["message"]
+                                                                .as_str()
+                                                                .unwrap_or(if task["status"] == "running" { "Background task is still running." } else { "(no output)" }),
+                                                        );
+                                                        Ok(json!({"task":task,"text":text,"waited":selector.wait,"timed_out":timed_out}))
+                                                    }
+                                                    None => Err(ToolError::External("Unknown background task for this Session.".into())),
+                                                },
+                                                Err(error) => Err(ToolError::External(error.to_string())),
+                                            }
+                                        }
                                         Err(error) => Err(error),
                                     }
                                 }
@@ -7746,13 +7756,18 @@ async fn delegate(
             None => context.agent.cloned(),
         }
     };
-    let model = context.model_override.cloned().or_else(|| {
-        if task.agent.is_some() && selected.as_ref().is_some_and(|agent| agent.model.is_some()) {
-            None
-        } else {
-            context.binding.cloned()
-        }
-    });
+    let model = context
+        .model_override
+        .or(task.model.as_ref())
+        .cloned()
+        .or_else(|| {
+            if task.agent.is_some() && selected.as_ref().is_some_and(|agent| agent.model.is_some())
+            {
+                None
+            } else {
+                context.binding.cloned()
+            }
+        });
     let effective = model
         .as_ref()
         .or_else(|| selected.as_ref().and_then(|agent| agent.model.as_ref()));
@@ -7852,6 +7867,19 @@ async fn delegate(
                 "existing child Session has a different captured agent; adopt its authority explicitly"
                     .into(),
             ));
+        }
+        if let Some(requested) = &task.model {
+            let existing = inner
+                .store
+                .model_selection(&child)
+                .await
+                .map_err(|error| ToolError::External(error.to_string()))?;
+            if existing.as_ref() != Some(requested) {
+                return Err(ToolError::External(
+                    "existing child Session runs on a different model; adopt its selection explicitly"
+                        .into(),
+                ));
+            }
         }
         // A subtask whose outcome is unknown has no finished run to settle:
         // delegating into it again would queue a second prompt behind a run
@@ -8073,6 +8101,48 @@ async fn goal_budget_turns(inner: &Arc<Inner>, parent: &str) -> Result<Option<u3
     Ok(state["goal"]["value"]["budget"]["iterations"]
         .as_u64()
         .map(|turns| turns.min(u32::MAX as u64) as u32))
+}
+
+/// Join one background child: poll its durable row until it settles or the
+/// wait's own bound expires. Parent cancellation ends the join as interrupted.
+/// An id this Session never delegated stays the same unknown-task error a
+/// plain read answers, so a join never starts or adopts a child.
+async fn wait_for_subagent(
+    inner: &Arc<Inner>,
+    session: &str,
+    selector: &crate::subagent::ResultSelector,
+    cancel: CancellationToken,
+) -> Result<bool, Error> {
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(
+            selector
+                .timeout_ms
+                .unwrap_or(crate::subagent::WAIT_TIMEOUT_MS),
+        );
+    loop {
+        let tasks = inner.store.subagents(session).await?;
+        let Some(task) = tasks
+            .iter()
+            .find(|task| task["id"].as_str() == Some(&selector.id))
+        else {
+            return Err(Error::Invalid(
+                "Unknown background task for this Session.".into(),
+            ));
+        };
+        if task["status"] != "running" {
+            return Ok(false);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(true);
+        }
+        tokio::select! {
+            // A cancelled wait reports the child as still running; the drain
+            // is ending, and failing here would turn a clean stop into a run
+            // failure the operator never asked for.
+            _ = cancel.cancelled() => return Ok(true),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+    }
 }
 
 /// A denied name that registers nothing narrows nothing, so a typo would
