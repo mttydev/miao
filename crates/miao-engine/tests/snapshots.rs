@@ -308,3 +308,99 @@ async fn commit_reports_the_reverted_count_a_redo_can_rely_on() {
     store.unrevert("s").await.unwrap();
     assert_eq!(store.snapshot("s").await.unwrap()["reverted_count"], 0);
 }
+
+fn git(workspace: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["-c", "user.email=test@test", "-c", "user.name=test"])
+        .args(args)
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+#[tokio::test]
+async fn tracked_and_clean_file_restores_from_git() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("a.txt"), "committed").unwrap();
+    git(&workspace, &["add", "a.txt"]);
+    git(&workspace, &["commit", "-q", "-m", "one"]);
+    store.record_file_touch("s", "a.txt").await.unwrap();
+    let captured = store.capture_file_snapshot("s", 1).await.unwrap();
+    assert_eq!(captured["available"], true);
+    assert!(captured["head"].is_string(), "{captured}");
+    // A clean tracked file records no blob: the git reference is the data.
+    assert!(!_dir.path().join("engine.snapshots").join("s").exists());
+    fs::write(workspace.join("a.txt"), "dirty").unwrap();
+    let staged = store.revert_stage("s", 1, true, true, true).await.unwrap();
+    assert_eq!(staged["restored"], serde_json::json!(["a.txt"]));
+    assert_eq!(
+        fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "committed"
+    );
+    store.revert_clear("s").await.unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "dirty"
+    );
+}
+
+#[tokio::test]
+async fn oversized_tracked_file_restores_from_git() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    let big = "x".repeat(9 * 1024 * 1024);
+    fs::write(workspace.join("big.bin"), &big).unwrap();
+    git(&workspace, &["add", "big.bin"]);
+    git(&workspace, &["commit", "-q", "-m", "big"]);
+    store.record_file_touch("s", "big.bin").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    fs::write(workspace.join("big.bin"), "truncated").unwrap();
+    store.revert_stage("s", 1, true, true, true).await.unwrap();
+    assert_eq!(fs::read_to_string(workspace.join("big.bin")).unwrap(), big);
+    store.revert_clear("s").await.unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.join("big.bin")).unwrap(),
+        "truncated"
+    );
+}
+
+#[tokio::test]
+async fn dirty_tracked_file_captures_content_not_git() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join("a.txt"), "committed").unwrap();
+    git(&workspace, &["add", "a.txt"]);
+    git(&workspace, &["commit", "-q", "-m", "one"]);
+    fs::write(workspace.join("a.txt"), "edited").unwrap();
+    store.record_file_touch("s", "a.txt").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    fs::write(workspace.join("a.txt"), "wiped").unwrap();
+    store.revert_stage("s", 1, true, true, true).await.unwrap();
+    // Restoring the pre-edit state proves the content was recorded, where a
+    // git reference would have brought back the committed text.
+    assert_eq!(
+        fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "edited"
+    );
+}
+
+#[tokio::test]
+async fn ignored_file_captures_content_not_git() {
+    let (_dir, store, workspace) = fixture().await;
+    git(&workspace, &["init", "-q"]);
+    fs::write(workspace.join(".gitignore"), "ignored.txt\n").unwrap();
+    git(&workspace, &["add", ".gitignore"]);
+    git(&workspace, &["commit", "-q", "-m", "ignore"]);
+    fs::write(workspace.join("ignored.txt"), "secret").unwrap();
+    store.record_file_touch("s", "ignored.txt").await.unwrap();
+    store.capture_file_snapshot("s", 1).await.unwrap();
+    fs::remove_file(workspace.join("ignored.txt")).unwrap();
+    store.revert_stage("s", 1, true, true, true).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.join("ignored.txt")).unwrap(),
+        "secret"
+    );
+}

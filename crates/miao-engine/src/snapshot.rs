@@ -14,10 +14,16 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 const RETAINED_SNAPSHOTS: i64 = 20;
 const MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
+/// Manifest values naming git state instead of a blob: `git:<sha>` says the
+/// file's content equals the repo's committed content at that commit, which
+/// restores through git at any size.
+const GIT_PREFIX: &str = "git:";
+const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn blob_dir(database: &Path, session: &str) -> PathBuf {
     database.with_extension("snapshots").join(session)
@@ -104,6 +110,84 @@ pub(crate) fn write_blob(database: &Path, session: &str, bytes: &[u8]) -> Result
 fn read_blob(database: &Path, session: &str, hash: &str) -> Result<Vec<u8>, Error> {
     fs::read(blob_dir(database, session).join(hash))
         .map_err(|_| Error::Invalid("file snapshot data is no longer available".into()))
+}
+
+fn is_git_target(value: &str) -> bool {
+    value.starts_with(GIT_PREFIX)
+}
+
+/// Run one bounded git query. `None` means git failed or ran long, which
+/// callers treat as "no git answer" rather than an error: snapshots must keep
+/// working in non-git workspaces and under a wedged git.
+fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    use std::sync::mpsc;
+    let (sender, receiver) = mpsc::channel();
+    let root = root.to_owned();
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    std::thread::spawn(move || {
+        if let Ok(output) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            let _ = sender.send((output.status.success(), output.stdout));
+        }
+    });
+    let (success, stdout) = receiver.recv_timeout(GIT_TIMEOUT).ok()?;
+    success.then_some(stdout)
+}
+
+/// Paths `git status --porcelain -z` reports as changed. A rename entry
+/// carries the original path in a second field, which is not clean either.
+fn porcelain_paths(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            if entry.len() > 3 && entry.as_bytes()[2] == b' ' {
+                entry[3..].to_owned()
+            } else {
+                entry.to_owned()
+            }
+        })
+        .collect()
+}
+
+/// Tracked paths whose working-tree content still equals HEAD: absent from
+/// `status` and present in `ls-files`. Ignored files are absent from `status`
+/// too but not tracked, so the `ls-files` intersection is what makes the
+/// `git:` reference safe.
+fn clean_tracked(root: &Path, paths: &[String]) -> std::collections::HashSet<String> {
+    let path_args: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let mut ls = vec!["ls-files", "-z", "--"];
+    ls.extend(path_args.iter().copied());
+    let mut status = vec!["status", "--porcelain=v1", "-z", "--"];
+    status.extend(path_args.iter().copied());
+    let (Some(tracked), Some(changed)) = (git_bytes(root, &ls), git_bytes(root, &status)) else {
+        return std::collections::HashSet::new();
+    };
+    let changed: std::collections::HashSet<String> =
+        porcelain_paths(&changed).into_iter().collect();
+    String::from_utf8_lossy(&tracked)
+        .split('\0')
+        .filter(|path| !path.is_empty() && !changed.contains(*path))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The committed content one manifest entry names. A malformed or unavailable
+/// reference fails on the same level as a lost blob: the snapshot says restore
+/// and the data must exist.
+fn git_show(root: &Path, value: &str, path: &str) -> Result<Vec<u8>, Error> {
+    let sha = &value[GIT_PREFIX.len()..];
+    if !(7..=64).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::Invalid("snapshot git reference is malformed".into()));
+    }
+    let spec = format!("{sha}:{path}");
+    git_bytes(root, &["show", &spec])
+        .ok_or_else(|| Error::Invalid("file snapshot data is no longer available".into()))
 }
 
 /// Which halves of a Session a revert may move. The phases are independent:
@@ -254,6 +338,12 @@ impl Store {
             if touched.is_empty() {
                 return Ok(json!({"available":false,"reason":"no-touches"}));
             }
+            let head = git_bytes(Path::new(&root), &["rev-parse", "--verify", "HEAD"])
+                .map(|sha| String::from_utf8_lossy(sha.trim_ascii_end()).into_owned());
+            let clean = match &head {
+                Some(_) => clean_tracked(Path::new(&root), &touched),
+                None => std::collections::HashSet::new(),
+            };
             let previous: Option<String> = conn
                 .query_row(
                     "SELECT manifest FROM engine_file_snapshot WHERE session_id=?1 ORDER BY boundary_seq DESC, id DESC LIMIT 1",
@@ -270,6 +360,16 @@ impl Store {
                 let Some(relative) = valid_path(&path) else {
                     continue;
                 };
+                if clean.contains(&path) {
+                    manifest.insert(
+                        path,
+                        Some(format!(
+                            "{GIT_PREFIX}{}",
+                            head.as_deref().unwrap_or_default()
+                        )),
+                    );
+                    continue;
+                }
                 let absolute = Path::new(&root).join(&relative);
                 match fs::metadata(&absolute) {
                     Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_BLOB_BYTES => {
@@ -295,7 +395,7 @@ impl Store {
             let id = tx.last_insert_rowid();
             retain(&tx, &database, &session)?;
             tx.commit()?;
-            Ok(json!({"available":true,"id":id,"boundary_seq":boundary_seq,"paths":manifest.len()}))
+            Ok(json!({"available":true,"id":id,"boundary_seq":boundary_seq,"paths":manifest.len(),"head":head}))
         })
         .await
     }
@@ -365,12 +465,12 @@ impl Store {
             match found {
                 Some((id, boundary, manifest)) => {
                     let manifest: BTreeMap<String, Option<String>> = read_manifest(&manifest)?;
-                    let available = manifest.values().filter_map(|hash| hash.as_deref()).all(|hash| blob_dir(Path::new(conn.path().unwrap_or_default()), &session).join(hash).exists());
+                    let available = manifest.values().filter_map(|hash| hash.as_deref()).all(|hash| is_git_target(hash) || blob_dir(Path::new(conn.path().unwrap_or_default()), &session).join(hash).exists());
                     Ok(json!({"id":id,"boundary_seq":boundary,"available":available}))
                 }
                 None => match Self::imported_manifest(conn, &session, boundary_seq)? {
                     Some((id, manifest)) => {
-                        let available = manifest.values().filter_map(|hash| hash.as_deref()).all(|hash| blob_dir(Path::new(conn.path().unwrap_or_default()), &session).join(hash).exists());
+                        let available = manifest.values().filter_map(|hash| hash.as_deref()).all(|hash| is_git_target(hash) || blob_dir(Path::new(conn.path().unwrap_or_default()), &session).join(hash).exists());
                         Ok(json!({"id":id,"boundary_seq":boundary_seq,"available":available,"assembled":true}))
                     }
                     None => Ok(Value::Null),
@@ -397,32 +497,32 @@ fn restore_manifest(
             continue;
         };
         let absolute = root.join(&relative);
-        match hash {
-            Some(hash) => {
-                let bytes = read_blob(database, session, hash)?;
-                if fs::read(&absolute).ok().as_deref() == Some(bytes.as_slice()) {
-                    continue;
-                }
-                let existed = absolute.exists();
-                let target = within(root, &absolute)?;
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let staging = target.with_extension(format!("snapshot-{}", std::process::id()));
-                fs::write(&staging, bytes)?;
-                fs::rename(&staging, &target)?;
-                restored.push(path.clone());
-                if !existed {
-                    created.push(path.clone());
-                }
-            }
+        let expected: Vec<u8> = match hash {
+            Some(value) if value.starts_with(GIT_PREFIX) => git_show(root, value, path)?,
+            Some(hash) => read_blob(database, session, hash)?,
             None => {
                 if absolute.exists() {
                     let target = within(root, &absolute)?;
                     fs::remove_file(target)?;
                     removed.push(path.clone());
                 }
+                continue;
             }
+        };
+        if fs::read(&absolute).ok().as_deref() == Some(expected.as_slice()) {
+            continue;
+        }
+        let existed = absolute.exists();
+        let target = within(root, &absolute)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let staging = target.with_extension(format!("snapshot-{}", std::process::id()));
+        fs::write(&staging, expected)?;
+        fs::rename(&staging, &target)?;
+        restored.push(path.clone());
+        if !existed {
+            created.push(path.clone());
         }
     }
     Ok((restored, created, removed))
@@ -435,19 +535,29 @@ fn preimage(
     manifest: &BTreeMap<String, Option<String>>,
 ) -> Result<BTreeMap<String, Option<String>>, Error> {
     let mut previous = BTreeMap::new();
-    for path in manifest.keys() {
+    for (path, target) in manifest {
         let Some(relative) = valid_path(path) else {
             continue;
         };
         let absolute = root.join(relative);
-        match fs::read(&absolute) {
-            Ok(bytes) if bytes.len() as u64 <= MAX_BLOB_BYTES => {
-                previous.insert(path.clone(), Some(write_blob(database, session, &bytes)?));
+        let current = fs::read(&absolute).ok();
+        let value = match target {
+            // A path whose working-tree content still equals the committed
+            // state keeps its git reference at any size.
+            Some(value)
+                if value.starts_with(GIT_PREFIX)
+                    && current.as_deref() == git_show(root, value, path).ok().as_deref() =>
+            {
+                Some(value.clone())
             }
-            _ => {
-                previous.insert(path.clone(), None);
-            }
-        }
+            _ => match current {
+                Some(bytes) if bytes.len() as u64 <= MAX_BLOB_BYTES => {
+                    Some(write_blob(database, session, &bytes)?)
+                }
+                _ => None,
+            },
+        };
+        previous.insert(path.clone(), value);
     }
     Ok(previous)
 }
@@ -717,7 +827,16 @@ fn workspace_plan(
             continue;
         };
         let disk = disk_hash(&root.join(relative));
-        if disk.as_deref() == target.as_deref() {
+        let expected = match &target {
+            // A git reference compares against the committed content, so a
+            // clean tracked file needs neither restore nor conflict. An
+            // unavailable git answer refuses instead of assuming.
+            Some(value) if value.starts_with(GIT_PREFIX) => git_show(root, value, path)
+                .ok()
+                .map(|bytes| crate::permission::digest(&bytes)),
+            _ => target.clone(),
+        };
+        if disk == expected {
             continue;
         }
         let action = match target.is_some() {
