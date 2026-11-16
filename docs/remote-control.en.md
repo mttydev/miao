@@ -122,12 +122,23 @@ identity to a sibling `miao-remote` through the environment, then stops it when 
 exits. `/remote-control` remains the TUI entry point; the two do not share a runtime
 identity.
 
-1. The release archive puts `miao-remote` beside the `miao` executable. A source checkout
+1. Register the host once:
+
+   ```sh
+   MIAO_REMOTE_CONTROL_CONFIG=~/.config/miao/remote-control/control.json \
+   MIAO_HUB_URL=https://hub.example MIAO_HUB_EMAIL=you@example.com \
+   MIAO_HUB_PASSWORD=… miao-remote register
+   ```
+
+   It registers the stable identity in `devices.json` with the Hub and writes
+   `hubURL`/`hostToken` (mode 0600) to the configuration; the password stays in memory. A
+   source checkout uses `bun run remote:register`.
+2. The release archive puts `miao-remote` beside the `miao` executable. A source checkout
    builds it with `bun run build:remote` and places `dist/miao-remote` there. You can also
    point `MIAO_REMOTE_HOST_BIN` at it, or set
    `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts` and let the
    host run under `bun run`.
-2. Write `control.json`:
+3. Write `control.json`:
 
    ```json
    {"hubURL":"https://hub.example","hostToken":"…","grantFile":"devices.json","sessionIDs":["ses_…"]}
@@ -136,7 +147,7 @@ identity.
    `grantFile` resolves beside the configuration. `sessionIDs` is the publication gate:
    only those Sessions appear in the device list, and every other Session method is
    refused. `accountID` and `allowLoopbackHTTP` are optional.
-3. Run `miao serve --remote-host ~/.config/miao/remote-control/control.json`.
+4. Run `miao serve --remote-host ~/.config/miao/remote-control/control.json`.
 
 ## Organising Sessions from the phone
 
