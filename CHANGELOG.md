@@ -11,6 +11,15 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.79] - 2026-11-16
+
+### Added
+- **engine**: wire the memory store into tools, context, and turn boundaries (#3089) (`a157212093`)
+- **engine**: prefer git for file snapshot capture and restore (#3088) (`e7c79066b1`)
+
+### Fixed
+- **engine**: stop a goal loop that only answers "waiting" (#3087) (`71028e1457`)
+
 ## [0.3.78] - 2026-11-16
 
 ### Added
