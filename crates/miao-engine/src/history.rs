@@ -121,7 +121,7 @@ impl Store {
             append(&tx,&session,crate::events::Lifecycle::PreCompact.name(),json!({"compaction_id":id,"through_message_seq":through}))?;
             let event=append(&tx,&session,"history.compacted",json!({"compaction_id":id,"through_message_seq":through,"summary":summary}))?;
             append(&tx,&session,crate::events::Lifecycle::PostCompact.name(),json!({"compaction_id":id,"through_message_seq":through}))?;
-            tx.execute("INSERT INTO engine_compaction VALUES(?1,?2,?3,?4,?5)",params![id,session,through,summary,event.seq])?;tx.commit()?;
+            tx.execute("INSERT INTO engine_compaction(id,session_id,through_seq,summary,created_seq) VALUES(?1,?2,?3,?4,?5)",params![id,session,through,summary,event.seq])?;tx.commit()?;
             Ok(json!({"compaction_id":id,"through_message_seq":through,"duplicate":false}))
         }).await
     }

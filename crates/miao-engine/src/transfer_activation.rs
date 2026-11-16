@@ -374,7 +374,7 @@ impl Store {
                 let through=*seq_by_source.get(through_id).ok_or(Error::Conflict)?;
                 let summary=compaction["summary"].as_str().ok_or_else(||invalid("compaction summary"))?;
                 let event=append(&tx,&session,"history.compacted",json!({"compaction_id":compaction_id,"through_message_seq":through,"summary":summary,"inherited":true}))?;
-                tx.execute("INSERT INTO engine_compaction VALUES(?1,?2,?3,?4,?5)",params![compaction_id,session,through,summary,event.seq])?;
+                tx.execute("INSERT INTO engine_compaction(id,session_id,through_seq,summary,created_seq) VALUES(?1,?2,?3,?4,?5)",params![compaction_id,session,through,summary,event.seq])?;
             }
             crate::session_model::select_model_tx(&tx,&session,Some(&prepared.binding))?;
             if let Some(account)=prepared.account {append(&tx,&session,"session.account.selected",json!({"account":account,"binding":prepared.binding}))?;}

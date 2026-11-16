@@ -83,18 +83,15 @@ fn acquire_migration_lock(lock: &std::fs::File, storage: &Path) -> Result<(), Er
     }
 }
 
-/// Schema versions at or above this floor share the modern run/lease format:
-/// the pre-epoch repair landed at 23, and every later delta is additive
-/// (new tables, no format rewrites). A live older engine keeps reading and
-/// writing the tables it knows, so it is not a reason to refuse an additive
-/// upgrade — only a format repair needs exclusive ownership.
-const ADDITIVE_UPGRADE_FLOOR: u32 = 23;
-
-/// Whether this upgrade rewrites the run/lease format (and therefore must not
-/// run while a live old owner could create rows in the old shape).
-fn needs_exclusive_ownership(version: u32, has_run_epoch: bool) -> bool {
-    version < ADDITIVE_UPGRADE_FLOOR || !has_run_epoch
-}
+// Every schema upgrade runs while no other process still serves the store.
+//
+// "Additive" was never safe on its own: an older binary that writes a row
+// positionally (`INSERT INTO engine_tool VALUES(?1,…,?5)`) breaks as soon as a
+// migration adds a column to that table, even though nothing it reads changed.
+// There is no way to know which older binaries are still running, so the only
+// safe rule is exclusive ownership for the whole upgrade. The cost is one
+// refusal naming the windows to close; the alternative is a live Session whose
+// every write fails with `N columns but M values were supplied`.
 
 type Work = Box<dyn FnOnce(&mut Connection) + Send>;
 
@@ -326,7 +323,10 @@ impl Store {
                     .read(true)
                     .write(true)
                     .open(canonical.with_extension("engine-migrate-lock"))?;
-                record_owner(&canonical);
+                // Read the previous owner before this open overwrites the
+                // record: an upgrade must not run while that process still
+                // holds the store, and a refusal has to keep naming it.
+                let previous_owner = owner_pid(&canonical);
                 acquire_migration_lock(&migration, &canonical)?;
                 let conn = Connection::open(&canonical)?;
                 // Concurrent writers wait for SQLite's write lock instead of
@@ -357,46 +357,50 @@ impl Store {
                 }
                 conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;")?;
                 // Keep old-format run creation outside this schema transaction.
-                // A live old owner keeps its unchanged database until it exits.
+                // A live old owner keeps its unchanged database until it exits;
+                // the guard above refuses to upgrade while it is still alive.
                 // A replayed development build published schema 22 without the
                 // run epoch column; repairing that shape is also a migration.
                 let has_run_epoch: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_run') WHERE name='lease_epoch')",
                     [], |row| row.get(0),
                 )?;
-                if engine
-                    && (version < SCHEMA_VERSION || !has_run_epoch)
-                    && needs_exclusive_ownership(version, has_run_epoch)
-                {
+                if engine && (version < SCHEMA_VERSION || !has_run_epoch) {
+                    // Name every live writer instead of one: a bare "stop the
+                    // older engine" left the operator guessing which of several
+                    // windows the refusal meant, and the previous owner is the
+                    // one a calm Session does not show in engine_run.
+                    let mut live: Vec<String> = Vec::new();
+                    if let Some(pid) =
+                        previous_owner.filter(|pid| *pid != std::process::id() && pid_alive(*pid))
+                    {
+                        live.push(format!("pid {pid} (still has this storage open)"));
+                    }
                     let has_owner_pid: bool = conn.query_row(
                         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_lease') WHERE name='owner_pid')", [], |row| row.get(0),
                     )?;
                     if has_owner_pid {
-                        let owners = {
-                            let mut statement = conn.prepare("SELECT DISTINCT l.owner_pid, r.session_id FROM engine_run r JOIN engine_lease l ON l.session_id=r.session_id WHERE r.state='running' AND l.owner_pid IS NOT NULL")?;
-                            let owners = statement
-                                .query_map([], |row| {
-                                    Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
-                                })?
-                                .collect::<Result<Vec<_>, _>>()?;
-                            owners
-                        };
-                        // Name the live owners: the operator has to close exactly
-                        // those windows, and a bare "stop the older engine" left
-                        // them guessing at which of several windows it meant.
-                        let live: Vec<String> = owners
-                            .into_iter()
-                            .filter(|(pid, _)| pid_alive(*pid))
-                            .map(|(pid, session)| format!("pid {pid} (session {session})"))
-                            .collect();
-                        if !live.is_empty() {
-                            return Err(Error::Invalid(format!(
-                                "cannot upgrade Session storage while an older engine run owner is alive; stop the older engine first: {}",
-                                live.join(", ")
-                            )));
+                        let mut statement = conn.prepare("SELECT DISTINCT l.owner_pid, r.session_id FROM engine_run r JOIN engine_lease l ON l.session_id=r.session_id WHERE r.state='running' AND l.owner_pid IS NOT NULL")?;
+                        let owners = statement.query_map([], |row| {
+                            Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+                        })?;
+                        for owner in owners {
+                            let (pid, session) = owner?;
+                            if pid_alive(pid) {
+                                live.push(format!("pid {pid} (session {session})"));
+                            }
                         }
                     }
+                    if !live.is_empty() {
+                        return Err(Error::Invalid(format!(
+                            "cannot upgrade Session storage while another miao process still has it open; close these windows first: {}",
+                            live.join(", ")
+                        )));
+                    }
                 }
+                // This process holds the migration lock from here; name it for
+                // a waiter that times out on the next open.
+                record_owner(&canonical);
                 conn.execute_batch(&format!("PRAGMA application_id={APPLICATION_ID};
                     CREATE TABLE IF NOT EXISTS engine_session(id TEXT PRIMARY KEY, next_seq INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'build');
                     CREATE TABLE IF NOT EXISTS engine_event(session_id TEXT NOT NULL REFERENCES engine_session(id), seq INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,seq));
@@ -1780,7 +1784,7 @@ impl Store {
             let original:Option<String>=tx.query_row("SELECT t.input FROM engine_tool t JOIN engine_run r ON r.id=t.run_id WHERE t.id=?1 AND t.name=?2 AND t.state='dispatched' AND r.session_id=?3 AND r.state='running'",params![request,tool_name,session],|r|r.get(0)).optional()?;
             let original=original.ok_or_else(||Error::Invalid("job admission requires its dispatched tool intent".into()))?;
             if serde_json::from_str::<Value>(&original)?["input"]!=input{return Err(Error::Conflict);}
-            let id=uuid::Uuid::new_v4().to_string();tx.execute("INSERT INTO engine_job VALUES(?1,?2,?3,'queued',?4,NULL)",params![id,session,request,serde_json::to_string(&input)?])?;
+            let id=uuid::Uuid::new_v4().to_string();tx.execute("INSERT INTO engine_job(id,session_id,request_key,state,input) VALUES(?1,?2,?3,'queued',?4)",params![id,session,request,serde_json::to_string(&input)?])?;
             append(&tx,&session,"job.admitted",json!({"job_id":id,"request_key":request}))?;tx.commit()?;Ok(json!({"job_id":id,"state":"queued","duplicate":false}))
         }).await
     }
@@ -2041,7 +2045,7 @@ impl Store {
             if let Some((epoch,fingerprint))=&previous {if fingerprint==&bundle.fingerprint{return Ok(*epoch);}}
             let epoch=previous.map(|(epoch,_)|epoch+1).unwrap_or(1);
             let event=append(&tx,&session,"context.changed",json!({"epoch":epoch,"fingerprint":bundle.fingerprint,"sources":bundle.sources}))?;
-            tx.execute("INSERT INTO engine_context VALUES(?1,?2,?3,?4,?5,?6)",params![session,epoch,bundle.fingerprint,bundle.system,serde_json::to_string(&bundle.sources)?,event.seq])?;
+            tx.execute("INSERT INTO engine_context(session_id,epoch,fingerprint,system,sources,selected_seq) VALUES(?1,?2,?3,?4,?5,?6)",params![session,epoch,bundle.fingerprint,bundle.system,serde_json::to_string(&bundle.sources)?,event.seq])?;
             tx.commit()?;Ok(epoch)
         }).await
     }
@@ -2305,7 +2309,7 @@ impl Store {
                 "INSERT INTO engine_session(id,created_at_ms,mode) VALUES(?1,?2,?3)",
                 params![target, crate::approval::now_ms() as i64, mode],
             )?;
-            tx.execute("INSERT INTO engine_lineage VALUES(?1,?2,?3)",params![target,parent,seq])?;
+            tx.execute("INSERT INTO engine_lineage(session_id,parent_session_id,message_seq) VALUES(?1,?2,?3)",params![target,parent,seq])?;
             tx.execute("INSERT INTO engine_location SELECT ?1,root FROM engine_location WHERE session_id=?2",params![target,parent])?;
             append(&tx,&target,"session.forked",json!({"parent_session_id":parent,"message_seq":seq}))?;
             let mut message_map=std::collections::HashMap::new();
@@ -2371,7 +2375,7 @@ impl Store {
             let context:Option<(u64,String,String,String)>=tx.query_row("SELECT epoch,fingerprint,system,sources FROM engine_context WHERE session_id=?1 AND selected_seq<=?2 ORDER BY epoch DESC LIMIT 1",params![parent,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
             if let Some((parent_epoch,fingerprint,system,sources))=context {
                 let event=append(&tx,&target,"context.inherited",json!({"epoch":1,"parent_session_id":parent,"parent_epoch":parent_epoch,"fingerprint":fingerprint}))?;
-                tx.execute("INSERT INTO engine_context VALUES(?1,1,?2,?3,?4,?5)",params![target,fingerprint,system,sources,event.seq])?;
+                tx.execute("INSERT INTO engine_context(session_id,epoch,fingerprint,system,sources,selected_seq) VALUES(?1,1,?2,?3,?4,?5)",params![target,fingerprint,system,sources,event.seq])?;
             }
 
             let named=crate::session_agent::references_at(&tx,&parent,source_watermark)?;
@@ -2393,7 +2397,7 @@ impl Store {
             if let Some((through,summary))=checkpoint {
                 let through=*message_map.get(&through).ok_or_else(||Error::Invalid("fork checkpoint missing".into()))?;
                 let id=uuid::Uuid::new_v4().to_string();let event=append(&tx,&target,"history.compacted",json!({"compaction_id":id,"through_message_seq":through,"summary":summary,"inherited":true}))?;
-                tx.execute("INSERT INTO engine_compaction VALUES(?1,?2,?3,?4,?5)",params![id,target,through,summary,event.seq])?;
+                tx.execute("INSERT INTO engine_compaction(id,session_id,through_seq,summary,created_seq) VALUES(?1,?2,?3,?4,?5)",params![id,target,through,summary,event.seq])?;
             }
             tx.commit()?;
             Ok(json!({"session_id":target,"parent_session_id":parent,"message_seq":seq,"duplicate":false}))
@@ -3446,7 +3450,7 @@ impl Store {
             } else { (name,original["input"].clone()) };
             if name!=approval.tool||root!=approval.location||input!=approval.input||input_digest(&root,&name,&approval.resource,&approval.input)?!=approval.input_hash {return Err(Error::ApprovalMismatch);}
             if approval.expires_at_ms<=now_ms(){return Err(Error::ApprovalExpired);}
-            tx.execute("INSERT INTO engine_approval VALUES(?1,?2,?3,?4,?5,?6,'pending')",params![approval.request_id,approval.session_id,approval.run_id,key,serde_json::to_string(&approval)?,approval.expires_at_ms])?;
+            tx.execute("INSERT INTO engine_approval(id,session_id,run_id,call_id,binding,expires_at,state) VALUES(?1,?2,?3,?4,?5,?6,'pending')",params![approval.request_id,approval.session_id,approval.run_id,key,serde_json::to_string(&approval)?,approval.expires_at_ms])?;
             if let Some(scope) = &scope { crate::permission_grant::bind_request(&tx,&approval,scope)?; }
             let event=append(&tx,&approval.session_id,"approval.requested",serde_json::to_value(&approval)?)?;
             tx.commit()?;Ok(event)
@@ -6905,23 +6909,57 @@ mod message_kind_materialisation_tests {
 
 #[cfg(test)]
 mod upgrade_ownership_tests {
-    use super::needs_exclusive_ownership;
+    use super::*;
 
-    #[test]
-    fn additive_upgrades_do_not_require_exclusive_ownership() {
-        // 23-24 → 25 only adds tables; a live older engine keeps working, so a
-        // second window must not be forced to close it first.
-        assert!(!needs_exclusive_ownership(23, true));
-        assert!(!needs_exclusive_ownership(24, true));
-    }
-
-    #[test]
-    fn format_repairs_still_require_exclusive_ownership() {
-        // The pre-epoch repair rewrites run rows; a live old owner could write
-        // rows in the old shape mid-upgrade, so it must exit first.
-        assert!(needs_exclusive_ownership(22, false));
-        assert!(needs_exclusive_ownership(22, true));
-        assert!(needs_exclusive_ownership(23, false));
+    /// An upgrade must not run while another live process has the store open:
+    /// a column added to a table an older binary writes positionally breaks
+    /// that binary, so the refusal has to name the window to close.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_upgrade_refuses_while_another_live_process_owns_the_store() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let storage = directory.path().join("engine.db");
+        Store::open(&storage).await.expect("store");
+        // Rewind to the version before `engine_tool.fingerprint` so this open
+        // has real migration work to refuse.
+        let connection = rusqlite::Connection::open(&storage).expect("open");
+        connection
+            .execute("ALTER TABLE engine_tool DROP COLUMN fingerprint", [])
+            .expect("drop column");
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .expect("rewind");
+        drop(connection);
+        let mut owner = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("owner process");
+        let record = serde_json::json!({
+            "pid": owner.id(),
+            "directory": directory.path().display().to_string(),
+        });
+        std::fs::write(
+            storage.with_extension("engine-owner.json"),
+            record.to_string(),
+        )
+        .expect("owner record");
+        let error = match Store::open(&storage).await {
+            Ok(_) => panic!("a live owner blocks the upgrade"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("close these windows first"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains(&owner.id().to_string()),
+            "{error}"
+        );
+        owner.kill().expect("kill owner");
+        owner.wait().expect("reap owner");
+        Store::open(&storage)
+            .await
+            .expect("the upgrade runs once the owner is gone");
     }
 }
 
