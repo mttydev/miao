@@ -21,6 +21,8 @@ export type Options = {
   readonly maxPromptCharacters?: number
   readonly waitMsCeiling?: number
   readonly sleep?: (ms: number) => Promise<void>
+  /** Local publication gate: unpublished Sessions never appear in a listing. */
+  readonly visible?: (sessionID: string) => boolean
 }
 
 type Row = Record<string, unknown>
@@ -63,7 +65,10 @@ export function methods(engine: Engine, options: Options = {}) {
         const limit = Math.min(Math.max(number(payload.limit) ?? 100, 1), 200)
         const start = offset(payload.cursor)
         const rows = catalog(await engine.command("session_catalog"))
-        const scoped = request.projectID ? rows.filter((row) => row.location === request.projectID) : rows
+        const visible = options.visible ?? (() => true)
+        const scoped = rows
+          .filter((row) => visible(String(row.session_id)))
+          .filter((row) => (request.projectID ? row.location === request.projectID : true))
         const matched = search
           ? scoped.filter(
               (row) =>
@@ -80,6 +85,7 @@ export function methods(engine: Engine, options: Options = {}) {
       guard(false, async () => {
         const rows = catalog(await engine.command("session_catalog"))
         const row = rows.find((entry) => entry.session_id === request.sessionID)
+        if (row && (options.visible ?? (() => true))(String(row.session_id)) === false) throw new ControlAgent.RequestError("not_found")
         if (!row) throw new ControlAgent.RequestError("not_found")
         return info(row)
       }),
