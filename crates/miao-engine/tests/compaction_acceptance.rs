@@ -90,6 +90,47 @@ impl Provider for Fixture {
     }
 }
 
+/// Reports a context far past every possible limit, but is identified by a
+/// model name no catalog knows: the only window it can run against is the one
+/// its route declares.
+struct ZeroWindow {
+    summaries: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for ZeroWindow {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        if request
+            .system
+            .starts_with("Summarize the conversation portion")
+        {
+            self.summaries.fetch_add(1, Ordering::SeqCst);
+            return Ok(Reply {
+                content: json!([{"type":"text","text":"SUMMARY-OF-EVERYTHING"}]),
+                usage: json!({}),
+                needs_tools: false,
+            });
+        }
+        Ok(Reply {
+            content: json!([{"type":"text","text":"the answer"}]),
+            usage: json!({"inputTokens": 900_000, "outputTokens": 1_000}),
+            needs_tools: false,
+        })
+    }
+
+    fn identity(&self) -> Option<Identity> {
+        Some(Identity {
+            protocol: "openai-chat".into(),
+            model: "fixture-zero-model".into(),
+        })
+    }
+}
+
 async fn drain(runtime: &Runtime, store: &Store, id: &str, finished: usize) {
     runtime
         .admit(
@@ -273,6 +314,62 @@ async fn a_session_on_the_default_model_compacts_from_its_declared_window() {
     assert!(
         kinds.iter().any(|kind| kind == "history.compacted"),
         "{kinds:?}"
+    );
+}
+
+/// A route that declares `context: 0` states no window. Reading the zero as a
+/// window armed a zero threshold, so the Session compacted on every settled
+/// turn; it has to fall through to "no window" instead.
+#[tokio::test]
+async fn a_zero_declared_window_disables_automatic_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(ZeroWindow {
+        summaries: AtomicUsize::new(0),
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        Policy::new(Config::default()).unwrap(),
+    )
+    .await
+    .unwrap();
+    std::env::set_var("MIAO_TEST_ROUTE_ZERO_KEY", "fixture-key");
+    let manifest = dir.path().join("routes.json");
+    std::fs::write(
+        &manifest,
+        r#"[{"id":"main","provider":"openai-chat","model":"fixture-zero-model","endpoint":"http://127.0.0.1:1","credential":{"type":"environment","key":"MIAO_TEST_ROUTE_ZERO_KEY"},"primary":true,"limit":{"context":0,"output":8192}}]"#,
+    )
+    .unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (_, limits) = miao_engine::model_routes::load(
+        &manifest,
+        &workspace,
+        provider.clone() as Arc<dyn Provider>,
+    )
+    .await
+    .unwrap();
+    runtime.set_route_limits(limits).await;
+
+    drain(&runtime, &store, "one", 1).await;
+
+    assert_eq!(
+        provider.summaries.load(Ordering::SeqCst),
+        0,
+        "a zero window must not compact on every settled turn"
+    );
+    let events = store.events("s", 0, 500).await.unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.kind == "compaction.disabled" && event.data["reason"] == "no_window"
+        }),
+        "the Session has to say the window is the reason, not stay silent"
+    );
+    assert!(
+        !events.iter().any(|event| event.kind == "history.compacted"),
+        "nothing was compacted without a window"
     );
 }
 
