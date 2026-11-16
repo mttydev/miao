@@ -593,7 +593,12 @@ impl Editor {
             return self.buffer.len();
         };
         let target = start + cell;
-        let line_start = self.line_start(*index);
+        // `display_lines` carries a logical line number, not a byte offset.
+        // Handing it to `line_start` sliced the buffer at that byte: a draft
+        // whose first line starts with a multi-byte character panicked on
+        // `buffer[..1]`, and an ASCII draft mapped the second line onto the
+        // first one.
+        let line_start = self.line_number_start(*index);
         let line = self.buffer[line_start..]
             .split('\n')
             .next()
@@ -676,6 +681,18 @@ impl Editor {
         self.buffer[..index]
             .rfind('\n')
             .map_or(0, |newline| newline + 1)
+    }
+
+    /// Byte offset where logical line `line` starts. Display rows carry a line
+    /// number, not a byte offset; passing one to `line_start` sliced a
+    /// multi-byte first character in half and mapped ASCII lines onto line 0.
+    fn line_number_start(&self, line: usize) -> usize {
+        self.buffer
+            .split('\n')
+            .take(line)
+            .map(|text| text.len() + 1)
+            .sum::<usize>()
+            .min(self.buffer.len())
     }
 
     fn line_end(&self, index: usize) -> usize {
@@ -2161,6 +2178,28 @@ mod tests {
         editor.set_text(&format!("{}你", "x".repeat(19)));
         assert_eq!(editor.display_lines(20)[1], (0, 19, "你".to_string()));
         assert_eq!(editor.display_cursor(20), (1, 2));
+    }
+
+    /// The display rows carry logical line numbers; a click must convert that
+    /// number to a byte offset. With a multi-byte first character, the old
+    /// conversion sliced the buffer inside the glyph and panicked.
+    #[test]
+    fn clicking_the_second_line_of_a_multibyte_draft_lands_on_its_first_character() {
+        let mut editor = Editor::new();
+        editor.set_text("自\nab");
+        assert_eq!(editor.offset_at(1, 0, 80), "自\n".len());
+        assert_eq!(editor.offset_at(1, 1, 80), "自\na".len());
+        assert_eq!(editor.offset_at(1, 2, 80), "自\nab".len());
+    }
+
+    /// ASCII used to click the second row and land on the first row's start,
+    /// because line number 1 was read as byte 1.
+    #[test]
+    fn clicking_a_later_ascii_line_starts_at_that_lines_byte() {
+        let mut editor = Editor::new();
+        editor.set_text("one\ntwo");
+        assert_eq!(editor.offset_at(1, 0, 80), 4);
+        assert_eq!(editor.offset_at(1, 2, 80), 6);
     }
 
     /// CJK and emoji are edited by grapheme, not by byte: undo takes back the
