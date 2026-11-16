@@ -1046,16 +1046,25 @@ impl App {
                             .dialog
                             .as_mut()
                             .is_some_and(|dialog| dialog.paste(&text));
+                        // Text is not the picture a held prompt wanted, so the
+                        // draft goes back unsent. Whatever this read brought
+                        // joins it: dropping the paste is how a held prompt
+                        // used to come back shorter than what the operator had
+                        // on screen before they pressed Enter.
+                        if let Some((held, attachments)) = self.held_prompt.take() {
+                            let wanted_picture = Self::image_markers(&held) > attachments.len();
+                            self.shell
+                                .composer
+                                .restore_with(&format!("{held}{text}"), attachments);
+                            self.notice(if wanted_picture {
+                                "the clipboard holds no picture: paste it again or remove the image marker"
+                            } else {
+                                "the clipboard holds text, not the picture the prompt was waiting for"
+                            });
+                            return;
+                        }
                         if !taken {
                             self.shell.composer.paste(&text);
-                        }
-                        // Text is not the picture a held prompt wanted; give
-                        // the draft back with a way out.
-                        if let Some((held, attachments)) = self.held_prompt.take() {
-                            self.shell.composer.restore_with(&held, attachments);
-                            self.notice(
-                                "the clipboard holds no picture: paste it again or remove the image marker",
-                            );
                         }
                     }
                     None => {
@@ -5039,26 +5048,33 @@ impl App {
         // cannot see my image": hold the draft once so the in-flight read
         // can land, and surface the orphan if it still is not there.
         let markers = Self::image_markers(&text);
-        if markers > attachments.len() {
-            if self.held_prompt.is_none() {
-                let busy = self.clipboard_busy;
-                self.held_prompt = Some((text.clone(), attachments.clone()));
-                self.shell.composer.restore_with(&text, attachments);
-                self.notice(if busy {
-                    "finishing the image attachment…"
-                } else {
-                    "the draft references an image that is not attached; reading the clipboard…"
-                });
-                if !busy {
+        if self.clipboard_busy || markers > attachments.len() {
+            if !self.clipboard_busy {
+                if self.held_prompt.is_none() {
+                    self.held_prompt = Some((text.clone(), attachments.clone()));
+                    self.shell.composer.restore_with(&text, attachments);
+                    self.notice(
+                        "the draft references an image that is not attached; reading the clipboard…",
+                    );
                     self.read_clipboard();
+                    return;
                 }
+                self.held_prompt = None;
+                self.shell.composer.restore_with(&text, attachments);
+                self.notice(&format!(
+                    "[Image {markers}] has no attachment in this draft: paste the picture again or remove the marker"
+                ));
                 return;
             }
-            self.held_prompt = None;
+            // A read is still in flight, so the picture is on its way: holding
+            // costs one Enter and keeps the prompt from leaving without it.
+            // Sending now let the landing draw a marker into the emptied
+            // composer afterwards, which read as the prompt having failed.
+            if self.held_prompt.is_none() {
+                self.held_prompt = Some((text.clone(), attachments.clone()));
+                self.notice("finishing the image attachment…");
+            }
             self.shell.composer.restore_with(&text, attachments);
-            self.notice(&format!(
-                "[Image {markers}] has no attachment in this draft: paste the picture again or remove the marker"
-            ));
             return;
         }
         engine.prompt(&session_id, &text, attachments);
@@ -6829,6 +6845,47 @@ mod tests {
             "the draft must not survive its own send"
         );
         assert!(app.shell.composer.attachments().is_empty());
+    }
+
+    /// A fast Enter while the clipboard read is still in flight must hold the
+    /// prompt instead of sending it without the picture: the landing used to
+    /// draw an `[Image N]` marker into the emptied composer afterwards, which
+    /// read as the prompt having failed.
+    #[test]
+    fn a_prompt_submitted_while_the_clipboard_reads_waits_for_the_picture() {
+        let mut app = session_app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_busy", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        app.clipboard_busy = true;
+        app.submit("describe this".into(), Vec::new());
+        let sent = control_requests(&mut requests);
+        assert!(
+            sent.iter()
+                .all(|request| !matches!(request, engine::Request::Prompt { .. })),
+            "a prompt must not leave without the picture it pasted: {} request(s)",
+            sent.len()
+        );
+        assert!(app.held_prompt.is_some());
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Image {
+            mime: "image/png".into(),
+            data: "cG5n".into(),
+        })));
+        let asked = control_requests(&mut requests);
+        let [engine::Request::Prompt { attachments, .. }] = asked.as_slice() else {
+            panic!("the held prompt must send once the picture lands");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["mime"], "image/png");
+        assert!(
+            app.shell.composer.editor.is_empty(),
+            "no stray marker may be left behind"
+        );
+        assert!(app.held_prompt.is_none());
     }
 
     /// No picture on the clipboard: the hold blocks with a notice instead of
