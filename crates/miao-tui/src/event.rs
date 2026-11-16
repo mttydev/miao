@@ -177,6 +177,8 @@ pub enum AppEvent {
     },
     /// A terminal engine failure; the task stops after sending it.
     EngineFailure(String),
+    /// A newer release finished installing; the next launch runs it.
+    UpdateReady(String),
 }
 
 /// How many events may wait for the render loop before backpressure applies.
@@ -278,6 +280,7 @@ fn requires_delivery(event: &AppEvent) -> bool {
             | AppEvent::Paste(_)
             | AppEvent::Clipboard(_)
             | AppEvent::EngineFailure(_)
+            | AppEvent::UpdateReady(_)
             | AppEvent::PromptFailed { .. }
             | AppEvent::ActionFailed(_)
             | AppEvent::InputRetrieved { .. }
