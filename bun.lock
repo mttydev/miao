@@ -322,6 +322,7 @@
     "packages/engine-ts/remote-control": {
       "name": "@miao/remote-control",
       "dependencies": {
+        "@miao/client": "workspace:*",
         "@miao/schema": "workspace:*",
         "better-auth": "1.7.7",
         "effect": "catalog:",
