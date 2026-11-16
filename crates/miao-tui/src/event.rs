@@ -129,6 +129,18 @@ pub enum AppEvent {
         transcript: Box<Transcript>,
         state: Box<SessionState>,
     },
+    /// Where the open Session's loaded window starts: the boundary the next
+    /// scroll-to-top asks for, and whether an older page exists behind it.
+    HistoryWindow {
+        next_before: Option<u64>,
+        has_more: bool,
+    },
+    /// One older page, to be put in front of what is on screen.
+    HistoryPrepended {
+        older: Box<Transcript>,
+        next_before: Option<u64>,
+        has_more: bool,
+    },
     /// A control action (cancel, approve, answer) the engine refused. Shown as
     /// a composer notice; it never ends the transport.
     ActionFailed(String),
@@ -273,6 +285,8 @@ fn requires_delivery(event: &AppEvent) -> bool {
             | AppEvent::Attention { .. }
             | AppEvent::Provider(_)
             | AppEvent::SessionOpened { .. }
+            | AppEvent::HistoryWindow { .. }
+            | AppEvent::HistoryPrepended { .. }
     )
 }
 

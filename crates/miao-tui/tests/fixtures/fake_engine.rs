@@ -350,46 +350,7 @@ fn main() {
                     // ses_b is the renderer fixture: markdown structure plus a
                     // completed tool call, so the smoke test can assert what a
                     // person sees rather than the transport bytes.
-                    snapshot["messages"] = if large_output > 0 {
-                        let body = "x".repeat(large_output);
-                        json!([
-                            {"seq":1,"role":"user","content":"dump the whole log","checkpoint":null,"recorded_at_ms":null},
-                            {"seq":2,"role":"assistant","content":[{"type":"text","text":body}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
-                        ])
-                    } else if history > 0 {
-                        // Every turn is one user line and one assistant line, so
-                        // `history` messages means `history / 2` turns.
-                        let mut messages = Vec::with_capacity(history);
-                        for index in 0..history / 2 {
-                            messages.push(json!({"seq": index * 2 + 1, "role": "user", "content": format!("line {} of the long Session", index + 1), "checkpoint": null, "recorded_at_ms": null}));
-                            messages.push(json!({"seq": index * 2 + 2, "role": "assistant", "content": [{"type": "text", "text": format!("answer {}", index + 1)}], "identity": {"agent": "build", "provider": {"model": "fake/model"}}, "checkpoint": null, "recorded_at_ms": null}));
-                        }
-                        json!(messages)
-                    } else if target == "ses_b" {
-                        json!([
-                            {"seq":1,"role":"user","content":"show the renderer","checkpoint":null,"recorded_at_ms":null},
-                            {"seq":2,"role":"assistant","content":[
-                                {"type":"text","text":"## Fixture Notes\n\n- **bold** and `code`\n\n| name | value |\n| --- | --- |\n| a | 1 |"},
-                                {"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"src/lib.rs"}}
-                            ],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null},
-                            {"seq":3,"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"{\"text\":\"one\\ntwo\",\"sha256\":\"0\"}","is_error":false}],"checkpoint":null,"recorded_at_ms":null},
-                            {"seq":4,"role":"assistant","content":[{"type":"text","text":"elided by context management · recall {\"tool_use_id\":\"call_elided\"}"}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
-                        ])
-                    } else if cjk {
-                        // Deliberately unbreakable: a CJK run has no spaces, so
-                        // wrapping has to happen on column boundaries. The tail
-                        // marker is ASCII so a test can assert the whole string
-                        // survived without depending on how the line broke.
-                        json!([
-                            {"seq":1,"role":"user","content":"用中文问一个问题","checkpoint":null,"recorded_at_ms":null},
-                            {"seq":2,"role":"assistant","content":[{"type":"text","text":"这是一段很长的中文回复用来检验双宽字符在窄窗格里的折行处理是否正确完成😀 cjk-tail-marker"}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
-                        ])
-                    } else {
-                        json!([
-                            {"seq":1,"role":"user","content":"hello from the fixture","checkpoint":null,"recorded_at_ms":null},
-                            {"seq":2,"role":"assistant","content":[{"type":"text","text":"fixture answer"}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
-                        ])
-                    };
+                    snapshot["messages"] = fixture_messages(target, large_output, history, cjk);
                 }
                 snapshot["pending"] = json!([]);
                 snapshot["active_run"] = json!(null);
@@ -425,6 +386,52 @@ fn main() {
                     }
                 }
                 send(&mut out, json!({"id":id,"result":snapshot}));
+            }
+            // The TUI opens at the tail: the newest page, with `before_seq`
+            // walking backwards. Mirror the real engine's answer so an open
+            // costs the page on screen instead of the whole fixture.
+            "history_page" if sessions => {
+                let target = frame["params"]["session_id"].as_str().unwrap_or("ses_a");
+                let limit = frame["params"]["limit"].as_u64().unwrap_or(200) as usize;
+                let before = frame["params"]["before_seq"].as_u64();
+                let all = fixture_messages(target, large_output, history, cjk);
+                let mut rows = all.as_array().cloned().unwrap_or_default();
+                rows.retain(|message| {
+                    before.is_none_or(|seq| message["seq"].as_u64().unwrap_or(0) < seq)
+                });
+                let start = rows.len().saturating_sub(limit.max(1));
+                let mut page = rows.split_off(start);
+                // Sustained streaming mutates the assistant text on every tick;
+                // the full snapshot does the same below, so the windowed open
+                // has to move with it or a refresh projects the same transcript.
+                if streaming {
+                    let tick = stream_updates.load(Ordering::SeqCst);
+                    if let Some(block) = page
+                        .get_mut(1)
+                        .and_then(|message| message.get_mut("content"))
+                        .and_then(|content| content.get_mut(0))
+                    {
+                        block["text"] = json!(format!("stream tick {tick}"));
+                    }
+                }
+                let has_more = start > 0;
+                let next_before = if has_more {
+                    page.first().and_then(|message| message["seq"].as_u64())
+                } else {
+                    None
+                };
+                send(
+                    &mut out,
+                    json!({
+                        "id": id,
+                        "result": {
+                            "session_id": target,
+                            "messages": page,
+                            "has_more": has_more,
+                            "next_before": next_before
+                        }
+                    }),
+                );
             }
             "events" if sessions => send(&mut out, json!({"id":id,"result":[]})),
             // `subscribe` is not gated on the catalog view either, so a test can
@@ -637,6 +644,51 @@ fn log_action(params: &Value, method: &str) {
             .append(true)
             .open(path)
             .and_then(|mut file| writeln!(file, "{line}"));
+    }
+}
+
+/// The transcript a Session fixture reports. `snapshot` and `history_page`
+/// share it so the windowed open and the full projection agree.
+fn fixture_messages(target: &str, large_output: usize, history: usize, cjk: bool) -> Value {
+    if large_output > 0 {
+        let body = "x".repeat(large_output);
+        json!([
+            {"seq":1,"role":"user","content":"dump the whole log","checkpoint":null,"recorded_at_ms":null},
+            {"seq":2,"role":"assistant","content":[{"type":"text","text":body}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
+        ])
+    } else if history > 0 {
+        // Every turn is one user line and one assistant line, so
+        // `history` messages means `history / 2` turns.
+        let mut messages = Vec::with_capacity(history);
+        for index in 0..history / 2 {
+            messages.push(json!({"seq": index * 2 + 1, "role": "user", "content": format!("line {} of the long Session", index + 1), "checkpoint": null, "recorded_at_ms": null}));
+            messages.push(json!({"seq": index * 2 + 2, "role": "assistant", "content": [{"type": "text", "text": format!("answer {}", index + 1)}], "identity": {"agent": "build", "provider": {"model": "fake/model"}}, "checkpoint": null, "recorded_at_ms": null}));
+        }
+        json!(messages)
+    } else if target == "ses_b" {
+        json!([
+            {"seq":1,"role":"user","content":"show the renderer","checkpoint":null,"recorded_at_ms":null},
+            {"seq":2,"role":"assistant","content":[
+                {"type":"text","text":"## Fixture Notes\n\n- **bold** and `code`\n\n| name | value |\n| --- | --- |\n| a | 1 |"},
+                {"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"src/lib.rs"}}
+            ],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null},
+            {"seq":3,"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"{\"text\":\"one\\ntwo\",\"sha256\":\"0\"}","is_error":false}],"checkpoint":null,"recorded_at_ms":null},
+            {"seq":4,"role":"assistant","content":[{"type":"text","text":"elided by context management · recall {\"tool_use_id\":\"call_elided\"}"}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
+        ])
+    } else if cjk {
+        // Deliberately unbreakable: a CJK run has no spaces, so
+        // wrapping has to happen on column boundaries. The tail
+        // marker is ASCII so a test can assert the whole string
+        // survived without depending on how the line broke.
+        json!([
+            {"seq":1,"role":"user","content":"用中文问一个问题","checkpoint":null,"recorded_at_ms":null},
+            {"seq":2,"role":"assistant","content":[{"type":"text","text":"这是一段很长的中文回复用来检验双宽字符在窄窗格里的折行处理是否正确完成😀 cjk-tail-marker"}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
+        ])
+    } else {
+        json!([
+            {"seq":1,"role":"user","content":"hello from the fixture","checkpoint":null,"recorded_at_ms":null},
+            {"seq":2,"role":"assistant","content":[{"type":"text","text":"fixture answer"}],"identity":{"agent":"build","provider":{"model":"fake/model"}},"checkpoint":null,"recorded_at_ms":null}
+        ])
     }
 }
 

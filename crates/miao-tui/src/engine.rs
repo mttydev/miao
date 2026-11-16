@@ -36,6 +36,15 @@ const RESYNC_AFTER: Duration = Duration::from_secs(30);
 const RESYNC_CEILING: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const EVENTS_PAGE: usize = 100;
+
+/// How many messages one projection window carries. A pane shows a few
+/// screenfuls; older pages arrive through `Request::LoadOlder` when the
+/// operator scrolls to the top, so this bounds the view, not the Session.
+const TRANSCRIPT_WINDOW: usize = 200;
+
+/// A windowed open should not take this long. Beyond it the operator is told
+/// what was read, because a slow attach otherwise looks like a stalled one.
+const SLOW_OPEN: std::time::Duration = std::time::Duration::from_millis(1000);
 /// Inputs read per `pending_inputs` page while looking for the newest one.
 const PENDING_INPUT_PAGE: usize = 100;
 /// The engine names every method after its variant (`rename_all =
@@ -73,6 +82,12 @@ pub enum Request {
         tag: String,
     },
     Open(String),
+    /// Ask for the page of messages older than `before_seq`, so a long Session
+    /// is read backwards one screenful at a time.
+    LoadOlder {
+        session_id: String,
+        before_seq: u64,
+    },
     Refresh,
     /// Ask the engine to promote input it still holds unpromoted. The engine
     /// promotes queued input at a boundary a client asks for, so a Session
@@ -329,6 +344,13 @@ impl Handle {
 
     pub fn open(&self, session_id: &str) {
         let _ = self.tx.send(Request::Open(session_id.to_string()));
+    }
+
+    pub fn load_older(&self, session_id: &str, before_seq: u64) {
+        let _ = self.tx.send(Request::LoadOlder {
+            session_id: session_id.to_string(),
+            before_seq,
+        });
     }
 
     pub fn refresh(&self) {
@@ -1049,6 +1071,29 @@ async fn run(
                 Request::Open(session_id) => {
                     dirty = None;
                     open_session(client, &bus, &mut open, session_id).await;
+                }
+                Request::LoadOlder {
+                    session_id,
+                    before_seq,
+                } => {
+                    if open.as_ref().is_some_and(|state| state.id == session_id) {
+                        match client
+                            .history_page(&session_id, Some(before_seq), TRANSCRIPT_WINDOW)
+                            .await
+                        {
+                            Ok(page) => bus.send(AppEvent::HistoryPrepended {
+                                older: Box::new(Transcript::page(&page)),
+                                next_before: page.get("next_before").and_then(Value::as_u64),
+                                has_more: page
+                                    .get("has_more")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
+                            }),
+                            Err(error) => bus.send(AppEvent::Notice(format!(
+                                "could not load earlier history: {error}"
+                            ))),
+                        }
+                    }
                 }
                 Request::Prompt {
                     session_id,
@@ -2366,21 +2411,50 @@ async fn open_session(
     *open = Some(state);
 }
 
-/// Re-read the Session snapshot and replay only the events not yet seen. The
-/// snapshot loses display diffs (they live on `tool.completed`, not on message
-/// content), so the previously replayed diffs are carried over instead of
-/// paging the whole journal again on every refresh.
+/// Open the Session at its tail. The state anchor comes from a metadata-only
+/// snapshot; the transcript comes from one bounded page of the newest
+/// messages, and the journal is replayed only across that page. Opening a
+/// long Session therefore costs the screenful it shows instead of its whole
+/// history; older pages arrive through `Request::LoadOlder`.
 async fn project(client: &EngineClient, bus: &Bus, state: &mut Opened) {
-    let snapshot = match client.snapshot(&state.id).await {
+    let started = Instant::now();
+    let snapshot = match client.snapshot_metadata(&state.id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             bus.send(AppEvent::EngineFailure(error.to_string()));
             return;
         }
     };
-    let mut transcript = Transcript::from_snapshot(&snapshot);
+    let window = match client
+        .history_page(&state.id, None, TRANSCRIPT_WINDOW)
+        .await
+    {
+        Ok(window) => window,
+        Err(error) => {
+            bus.send(AppEvent::EngineFailure(error.to_string()));
+            return;
+        }
+    };
+    // One projection path serves both: `from_snapshot` reads the compaction
+    // cut and the messages, so the page replaces the snapshot's transcript.
+    let mut projected = snapshot.clone();
+    projected["messages"] = window
+        .get("messages")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let mut transcript = Transcript::from_snapshot(&projected);
     transcript.displays = state.displays.clone();
     transcript.failure = state.failure.clone();
+    // Replay starts at the window's first message: everything older is off
+    // screen, so its events cannot change a row the pane draws.
+    let first = window
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.first())
+        .and_then(|message| message.get("seq"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    state.seen = first.saturating_sub(1);
     loop {
         let page = client
             .request(
@@ -2412,11 +2486,31 @@ async fn project(client: &EngineClient, bus: &Bus, state: &mut Opened) {
     let cursor = snapshot.get("cursor").and_then(Value::as_u64).unwrap_or(0);
     state.live_after = cursor.max(state.live_after);
     let _ = client.subscribe(&state.id, cursor).await;
+    bus.send(AppEvent::HistoryWindow {
+        next_before: window.get("next_before").and_then(Value::as_u64),
+        has_more: window
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    });
     bus.send(AppEvent::SessionOpened {
         summary: SessionSummary::from_snapshot(&snapshot),
         transcript: Box::new(transcript),
         state: Box::new(SessionState::from_snapshot(&snapshot)),
     });
+    let elapsed = started.elapsed();
+    if elapsed > SLOW_OPEN {
+        bus.send(AppEvent::Notice(format!(
+            "opened {} messages from seq {} in {} ms",
+            window
+                .get("messages")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            first,
+            elapsed.as_millis()
+        )));
+    }
 }
 
 /// An event the user should hear about if attention is enabled. Approval and
