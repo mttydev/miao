@@ -6,6 +6,27 @@ use crate::{
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
+/// The wrapper the provider reads and the transcript splits on. Context the
+/// engine wrote is attributed to its source rather than presented as words the
+/// operator typed, and keeping the shape in one function keeps every reader —
+/// the provider prompt, the TUI, a promotion — agreeing on it.
+pub fn wrap(source: &str, text: &str) -> Result<String, serde_json::Error> {
+    Ok(format!(
+        "<injected-context source={}>\n{}\n</injected-context>",
+        serde_json::to_string(source)?,
+        text
+    ))
+}
+
+/// Inputs the runner admits on its own behalf to keep a task moving. Their
+/// promotion is guidance the operator never wrote, so it is stamped as engine
+/// context instead of appearing in history as their prompt.
+pub fn continuation_input(id: &str) -> bool {
+    ["goal:", "empty:", "transport:", "verify:"]
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+}
+
 impl Store {
     pub async fn inject(
         &self,
@@ -43,7 +64,7 @@ impl Store {
             let event=append(&tx,&session,"message.synthetic",json!({"input_id":id,"text":text,"source":source}))?;
             // The provider sees explicitly attributed context; the transcript
             // projects the synthetic event, never an operator prompt.
-            let content=json!([{"type":"text","text":format!("<injected-context source={}>\n{}\n</injected-context>",serde_json::to_string(&source)?,text)}]);
+            let content=json!([{"type":"text","text":wrap(&source,&text)?}]);
             tx.execute("INSERT INTO engine_message(session_id,seq,role,content,recorded_at_ms,kind) VALUES(?1,?2,'user',?3,?4,?5)",params![session,event.seq,serde_json::to_string(&content)?,event.recorded_at_ms,event.kind])?;
             tx.commit()?;
             Ok(json!({"seq":event.seq,"duplicate":false}))
