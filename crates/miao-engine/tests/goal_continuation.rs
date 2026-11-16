@@ -272,6 +272,21 @@ async fn continues_independent_work_without_a_human_prompt_then_idles_with_locke
             .count(),
         2
     );
+    // The continuation is the runner's own guidance, so the transcript
+    // attributes it to the engine instead of presenting it as a prompt the
+    // operator typed.
+    let page = store.history_page("s", None, 500).await.unwrap();
+    let continuation = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"][0]["text"].as_str())
+        .find(|text| text.starts_with("<injected-context source=\"engine\">"))
+        .expect("the continuation is attributed to the engine");
+    assert!(
+        continuation.contains("Continue the next dependency-ready todo"),
+        "{continuation}"
+    );
 }
 
 #[tokio::test]

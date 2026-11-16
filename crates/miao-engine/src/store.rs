@@ -3749,7 +3749,15 @@ fn promote_tx(tx: &Transaction<'_>, session: &str, idle: bool) -> Result<Vec<Eve
             "UPDATE engine_input SET state='promoted' WHERE id=?1",
             [&id],
         )?;
-        let mut parts = vec![json!({"type":"text","text":prompt})];
+        // A continuation the runner admitted on its own behalf is guidance
+        // the operator never wrote. Stamping it as engine context keeps the
+        // transcript honest and the next turn from reading it as their prompt.
+        let text = if crate::session_synthetic::continuation_input(&id) {
+            crate::session_synthetic::wrap("engine", &prompt)?
+        } else {
+            prompt
+        };
+        let mut parts = vec![json!({"type":"text","text":text})];
         parts.extend(media.iter().map(Attachment::part));
         if !is_command {
             parts.extend(agents.mentions.iter().map(|reference|json!({"type":"agent_reference","name":reference.name,"metadata":{"source":reference.source}})));
