@@ -269,6 +269,30 @@
     ],
     "type": "object"
   },
+  "memory_recall": {
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "maxLength": 500,
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "memory_save": {
+    "additionalProperties": false,
+    "properties": {
+      "content": {
+        "maxLength": 500,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "type": "object"
+  },
   "planwrite": {
     "additionalProperties": false,
     "properties": {
