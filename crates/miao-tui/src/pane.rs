@@ -684,15 +684,23 @@ pub struct TranscriptPane {
     /// A delta arrived and `draft` has not been rebuilt yet.
     draft_dirty: bool,
     draft_built: Option<Instant>,
-    /// `lines` and `draft` wrapped to `width`, each cached against the version
-    /// and width it was built for.
+    /// The transcript rows already wrapped into `body`, and the width they
+    /// were wrapped at. `body_ends[i]` is how long `body` is after wrapping
+    /// row `i`, so a projection that changes only its tail drops the wrapped
+    /// rows after the change and keeps the rest.
     body: Vec<Line<'static>>,
+    body_rows: usize,
+    body_ends: Vec<usize>,
+    body_width: Option<u16>,
+    /// The streamed draft wrapped to `width`, cached against its version.
     draft_rows: Vec<Line<'static>>,
     width: u16,
-    body_version: u64,
-    body_built: u64,
     draft_version: u64,
     draft_rows_built: u64,
+    /// How many logical rows `render` has wrapped, so a test can prove an
+    /// appended projection rewraps only its tail.
+    #[cfg(test)]
+    wrapped_rows_for_tests: usize,
     /// What the operator typed that the engine still holds un-promoted, in
     /// admission order. The shell paints these as rows right above the input:
     /// while a busy turn holds an input in its queue the only signal used to be
@@ -737,12 +745,15 @@ impl TranscriptPane {
             draft_dirty: false,
             draft_built: None,
             body: Vec::new(),
+            body_rows: 0,
+            body_ends: Vec::new(),
+            body_width: None,
             draft_rows: Vec::new(),
             width: 0,
-            body_version: 1,
-            body_built: 0,
             draft_version: 0,
             draft_rows_built: 0,
+            #[cfg(test)]
+            wrapped_rows_for_tests: 0,
             pending_prompts: Vec::new(),
             scroll: 0,
             follow: true,
@@ -755,11 +766,21 @@ impl TranscriptPane {
         }
     }
 
-    /// Replace the projection's rows. The bump invalidates the wrapped cache,
-    /// which is rebuilt on the next frame at that frame's width.
+    /// Replace the projection's rows. Only the rows that changed invalidate
+    /// their wrapped output; an appended turn keeps the history already
+    /// wrapped instead of re-wrapping the whole Session.
     fn set_rows(&mut self, rows: Vec<Row>) {
+        let keep = self
+            .rows
+            .iter()
+            .zip(&rows)
+            .take_while(|(old, new)| old == new)
+            .count();
+        self.body_rows = self.body_rows.min(keep);
+        self.body_ends.truncate(self.body_rows);
+        self.body
+            .truncate(self.body_ends.last().copied().unwrap_or(0));
         self.rows = rows;
-        self.body_version += 1;
     }
 
     /// Record what the model is streaming. The lines are rendered on the next
@@ -826,9 +847,24 @@ impl Pane for TranscriptPane {
         // between two edges that the rows around it touch.
         let content = area;
         let resized = content.width != self.width;
-        if resized || self.body_version != self.body_built {
-            self.body = wrap_rows(&self.rows, content.width);
-            self.body_built = self.body_version;
+        if self.body_width != Some(content.width) {
+            self.body.clear();
+            self.body_ends.clear();
+            self.body_rows = 0;
+            self.body_width = Some(content.width);
+        }
+        while self.body_rows < self.rows.len() {
+            let wrapped = {
+                let row = &self.rows[self.body_rows];
+                wrap_rows(std::slice::from_ref(row), content.width)
+            };
+            self.body.extend(wrapped);
+            self.body_ends.push(self.body.len());
+            self.body_rows += 1;
+            #[cfg(test)]
+            {
+                self.wrapped_rows_for_tests += 1;
+            }
         }
         if resized || self.draft_version != self.draft_rows_built {
             self.draft_rows = wrap_rows(&self.draft, content.width);
@@ -940,6 +976,7 @@ pub enum DraftPart {
 /// is blanked on continuations, the way the TS `❯` marker leads only the first
 /// row. `wrap: false` is TS `wrapMode="none"`: the row is clipped to the
 /// width, never folded.
+#[derive(Clone, PartialEq)]
 pub struct Row {
     pub(crate) line: Line<'static>,
     pub(crate) hang: u16,
@@ -5905,6 +5942,65 @@ mod tests {
             painted.iter().any(|row| row.contains("界")),
             "the row survived intact: {painted:?}"
         );
+    }
+
+    #[test]
+    fn an_appended_projection_rewraps_only_the_new_tail() {
+        // Snapshots append committed turns at the tail. The wrapped body must
+        // keep every row whose projection is unchanged, or each committed step
+        // re-wraps the whole conversation.
+        fn paint(pane: &mut TranscriptPane, width: u16) -> Vec<Line<'static>> {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 12))
+                    .expect("terminal");
+            terminal
+                .draw(|frame| pane.render(frame, frame.area()))
+                .expect("draw");
+            pane.body.clone()
+        }
+
+        let row = |index: usize| {
+            Row::plain(Line::from(format!(
+                "row {index} carries enough words to fold at a narrow width"
+            )))
+        };
+        let mut rows = (0..200).map(row).collect::<Vec<_>>();
+        let mut pane = TranscriptPane::new(home_theme());
+        pane.set_rows(rows.clone());
+        let body = paint(&mut pane, 40);
+        assert_eq!(pane.wrapped_rows_for_tests, 200);
+        assert_eq!(body, wrap_rows(&pane.rows, 40));
+
+        // One appended row re-wraps that row, not the 200 already on screen.
+        rows.push(row(200));
+        pane.set_rows(rows.clone());
+        assert_eq!(pane.body_rows, 200, "the unchanged prefix stays wrapped");
+        pane.wrapped_rows_for_tests = 0;
+        let body = paint(&mut pane, 40);
+        assert_eq!(pane.wrapped_rows_for_tests, 1);
+        assert_eq!(body, wrap_rows(&pane.rows, 40));
+
+        // A row changing in the middle drops only the wrapped rows below it.
+        rows[100] = Row::plain(Line::from("the edit result row changed"));
+        pane.set_rows(rows.clone());
+        assert_eq!(pane.body_rows, 100);
+        pane.wrapped_rows_for_tests = 0;
+        let body = paint(&mut pane, 40);
+        assert_eq!(pane.wrapped_rows_for_tests, 101);
+        assert_eq!(body, wrap_rows(&pane.rows, 40));
+
+        // An identical projection costs no wrapping at all.
+        pane.set_rows(rows.clone());
+        pane.wrapped_rows_for_tests = 0;
+        let body = paint(&mut pane, 40);
+        assert_eq!(pane.wrapped_rows_for_tests, 0);
+        assert_eq!(body, wrap_rows(&pane.rows, 40));
+
+        // A resize invalidates every row's width.
+        pane.wrapped_rows_for_tests = 0;
+        let body = paint(&mut pane, 20);
+        assert_eq!(pane.wrapped_rows_for_tests, 201);
+        assert_eq!(body, wrap_rows(&pane.rows, 20));
     }
 
     #[test]
