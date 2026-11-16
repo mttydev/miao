@@ -5805,12 +5805,18 @@ command: None,
                 // A no-progress pause needs the stall to have persisted, not
                 // just two fast turns: operators legitimately wait minutes on
                 // background work with an unchanged todo list. Seconds-level
-                // windows misfired on orchestration sessions (see #2824); the
-                // floor is operator-tunable for tests and embedded hosts.
+                // windows misfired on orchestration sessions (see #2824).
+                // Background jobs and delegated children now pause on their own
+                // reason, so what remains here is the model repeating a
+                // text-only reply on an unchanged list: it is saying it has
+                // nothing it can do, and the window only billed a whole context
+                // to every paced continuation to hear "waiting" again. The
+                // window therefore defaults to zero — the second stall pauses —
+                // and hosts that want a longer grace can still set it.
                 let min_no_progress_secs = std::env::var("MIAO_NO_PROGRESS_MIN_SECS")
                     .ok()
                     .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(120);
+                    .unwrap_or(0);
                 let waited = goal_stalled_since
                     .map(|since| since.elapsed().as_secs())
                     .unwrap_or(0);

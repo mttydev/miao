@@ -280,9 +280,8 @@ async fn no_progress_is_bounded_and_synthetic_admissions_do_not_restart_the_loop
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("engine.db")).await.unwrap();
     setup(&store, "active", true, true, dir.path()).await;
-    // The no-progress pause requires the stall to persist past the
-    // configurable floor (MIAO_NO_PROGRESS_MIN_SECS, default 120s); this
-    // test pins the immediate-pause behaviour with the floor disabled.
+    // The no-progress pause fires on the second text-only stall; this test
+    // pins that behaviour with the operator-tunable grace pinned to zero.
     std::env::set_var("MIAO_NO_PROGRESS_MIN_SECS", "0");
     let provider = Arc::new(Script {
         calls: AtomicUsize::new(0),
@@ -322,6 +321,47 @@ async fn no_progress_is_bounded_and_synthetic_admissions_do_not_restart_the_loop
                     .as_str()
                     .is_some_and(|text| text.contains("Task paused"))
         }));
+}
+
+/// A model that answers a goal continuation with text only, twice, on an
+/// unchanged todo list is reporting that it has nothing it can do. Holding that
+/// pause behind a wall-clock window billed the whole context to every paced
+/// continuation in between, which is the "等待中" churn an operator saw for
+/// minutes at a time.
+#[tokio::test]
+async fn a_text_only_wait_pauses_at_the_second_stall_without_a_wall_clock_floor() {
+    let _env = NO_PROGRESS_ENV_LOCK.lock().await;
+    std::env::remove_var("MIAO_NO_PROGRESS_MIN_SECS");
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    setup(&store, "active", true, true, dir.path()).await;
+    let provider = Arc::new(Script {
+        calls: AtomicUsize::new(0),
+        progress: false,
+        churn: false,
+        finish_after: None,
+    });
+    let runtime = Runtime::new(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        runtime.resume("s").await.unwrap();
+        finished(&store).await;
+    })
+    .await
+    .expect("a repeated text-only reply must pause without waiting out a floor");
+    let calls = provider.calls.load(Ordering::SeqCst);
+    assert!(calls <= 4, "paused after {calls} provider calls");
+    assert!(store
+        .events("s", 0, 500)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.kind == "loop.stopped" && event.data["reason"] == "no-progress"));
 }
 
 #[tokio::test]
