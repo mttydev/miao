@@ -11,7 +11,7 @@ use ratatui::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{dialogs::Action, theme::Theme};
+use crate::{dialogs::Action, highlight::Highlighter, theme::Theme};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Change {
@@ -340,20 +340,9 @@ impl Dialog {
                         .style(Style::default().fg(theme.palette.warning)),
                     );
                 } else if let Some(text) = &view.diff {
+                    let mut highlighter = Highlighter::new(extension(&view.path), theme.palette);
                     for line in text.lines() {
-                        // The +/-/@@ prefixes colour themselves; everything else
-                        // stays plain so context lines read as context.
-                        let style = match line.chars().next() {
-                            Some('+') if !line.starts_with("+++") => {
-                                Style::default().fg(theme.palette.success)
-                            }
-                            Some('-') if !line.starts_with("---") => {
-                                Style::default().fg(theme.palette.error)
-                            }
-                            Some('@') => Style::default().fg(theme.palette.accent),
-                            _ => Style::default(),
-                        };
-                        lines.push(Line::from(Span::styled(line.to_string(), style)));
+                        lines.push(diff_line(line, &mut highlighter, theme));
                     }
                     if text.lines().count() == 0 {
                         lines.push(Line::from("no difference against HEAD"));
@@ -374,6 +363,64 @@ impl Dialog {
             .scroll((panel.scroll.min(u16::MAX as usize) as u16, 0));
         frame.render_widget(paragraph, area);
     }
+}
+
+/// Paint one patch row the way the transcript paints a diff: the marker keeps
+/// its added/removed hue, the code after it is coloured by the file's own
+/// grammar, and a changed row carries the diff band to the pane's last column.
+/// Headers keep the plain style the list uses for facts rather than changes.
+fn diff_line(line: &str, highlighter: &mut Highlighter, theme: &Theme) -> Line<'static> {
+    let Some(marker) = line.chars().next() else {
+        return Line::default();
+    };
+    if marker == '@' || line.starts_with("+++") || line.starts_with("---") {
+        let style = match marker {
+            '@' => Style::default().fg(theme.palette.accent),
+            _ => Style::default(),
+        };
+        return Line::from(Span::styled(line.to_string(), style));
+    }
+    if !matches!(marker, '+' | '-' | ' ') {
+        return Line::from(line.to_string());
+    }
+    let palette = theme.palette;
+    let tint = match marker {
+        '+' => Some(palette.diff_block(true)).filter(|tint| *tint != ratatui::style::Color::Reset),
+        '-' => Some(palette.diff_block(false)).filter(|tint| *tint != ratatui::style::Color::Reset),
+        _ => None,
+    };
+    let band = match tint {
+        Some(tint) => Style::new().bg(tint),
+        None => Style::new(),
+    };
+    let mut spans = vec![Span::styled(
+        marker.to_string(),
+        Style::new()
+            .fg(match marker {
+                '+' => palette.diff_added,
+                '-' => palette.diff_removed,
+                _ => palette.text_muted,
+            })
+            .patch(band),
+    )];
+    spans.extend(
+        highlighter
+            .line(&line[marker.len_utf8()..])
+            .into_iter()
+            .map(|span| span.patch_style(band)),
+    );
+    let mut painted = Line::from(spans);
+    if let Some(tint) = tint {
+        painted.style = Style::new().bg(tint);
+    }
+    painted
+}
+
+/// The extension whose scanner colours the file's code.
+fn extension(path: &str) -> &str {
+    path.rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -398,6 +445,38 @@ mod tests {
         assert_eq!(state.branch.as_deref(), Some("main"));
         assert_eq!(state.files.len(), 2);
         assert_eq!(state.files[1].original_path.as_deref(), Some("src/old.rs"));
+    }
+
+    #[test]
+    fn a_diff_row_is_painted_by_its_marker_and_the_files_language() {
+        // The changes view is the other place a diff is read, and it used to
+        // paint the marker only: the code inside stayed one flat colour while
+        // the transcript's rows carried the grammar's hues. One renderer means
+        // both read the same way.
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette: crate::theme::builtin(
+                crate::theme::DEFAULT_THEME,
+                crate::theme::ThemeMode::Dark,
+            )
+            .expect("theme"),
+        };
+        let mut highlighter = Highlighter::new("rs", theme.palette);
+        let added = diff_line("+let value = 1;", &mut highlighter, &theme);
+        assert_eq!(added.style.bg, Some(theme.palette.diff_block(true)));
+        let keyword = added
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "let")
+            .expect("the keyword is its own span");
+        assert_eq!(keyword.style.fg, Some(theme.palette.syntax.keyword));
+
+        let removed = diff_line("-let value = 1;", &mut highlighter, &theme);
+        assert_eq!(removed.style.bg, Some(theme.palette.diff_block(false)));
+
+        let header = diff_line("+++ b/src/lib.rs", &mut highlighter, &theme);
+        assert_eq!(header.style.bg, None);
+        assert_eq!(header.spans[0].content.as_ref(), "+++ b/src/lib.rs");
     }
 
     #[test]

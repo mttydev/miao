@@ -194,7 +194,7 @@ const defaultSettings: Settings = {
     showReasoningSummaries: false,
     showTurnDiffs: false,
     shellToolPartsExpanded: false,
-    editToolPartsExpanded: false,
+    editToolPartsExpanded: true,
     showCustomAgents: false,
     mobileTitlebarPosition: "top",
   },
