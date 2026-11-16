@@ -11,6 +11,16 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.78] - 2026-11-16
+
+### Added
+- **engine**: file-state checkpoints for the edit pipeline (#3085) (`d01658ce8a`)
+- **engine**: session-persistent memory store (#3084) (`bd25d93aa3`)
+- **tui**: the Session dialog reads as a one-screen agent view (#3082) (`191556545b`)
+
+### Fixed
+- **engine**: key a loop note by what it says, not just the todo list (#3083) (`b5fc5ef97e`)
+
 ## [0.3.77] - 2026-11-15
 
 ### Fixed
