@@ -470,7 +470,7 @@ final class AppModel {
         guard !accountBusy else { return }
         accountBusy = true; accountEpoch += 1
         notificationOpenTask?.cancel()
-        notificationHostID = nil; notificationDestination = nil
+        notificationHostID = nil; notificationDestination = nil; notificationOpening = false
         accountIdentityID = nil
         accountSignedIn = false; discoveredHosts = []
         await clearEnrollment()
