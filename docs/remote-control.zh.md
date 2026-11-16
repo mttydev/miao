@@ -100,6 +100,26 @@ Remote Control 让你从另一台设备操作正在运行的 miao 窗口。任�
 
 可用性以所安装的构建为准；源码中的界面改动可能尚未进入最新发布版，使用预览功能前请查看发布说明。
 
+## 从 `miao serve` 启动宿主
+
+常驻引擎也可以承载 Remote Control：`miao serve --remote-host <control.json>` 仍只绑定
+loopback，并把本次 serve 的 URL、token 和一次性 runtimeID 通过环境变量交给同目录的
+`miao-remote`；serve 退出时一并回收宿主进程。`/remote-control` 仍然是 TUI 的入口，
+两者不共享 runtime 身份。
+
+1. 构建 sidecar：`bun run build:remote`，把 `dist/miao-remote` 放到 `miao` 同目录
+   （或用 `MIAO_REMOTE_HOST_BIN` 指路）。源码检出也可以设
+   `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts`，由 `bun run` 启动。
+2. 写 `control.json`：
+
+   ```json
+   {"hubURL":"https://hub.example","hostToken":"…","grantFile":"devices.json","sessionIDs":["ses_…"]}
+   ```
+
+   `grantFile` 相对配置文件解析。`sessionIDs` 是发布门：只有列出的会话会出现在设备列表里，
+   其余会话的方法一律拒绝。`accountID` 与 `allowLoopbackHTTP` 可选。
+3. 运行 `miao serve --remote-host ~/.config/miao/remote-control/control.json`。
+
 ## 在手机上整理会话
 
 侧栏顶部的搜索框把关键词交给电脑检索全部会话，而不只是手机当前加载的一页。

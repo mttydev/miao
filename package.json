@@ -11,6 +11,7 @@
     "dev:desktop-tauri": "bun --cwd apps/desktop tauri dev",
     "dev:web": "bun --cwd packages/app dev",
     "dev:storybook": "bun --cwd packages/storybook storybook",
+    "build:remote": "bun script/build-remote.ts",
     "lint": "oxlint",
     "typecheck": "bun turbo typecheck --concurrency=2",
     "upgrade-opentui": "bun run script/upgrade-opentui.ts",

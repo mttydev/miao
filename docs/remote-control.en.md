@@ -114,6 +114,29 @@ old chat commands and bot accounts do not carry over.
 Availability follows the installed build. Source-only UI changes may not yet
 be in the latest release; check the release notes before using preview features.
 
+## Serving from `miao serve`
+
+A resident engine can host Remote Control too: `miao serve --remote-host <control.json>`
+keeps the loopback bind and passes this serve process's URL, token and a fresh runtime
+identity to a sibling `miao-remote` through the environment, then stops it when serve
+exits. `/remote-control` remains the TUI entry point; the two do not share a runtime
+identity.
+
+1. Build the sidecar with `bun run build:remote` and put `dist/miao-remote` beside the
+   `miao` executable (or point `MIAO_REMOTE_HOST_BIN` at it). A source checkout can set
+   `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts` instead,
+   and the host runs under `bun run`.
+2. Write `control.json`:
+
+   ```json
+   {"hubURL":"https://hub.example","hostToken":"…","grantFile":"devices.json","sessionIDs":["ses_…"]}
+   ```
+
+   `grantFile` resolves beside the configuration. `sessionIDs` is the publication gate:
+   only those Sessions appear in the device list, and every other Session method is
+   refused. `accountID` and `allowLoopbackHTTP` are optional.
+3. Run `miao serve --remote-host ~/.config/miao/remote-control/control.json`.
+
 ## Organising Sessions from the phone
 
 The search field at the top of the sidebar sends its term to the computer, so it
