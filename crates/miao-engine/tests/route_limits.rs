@@ -40,8 +40,10 @@ async fn declared_capacity_is_exposed_for_capacity_checks() {
     let root = std::env::temp_dir().join("miao-route-limits-declared");
     std::fs::create_dir_all(&root).unwrap();
     let (_provider, limits) = load_limits(&root, true).await;
-    assert_eq!(limits.context_limit_for("fixture-model"), Some(128_000));
-    assert_eq!(limits.context_limit_for("unknown-model"), None);
+    let declared = limits.limit_for("fixture-model").unwrap();
+    assert_eq!(declared.context, Some(128_000));
+    assert_eq!(declared.output, Some(8_192));
+    assert_eq!(limits.limit_for("unknown-model"), None);
 }
 
 #[tokio::test]
@@ -49,5 +51,5 @@ async fn undeclared_capacity_stays_unknown() {
     let root = std::env::temp_dir().join("miao-route-limits-undeclared");
     std::fs::create_dir_all(&root).unwrap();
     let (_provider, limits) = load_limits(&root, false).await;
-    assert_eq!(limits.context_limit_for("fixture-model"), None);
+    assert_eq!(limits.limit_for("fixture-model"), None);
 }

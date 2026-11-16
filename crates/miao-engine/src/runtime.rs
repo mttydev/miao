@@ -5,6 +5,7 @@ mod shell;
 use crate::{
     approval::{now_ms, Approval, Response},
     context_trigger::{self, ContextLimits},
+    model_routes::Limit,
     permission::{input_digest, Config, Decision, Mode, Policy},
     protocol::{
         Admission, Attachment, Delivery, Error, Input, ModelRequest, PeerReceipt, PeerWake,
@@ -403,9 +404,45 @@ fn ceiling_limits(limits: ContextLimits, declared_output: Option<u64>) -> Contex
     limits
 }
 
+/// The input ceiling a route declares for one model, or `None` when the route
+/// states no usable window. Zero means "not stated", never a window: a zero
+/// threshold makes every settled turn look like it crossed the line.
+fn declared_ceiling(limit: Option<Limit>) -> Option<u64> {
+    let limit = limit?;
+    let window = limit.context.filter(|window| *window > 0)?;
+    Some(input_ceiling(window, limit.output))
+}
+
+/// The one place a Session's effective window is decided.
+///
+/// The request bound, the compaction trigger, the painted percentage and the
+/// summarizer's own budget all call this, so they cannot disagree about what
+/// fits. `configured` is the operator's override, `declared` is the route for
+/// the model that will answer, and `learned` is a window an endpoint stated
+/// when it refused a request. The result is always the input a turn can send,
+/// never the model's full window: a trigger armed above the request ceiling
+/// stays idle until the endpoint refuses the history.
+fn effective_limits(
+    configured: Option<ContextLimits>,
+    declared: Option<Limit>,
+    learned: Option<ContextLimits>,
+) -> Option<ContextLimits> {
+    resolve_limits(
+        configured,
+        declared.and_then(|limit| limit.context),
+        learned,
+    )
+    .map(|limits| ceiling_limits(limits, declared.and_then(|limit| limit.output)))
+}
+
 #[cfg(test)]
 mod ceiling_tests {
-    use super::{ceiling_limits, window_limits};
+    use super::{declared_ceiling, effective_limits, input_ceiling, window_limits};
+    use crate::model_routes::Limit;
+
+    fn route(context: Option<u64>, output: Option<u64>) -> Option<Limit> {
+        Some(Limit { context, output })
+    }
 
     /// The trigger, the request bound and the painted percentage plan against
     /// one number: the input a turn can actually send. This path used to keep
@@ -414,21 +451,73 @@ mod ceiling_tests {
     /// at `under_threshold` until the endpoint refused it.
     #[test]
     fn the_trigger_plans_against_the_input_ceiling() {
-        let declared = ceiling_limits(window_limits(1_048_576), Some(393_216));
-        assert_eq!(declared.window, 655_360);
-        assert_eq!(declared.budget().threshold(), 576_716);
-        // The raw window would have armed at 922,746, which no request can
-        // reach: that gap is the bug this pins.
-        assert_eq!(window_limits(1_048_576).budget().threshold(), 922_746);
+        let limits = effective_limits(None, route(Some(1_048_576), Some(393_216)), None).unwrap();
+        assert_eq!(limits.window, 655_360);
+        assert_eq!(limits.budget().threshold(), 576_716);
     }
 
     /// A route that declares no output capacity is not unlimited: the quarter
     /// reserve still applies, so the trigger cannot arm past the ceiling.
     #[test]
     fn an_undeclared_capacity_still_leaves_the_trigger_below_the_window() {
-        let limits = ceiling_limits(window_limits(1_000_000), None);
+        let limits = effective_limits(None, route(Some(1_000_000), None), None).unwrap();
         assert_eq!(limits.window, 750_000);
         assert_eq!(limits.budget().threshold(), 660_000);
+    }
+
+    /// The trigger must stay below the request ceiling on every real shape,
+    /// including the one where output is a large fraction of the window.
+    #[test]
+    fn a_large_output_reserve_keeps_the_trigger_reachable() {
+        let limits = effective_limits(None, route(Some(200_000), Some(64_000)), None).unwrap();
+        assert_eq!(limits.window, 136_000);
+        assert_eq!(limits.budget().threshold(), 119_680);
+        assert!(limits.budget().threshold() < limits.window);
+    }
+
+    /// A declared zero states nothing. Reading it as a window armed a zero
+    /// threshold, which compacted on every settled turn; the learned or catalog
+    /// window has to win instead.
+    #[test]
+    fn a_declared_zero_window_is_not_a_window() {
+        assert_eq!(declared_ceiling(route(Some(0), None)), None);
+        let limits = effective_limits(
+            None,
+            route(Some(0), Some(8_192)),
+            Some(window_limits(90_000)),
+        )
+        .unwrap();
+        // The zero context states no window, but the route's output capacity
+        // is still real for this model, so the learned window keeps that
+        // reserve.
+        assert_eq!(limits.window, input_ceiling(90_000, Some(8_192)));
+        assert!(limits.budget().threshold() > 0);
+    }
+
+    /// The operator's override still leads, but it is reduced to the input
+    /// ceiling too: its `window` is the model's window, not a raw send budget.
+    #[test]
+    fn an_operator_window_is_reduced_to_the_input_ceiling() {
+        let limits = effective_limits(
+            Some(window_limits(200_000)),
+            route(Some(1_048_576), Some(393_216)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(limits.window, 100_000);
+    }
+
+    /// Folding runs on the same window as the threshold: a watermark beyond the
+    /// window would never be reached, so an operator ratio is clamped here too.
+    #[test]
+    fn a_fold_watermark_is_clamped_to_the_window() {
+        let mut limits = window_limits(100_000);
+        limits.fold_ratio = 2.0;
+        assert_eq!(limits.fold_threshold(), Some(100_000));
+        limits.fold_ratio = 0.5;
+        assert_eq!(limits.fold_threshold(), Some(50_000));
+        limits.fold_ratio = 0.0;
+        assert_eq!(limits.fold_threshold(), None);
     }
 }
 
@@ -461,14 +550,18 @@ fn window_limits(window: u64) -> ContextLimits {
 /// then a window an endpoint stated when it refused the history. The
 /// process-wide value leads because only an operator sets it; a declaration for
 /// one model must never be promoted into the process-wide one.
+///
+/// A zero declaration states nothing and falls through: treating it as a window
+/// armed a zero threshold, which compacted on every settled turn.
 fn resolve_limits(
     configured: Option<ContextLimits>,
     declared: Option<u64>,
     learned: Option<ContextLimits>,
 ) -> Option<ContextLimits> {
     configured
-        .or_else(|| declared.map(window_limits))
-        .or(learned)
+        .filter(|limits| limits.window > 0)
+        .or_else(|| declared.filter(|window| *window > 0).map(window_limits))
+        .or_else(|| learned.filter(|limits| limits.window > 0))
 }
 
 /// The model a turn is served by, for every decision keyed by model id: the
@@ -4049,14 +4142,14 @@ async fn execute(
             .route_limits
             .lock()
             .await
-            .context_limit_for(model.as_deref().unwrap_or_default());
+            .limit_for(model.as_deref().unwrap_or_default());
         // The endpoint counts input + requested output against the window: the
         // input budget is the window minus the route's declared output
         // capacity, or a request that fits the window alone still overflows
         // once the model's own output reservation is added (#2926 family).
-        // The same effective limits the compaction trigger plans against, so
-        // bounding and compaction cannot disagree about what fits. A window of
-        // zero states nothing and falls through to the next source.
+        // `effective_limits` owns that reduction, so bounding and compaction
+        // cannot disagree about what fits. A window of zero states nothing and
+        // falls through to the next source.
         let configured = inner
             .context
             .lock()
@@ -4065,7 +4158,9 @@ async fn execute(
             .filter(|limits| limits.window > 0);
         let refused_before = refusal_evidence(
             configured.is_some(),
-            declared,
+            declared
+                .and_then(|limit| limit.context)
+                .filter(|window| *window > 0),
             inner.refused_window_for(model.as_deref()).await,
         );
         let learned = inner.learned_limits(model.as_deref()).await;
@@ -4076,14 +4171,7 @@ async fn execute(
         // spends a billing allowance prints it beside the window's own figures, so
         // that tally cannot be read as context occupancy (#2870).
         let mut compaction_threshold = None;
-        let declared_reserve = inner
-            .route_limits
-            .lock()
-            .await
-            .output_for(model.as_deref().unwrap_or_default());
-        let bound = match resolve_limits(configured, declared, learned)
-            .map(|limits| ceiling_limits(limits, declared_reserve))
-        {
+        let bound = match effective_limits(configured, declared, learned) {
             Some(limits) => {
                 let counted = match inner.store.context_anchor(session).await? {
                     Some((counted, through)) => {
@@ -5477,21 +5565,13 @@ command: None,
             .route_limits
             .lock()
             .await
-            .context_limit_for(model.as_deref().unwrap_or_default());
+            .limit_for(model.as_deref().unwrap_or_default());
         let learned = inner.learned_limits(model.as_deref()).await;
         // The trigger plans against the input a turn can actually send, the
-        // same window the request bound and the painted percentage use. This
-        // path resolved the raw window: a 1M route then armed compaction at
-        // 880K while a request could only send 870K, so the Session was told
-        // `under_threshold` every settled turn and reached the wall with the
-        // trigger still idle.
-        let declared_reserve = inner
-            .route_limits
-            .lock()
-            .await
-            .output_for(model.as_deref().unwrap_or_default());
-        let limits = resolve_limits(configured, declared, learned)
-            .map(|limits| ceiling_limits(limits, declared_reserve));
+        // same window the request bound and the painted percentage use.
+        // `effective_limits` owns the reduction, so a route's raw window cannot
+        // arm the trigger above what a request can send.
+        let limits = effective_limits(configured, declared, learned);
         if limits.is_none() && closed_answer && requested.is_none() {
             // Nothing states this Session's window, so there is nothing to plan
             // against and automatic compaction cannot run for it. Name the model:
@@ -5545,19 +5625,25 @@ command: None,
             let (role_provider, resolution) =
                 crate::roles::resolve(&primary, bindings.binding("summarize"));
             // A binding whose model cannot hold the retention slice is checked
-            // against the host-declared capacity before the doomed request.
+            // against the host-declared capacity before the doomed request. The
+            // capacity is the summarizer's input ceiling, not its raw window:
+            // the endpoint counts the summary request's own output against the
+            // same window, so a slice sized to the raw window still overflows.
             let role_capacity = match &resolution {
                 crate::roles::Resolution::Bound { model } => {
-                    inner.route_limits.lock().await.context_limit_for(model)
+                    declared_ceiling(inner.route_limits.lock().await.limit_for(model))
                 }
                 _ => None,
             };
             // How much history one summarizer call may carry: the window the
             // summarizer itself plans against, converted from tokens to the
-            // engine's own three-characters-per-token estimate. A bound role
-            // model is the narrower of the two, so it decides when it is known.
+            // engine's own conservative one-character-per-token estimate. A
+            // bound role model is the narrower of the two, so it decides when it
+            // is known. The floor follows the window instead of a fixed 16K:
+            // a small bound model must not be asked to carry more text than its
+            // ceiling can take.
             let summarizer_window = role_capacity.unwrap_or(limits.window).max(1);
-            let segment_chars = (summarizer_window as usize).clamp(16_000, 4_000_000);
+            let segment_chars = (summarizer_window as usize).clamp(1_000, 4_000_000);
             if resolution != crate::roles::Resolution::Primary {
                 let _ = inner
                     .store
@@ -5695,8 +5781,7 @@ command: None,
                     budget: &limits.budget(),
                     per_pass: limits.per_pass,
                     segment_chars,
-                    fold_at: (limits.fold_ratio > 0.0)
-                        .then_some((limits.window as f64 * limits.fold_ratio) as u64),
+                    fold_at: limits.fold_threshold(),
                     cancel: cancel.clone(),
                     breaker: &mut breaker,
                     notify: &mut notify,

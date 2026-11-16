@@ -58,7 +58,7 @@ impl Budget {
         // trigger disagree with the request bound, which only ever uses the
         // window the endpoint or the host actually stated.
         match self.window {
-            Some(window) => {
+            Some(window) if window > 0 => {
                 // The product's explicit headroom is sized for a large window
                 // (trim protection, summary output and slack). Taken whole it can
                 // exceed a small window, and a threshold past the window is never
@@ -67,8 +67,14 @@ impl Budget {
                 // than half the window, so the trigger stays reachable — and a
                 // window that small still keeps room for the summary it writes.
                 let reserve = self.headroom.min(window / 2);
-                ((window as f64 * self.ratio) as u64).max(reserve)
+                // A ratio at or below one is the budget's own contract; a
+                // larger one would place the trigger past the ceiling and leave
+                // automatic compaction armed but unreachable. Clamp instead of
+                // trusting the configuration.
+                let ratio = self.ratio.clamp(0.0, 1.0);
+                ((window as f64 * ratio) as u64).max(reserve).min(window)
             }
+            Some(_) => 0,
             None => self.headroom,
         }
     }
@@ -80,8 +86,14 @@ impl Budget {
         // the history whole: requiring the measurement is what turned a missing
         // anchor into a permanent absence of compaction, so the Session grew to
         // the hard limit with nothing scheduled to shrink it.
+        let threshold = self.threshold();
+        // A zero threshold states no budget. Treating it as crossed would
+        // compact on every settled turn when a route declared `context: 0`.
+        if threshold == 0 {
+            return false;
+        }
         let known = context_tokens.unwrap_or(0);
-        known.saturating_add(pending_tokens) >= self.threshold()
+        known.saturating_add(pending_tokens) >= threshold
     }
 }
 
@@ -220,6 +232,17 @@ impl ContextLimits {
             ratio: self.ratio,
             headroom: self.headroom,
         }
+    }
+
+    /// The low watermark that starts a pass before the threshold, in tokens, or
+    /// `None` when folding is off. A watermark past the window would never be
+    /// reached, so a ratio above one is clamped here too.
+    pub fn fold_threshold(&self) -> Option<u64> {
+        if self.fold_ratio <= 0.0 || self.window == 0 {
+            return None;
+        }
+        let ratio = self.fold_ratio.clamp(0.0, 1.0);
+        Some(((self.window as f64 * ratio) as u64).min(self.window))
     }
 }
 
@@ -481,6 +504,7 @@ where
                 "context_tokens": context, "pending_tokens": pending_tokens,
                 "counted_tokens": measured,
                 "carried_prefix_tokens": carried,
+                "window": budget.window,
                 "threshold": budget.threshold(),
             }),
             total.saturating_mul(2) >= budget.threshold(),
@@ -1873,6 +1897,44 @@ mod tests {
             headroom: 50_000,
         };
         assert_eq!(budget.threshold(), 50_000);
+    }
+
+    /// Configuration is not trusted to be reachable arithmetic: a ratio above
+    /// one would arm the trigger past the window, where no request can take the
+    /// history, and automatic compaction would never fire.
+    #[test]
+    fn a_ratio_above_one_cannot_arm_the_trigger_past_the_window() {
+        let budget = Budget {
+            window: Some(100_000),
+            ratio: 2.0,
+            headroom: 10_000,
+        };
+        assert_eq!(budget.threshold(), 100_000);
+        let budget = Budget {
+            window: Some(100_000),
+            ratio: 1.0,
+            headroom: 10_000,
+        };
+        assert_eq!(budget.threshold(), 100_000);
+        let budget = Budget {
+            window: Some(100_000),
+            ratio: -0.5,
+            headroom: 10_000,
+        };
+        assert_eq!(budget.threshold(), 10_000, "the reserve is the floor");
+    }
+
+    /// `context: 0` means the route states no window. A zero threshold used to
+    /// read as "already crossed", compacting on every settled turn.
+    #[test]
+    fn a_zero_window_states_no_budget_instead_of_always_crossing() {
+        let budget = Budget {
+            window: Some(0),
+            ratio: 0.88,
+            headroom: 62_048,
+        };
+        assert_eq!(budget.threshold(), 0);
+        assert!(!budget.should_compact(Some(1_000_000), 0));
     }
 
     #[test]

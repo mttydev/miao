@@ -167,15 +167,12 @@ pub struct RouteLimits {
 }
 
 impl RouteLimits {
-    pub fn context_limit_for(&self, model: &str) -> Option<u64> {
-        self.limits.get(model).and_then(|limit| limit.context)
-    }
-
-    /// The route's declared output capacity: the endpoint counts input plus
-    /// requested output against the window, so the input budget has to
-    /// reserve this much or a fitting request still overflows.
-    pub fn output_for(&self, model: &str) -> Option<u64> {
-        self.limits.get(model).and_then(|limit| limit.output)
+    /// The capacity this route declares for one model, as one value. `context`
+    /// is the model's full window and `output` is what a request must leave
+    /// free; resolving the two separately let one consumer plan against the raw
+    /// window while another planned against the input ceiling.
+    pub fn limit_for(&self, model: &str) -> Option<Limit> {
+        self.limits.get(model).copied()
     }
 }
 
