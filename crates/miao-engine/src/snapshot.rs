@@ -14,6 +14,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Component, Path, PathBuf},
+    sync::mpsc,
     time::Duration,
 };
 
@@ -23,7 +24,11 @@ const MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 /// file's content equals the repo's committed content at that commit, which
 /// restores through git at any size.
 const GIT_PREFIX: &str = "git:";
-const GIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The HEAD probe answers within this budget; status and show calls share the
+/// budget a `vcs` status call spends, so a wedged filesystem cannot hold the
+/// database worker forever either way.
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn blob_dir(database: &Path, session: &str) -> PathBuf {
     database.with_extension("snapshots").join(session)
@@ -119,40 +124,54 @@ fn is_git_target(value: &str) -> bool {
 /// Run one bounded git query. `None` means git failed or ran long, which
 /// callers treat as "no git answer" rather than an error: snapshots must keep
 /// working in non-git workspaces and under a wedged git.
-fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    use std::sync::mpsc;
+fn git_bytes(root: &Path, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
     let (sender, receiver) = mpsc::channel();
     let root = root.to_owned();
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     std::thread::spawn(move || {
-        if let Ok(output) = std::process::Command::new("git")
+        let answer = match std::process::Command::new("git")
             .arg("-C")
             .arg(&root)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .output()
         {
-            let _ = sender.send((output.status.success(), output.stdout));
-        }
+            Ok(output) => (output.status.success(), output.stdout),
+            Err(_) => (false, Vec::new()),
+        };
+        let _ = sender.send(answer);
     });
-    let (success, stdout) = receiver.recv_timeout(GIT_TIMEOUT).ok()?;
+    let (success, stdout) = receiver.recv_timeout(timeout).ok()?;
     success.then_some(stdout)
 }
 
-/// Paths `git status --porcelain -z` reports as changed. A rename entry
-/// carries the original path in a second field, which is not clean either.
-fn porcelain_paths(bytes: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(bytes)
-        .split('\0')
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            if entry.len() > 3 && entry.as_bytes()[2] == b' ' {
-                entry[3..].to_owned()
-            } else {
-                entry.to_owned()
+/// Paths `git status --porcelain=v1 -z` reports as changed: exactly the paths
+/// whose index or worktree bytes differ from HEAD. A record is `XY path` with
+/// ASCII status columns; a staged rename or copy carries the original path as
+/// the next NUL field, which differs from HEAD too.
+fn porcelain_paths(bytes: &[u8]) -> std::collections::HashSet<String> {
+    let mut changed = std::collections::HashSet::new();
+    let mut records = bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        let Ok(record) = std::str::from_utf8(record) else {
+            continue;
+        };
+        // `get` refuses a slice boundary that would cut a character in half.
+        let (Some(kind), Some(path)) = (record.get(..2), record.get(3..)) else {
+            continue;
+        };
+        changed.insert(path.to_owned());
+        if kind.contains('R') || kind.contains('C') {
+            if let Some(original) = records.next() {
+                if let Ok(original) = std::str::from_utf8(original) {
+                    changed.insert(original.to_owned());
+                }
             }
-        })
-        .collect()
+        }
+    }
+    changed
 }
 
 /// Tracked paths whose working-tree content still equals HEAD: absent from
@@ -160,18 +179,38 @@ fn porcelain_paths(bytes: &[u8]) -> Vec<String> {
 /// too but not tracked, so the `ls-files` intersection is what makes the
 /// `git:` reference safe.
 fn clean_tracked(root: &Path, paths: &[String]) -> std::collections::HashSet<String> {
-    let path_args: Vec<&str> = paths.iter().map(String::as_str).collect();
-    let mut ls = vec!["ls-files", "-z", "--"];
-    ls.extend(path_args.iter().copied());
+    // A leading `:` would read as pathspec magic, so every touched name
+    // travels as literal; the byte-exact match a glob-shaped name still gets
+    // is then the only way it can match at all.
+    let path_args: Vec<String> = paths
+        .iter()
+        .map(|path| format!(":(literal){path}"))
+        .collect();
+    let mut ls = vec!["ls-files", "-z", "--full-name", "--"];
+    ls.extend(path_args.iter().map(String::as_str));
     let mut status = vec!["status", "--porcelain=v1", "-z", "--"];
-    status.extend(path_args.iter().copied());
-    let (Some(tracked), Some(changed)) = (git_bytes(root, &ls), git_bytes(root, &status)) else {
+    status.extend(path_args.iter().map(String::as_str));
+    let (Some(tracked), Some(changed)) = (
+        git_bytes(root, &ls, GIT_TIMEOUT),
+        git_bytes(root, &status, GIT_TIMEOUT),
+    ) else {
         return std::collections::HashSet::new();
     };
-    let changed: std::collections::HashSet<String> =
-        porcelain_paths(&changed).into_iter().collect();
+    // Both answers name paths from the repository root (status always does;
+    // ls-files with --full-name), while the touched keys are
+    // workspace-relative. The workspace's own prefix inside the repo moves
+    // one frame onto the other, and a name from outside the workspace cannot
+    // match a touched key.
+    let prefix = git_bytes(root, &["rev-parse", "--show-prefix"], GIT_PROBE_TIMEOUT)
+        .map(|bytes| String::from_utf8_lossy(bytes.trim_ascii_end()).into_owned())
+        .unwrap_or_default();
+    let changed: std::collections::HashSet<String> = porcelain_paths(&changed)
+        .into_iter()
+        .filter_map(|path| path.strip_prefix(prefix.as_str()).map(str::to_owned))
+        .collect();
     String::from_utf8_lossy(&tracked)
         .split('\0')
+        .filter_map(|path| path.strip_prefix(prefix.as_str()))
         .filter(|path| !path.is_empty() && !changed.contains(*path))
         .map(str::to_owned)
         .collect()
@@ -181,12 +220,16 @@ fn clean_tracked(root: &Path, paths: &[String]) -> std::collections::HashSet<Str
 /// reference fails on the same level as a lost blob: the snapshot says restore
 /// and the data must exist.
 fn git_show(root: &Path, value: &str, path: &str) -> Result<Vec<u8>, Error> {
-    let sha = &value[GIT_PREFIX.len()..];
+    // Callers may pass the manifest value or an already-stripped reference,
+    // so stripping the prefix is idempotent.
+    let sha = value.strip_prefix(GIT_PREFIX).unwrap_or(value);
     if !(7..=64).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(Error::Invalid("snapshot git reference is malformed".into()));
     }
-    let spec = format!("{sha}:{path}");
-    git_bytes(root, &["show", &spec])
+    // The `./` form resolves against the workspace root, which may sit in a
+    // subdirectory of the repository; a bare path would read from the root.
+    let spec = format!("{sha}:./{path}");
+    git_bytes(root, &["show", &spec], GIT_TIMEOUT)
         .ok_or_else(|| Error::Invalid("file snapshot data is no longer available".into()))
 }
 
@@ -338,7 +381,11 @@ impl Store {
             if touched.is_empty() {
                 return Ok(json!({"available":false,"reason":"no-touches"}));
             }
-            let head = git_bytes(Path::new(&root), &["rev-parse", "--verify", "HEAD"])
+            let head = git_bytes(
+                Path::new(&root),
+                &["rev-parse", "--verify", "HEAD"],
+                GIT_PROBE_TIMEOUT,
+            )
                 .map(|sha| String::from_utf8_lossy(sha.trim_ascii_end()).into_owned());
             let clean = match &head {
                 Some(_) => clean_tracked(Path::new(&root), &touched),
@@ -360,7 +407,13 @@ impl Store {
                 let Some(relative) = valid_path(&path) else {
                     continue;
                 };
-                if clean.contains(&path) {
+                let absolute = Path::new(&root).join(&relative);
+                // A symlink stores through its target in the blob branch,
+                // while `git show` would answer the link itself, so a link
+                // keeps the byte-for-byte branch even when git calls it clean.
+                if clean.contains(&path)
+                    && fs::symlink_metadata(&absolute).is_ok_and(|metadata| metadata.is_file())
+                {
                     manifest.insert(
                         path,
                         Some(format!(
@@ -370,7 +423,6 @@ impl Store {
                     );
                     continue;
                 }
-                let absolute = Path::new(&root).join(&relative);
                 match fs::metadata(&absolute) {
                     Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_BLOB_BYTES => {
                         let bytes = fs::read(&absolute)?;
@@ -542,10 +594,15 @@ fn preimage(
         let absolute = root.join(relative);
         let current = fs::read(&absolute).ok();
         let value = match target {
-            // A path whose working-tree content still equals the committed
-            // state keeps its git reference at any size.
+            // A pre-image stays self-contained wherever a blob can hold it.
+            // Only content that still equals the committed state and is too
+            // large to blob keeps the git reference: recording `None` there
+            // would make a later clear delete the file.
             Some(value)
                 if value.starts_with(GIT_PREFIX)
+                    && current
+                        .as_deref()
+                        .is_some_and(|bytes| bytes.len() as u64 > MAX_BLOB_BYTES)
                     && current.as_deref() == git_show(root, value, path).ok().as_deref() =>
             {
                 Some(value.clone())
@@ -826,17 +883,26 @@ fn workspace_plan(
         let Some(relative) = valid_path(path) else {
             continue;
         };
-        let disk = disk_hash(&root.join(relative));
-        let expected = match &target {
-            // A git reference compares against the committed content, so a
-            // clean tracked file needs neither restore nor conflict. An
-            // unavailable git answer refuses instead of assuming.
-            Some(value) if value.starts_with(GIT_PREFIX) => git_show(root, value, path)
-                .ok()
-                .map(|bytes| crate::permission::digest(&bytes)),
-            _ => target.clone(),
+        // An unreadable or oversized file has no comparable digest, so it
+        // reads as missing, which can only make the plan more cautious.
+        let bytes = fs::read(root.join(relative)).ok();
+        let disk = bytes
+            .as_deref()
+            .filter(|bytes| bytes.len() as u64 <= MAX_BLOB_BYTES)
+            .map(crate::permission::digest);
+        let committed = |value: Option<&str>| -> Result<Option<Vec<u8>>, Error> {
+            value
+                .and_then(|value| value.strip_prefix(GIT_PREFIX))
+                .map(|sha| git_show(root, sha, path))
+                .transpose()
         };
-        if disk == expected {
+        let matches_target = match committed(target.as_deref())? {
+            // A git reference compares against the committed content, so a
+            // clean tracked file needs neither restore nor conflict.
+            Some(expected) => bytes.as_deref() == Some(expected.as_slice()),
+            None => disk.as_deref() == target.as_deref(),
+        };
+        if matches_target {
             continue;
         }
         let action = match target.is_some() {
@@ -853,7 +919,17 @@ fn workspace_plan(
         // Anything else is an outside edit. A path with no record at all has no
         // baseline to compare against, so it is not evidence of an outside
         // edit: an imported manifest is the case that reaches this.
-        if recorded.get(path).is_some_and(|newest| newest != &disk) {
+        // The conflict test is the newest record against the disk bytes, not
+        // against the restore target: a git reference holds what the Session
+        // last recorded exactly when the committed content is on disk.
+        let outside = match recorded.get(path) {
+            None => false,
+            Some(newest) => match committed(newest.as_deref())? {
+                Some(expected) => bytes.as_deref() != Some(expected.as_slice()),
+                None => newest != &disk,
+            },
+        };
+        if outside {
             conflicts.push(json!({
                 "path": path,
                 "action": action,
@@ -884,14 +960,6 @@ fn recorded_hashes(
         }
     }
     Ok(newest)
-}
-
-/// The content hash of a workspace path, mirroring how capture hashes a blob.
-/// An unreadable or oversized file has no comparable content, so it reports
-/// `None` and reads as missing, which can only make the preview more cautious.
-fn disk_hash(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    (bytes.len() as u64 <= MAX_BLOB_BYTES).then(|| crate::permission::digest(&bytes))
 }
 
 type AssembledImport = (String, BTreeMap<String, Option<String>>);
