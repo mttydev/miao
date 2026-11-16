@@ -65,6 +65,41 @@ request; the data plane provides no permission to save permanent tool rules.
 An interrupt must include the observed execution identity in its method
 payload. A read grant does not permit writes, even to a visible session.
 
+## Capability advertisement
+
+`capabilities` is the authoritative feature list. A host that omits a feature
+is treated as not supporting it; clients must hide the entry point instead of
+sending an unsupported payload. Unknown fields are ignored for forward
+compatibility.
+
+Optional fields:
+
+- `features`: array of strings. `attachments` and `commands` are currently
+  defined; hosts may add names later.
+- `commands`: array of strings or `{name, description}` objects.
+- `maxPromptCharacters`: maximum prompt text length.
+- `maxAttachmentBytes`: maximum total encoded attachment size accepted by the
+  host.
+
+### Prompt attachments
+
+When `attachments` is advertised, `session.prompt` may include:
+
+```json
+{
+  "text": "看看这个报错",
+  "delivery": "steer",
+  "attachments": [
+    { "type": "image", "name": "photo.jpg", "mimeType": "image/jpeg", "data": "<base64>" }
+  ]
+}
+```
+
+The host must enforce its advertised limit before admission, persist the
+attachment with the admitted input, and never put attachment material in
+notifications or logs. Clients omit the field when the capability is absent.
+Hosts that do not advertise it keep the text-only contract.
+
 ## Responses and chunks
 
 Success: `{version: 1, type: "result", requestID, data}`.

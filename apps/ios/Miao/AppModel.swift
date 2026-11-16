@@ -39,6 +39,10 @@ final class AppModel {
     var notificationsRevocationPending = false
     var notificationHostID: UUID?
     var notificationDestination: NotificationDestination?
+    var notificationOpening = false
+    /// Local-only quieting: the phone stops counting this Session in its badge
+    /// and list attention, while the host's own push policy remains untouched.
+    var mutedSessions: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "miao.mutedSessions") ?? [])
     private var notificationOpenTask: Task<Void, Never>?
     private var notificationEpoch = 0
     private var pushTask: Task<Void, Never>?
@@ -72,7 +76,9 @@ final class AppModel {
     func openNotification(_ signalID: String) {
         notificationOpenTask?.cancel()
         notificationDestination = nil
+        notificationOpening = true
         notificationOpenTask = Task {
+            defer { if !Task.isCancelled { notificationOpening = false } }
             await load()
             guard !Task.isCancelled, accountSignedIn, let account else { return }
             let epoch = accountEpoch
@@ -118,7 +124,7 @@ final class AppModel {
                 notificationsError = "此连接暂不支持通知"; return
             }
             guard epoch == accountEpoch, accountSignedIn else { return }
-            let allowed = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            let allowed = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
             guard epoch == accountEpoch, accountSignedIn else { return }
             guard allowed else { notificationsError = "请在系统设置中允许 miao 通知"; return }
             notificationsWanted = true
@@ -134,6 +140,7 @@ final class AppModel {
         UserDefaults.standard.set(false, forKey: notificationPreference)
         UIApplication.shared.unregisterForRemoteNotifications()
         AppNotifications.shared.forget()
+        try? await UNUserNotificationCenter.current().setBadgeCount(0)
         let epoch = accountEpoch
         await pushTask?.value
         defer { notificationsBusy = false }
@@ -185,6 +192,30 @@ final class AppModel {
         notificationEpoch += 1
         notificationsRegistered = false
         if notificationsWanted { notificationsError = "通知暂不可用，请稍后重试" }
+    }
+
+    /// The icon badge is the only attention signal that survives the app being
+    /// closed, so it follows the same aggregate the inbox shows.
+    var totalPending: Int {
+        clients.values.reduce(0) { total, client in
+            total + client.inbox.reduce(0) { sum, entry in
+                mutedSessions.contains(entry.sessionID) ? sum : sum + entry.count
+            }
+        }
+    }
+
+    func isMuted(_ sessionID: String) -> Bool { mutedSessions.contains(sessionID) }
+
+    func toggleMute(_ sessionID: String) async {
+        if mutedSessions.contains(sessionID) { mutedSessions.remove(sessionID) }
+        else { mutedSessions.insert(sessionID) }
+        UserDefaults.standard.set(Array(mutedSessions), forKey: "miao.mutedSessions")
+        await refreshBadge()
+    }
+
+    func refreshBadge() async {
+        guard notificationsWanted else { return }
+        try? await UNUserNotificationCenter.current().setBadgeCount(totalPending)
     }
 
     private func restoreNotifications() async {
@@ -439,13 +470,14 @@ final class AppModel {
         guard !accountBusy else { return }
         accountBusy = true; accountEpoch += 1
         notificationOpenTask?.cancel()
-        notificationHostID = nil; notificationDestination = nil
+        notificationHostID = nil; notificationDestination = nil; notificationOpening = false
         accountIdentityID = nil
         accountSignedIn = false; discoveredHosts = []
         await clearEnrollment()
         notificationEpoch += 1; notificationsRegistered = false
         UIApplication.shared.unregisterForRemoteNotifications()
         AppNotifications.shared.forget()
+        try? await UNUserNotificationCenter.current().setBadgeCount(0)
         await pushTask?.value
         let pendingPair = pairTask
         pendingPair?.cancel(); await pendingPair?.value
@@ -721,11 +753,18 @@ struct SessionSummary: Identifiable {
     /// Present in `time` only while archived; the wire omits the key otherwise.
     let archived: Bool
     let pinned: Bool
+    /// `Session.Info.time` always carries both; the list uses updated for the
+    /// "last active" line and for deciding what deserves attention first.
+    let updated: Date?
+    let created: Date?
     init?(_ value: JSONValue) {
         guard let id = value["id"]?.string, let title = value["title"]?.string, let projectID = value["projectID"]?.string else { return nil }
         self.id = id; self.title = title; self.projectID = projectID
-        archived = value["time"]?["archived"] != nil
-        pinned = value["time"]?["pinned"] != nil
+        let time = value["time"]
+        archived = time?["archived"] != nil
+        pinned = time?["pinned"] != nil
+        updated = time?["updated"]?.number.map { Date(timeIntervalSince1970: $0 / 1000) }
+        created = time?["created"]?.number.map { Date(timeIntervalSince1970: $0 / 1000) }
     }
 }
 
@@ -742,6 +781,7 @@ final class HostClient {
     let scope: AuthorizationScope
     let store: CheckpointStore
     var state: RemoteConnectionState = .quiescent
+    var capabilities = HostCapabilities.legacy
     var projects: [JSONValue] = []
     var lists: [String: [SessionSummary]] = [:]
     var next: [String: String] = [:]
@@ -755,6 +795,7 @@ final class HostClient {
     var inbox: [InboxEntry] = []
     var inboxError: String?
     var sendingTargets = Set<String>()
+    var loadingMore = Set<String>()
     private(set) var runtimeID: String
     private var connection: HubConnection?
     private let account: HubAccount?
@@ -778,6 +819,12 @@ final class HostClient {
         }
     }
     func sending(_ sessionID: String) -> Bool { sendingTargets.contains(sessionID) }
+
+    func pendingCount(_ sessionID: String) -> Int {
+        inbox.first(where: { $0.sessionID == sessionID })?.count ?? 0
+    }
+
+    var totalPending: Int { inbox.reduce(0) { $0 + $1.count } }
 
     init(record: AuthorizedHost, identity: DeviceIdentity, directory: URL, account: HubAccount? = nil) throws {
         self.record = record; self.identity = identity; self.account = account
@@ -836,6 +883,7 @@ final class HostClient {
 
     private func synchronize(_ connection: HubConnection) async throws {
         guard !closed else { throw CancellationError() }
+        capabilities = await connection.capabilities
         writes += 1
         defer { writes -= 1 }
         // Query uncertain operations with their original IDs and payloads. Never resend them here.
@@ -941,20 +989,23 @@ final class HostClient {
     }
 
     @discardableResult
-    func mutate(_ method: RemoteMethod, kind: OperationKind, target: OperationTarget, payload: JSONValue) async throws -> JSONValue {
+    func mutate(_ method: RemoteMethod, kind: OperationKind, target: OperationTarget, payload: JSONValue,
+                operationID: UUID? = nil, retrying: Bool = false) async throws -> JSONValue {
         let key = target.sessionID ?? "project:" + (target.projectID ?? "")
         guard ready, !sendingTargets.contains(key), let connection else { throw RemoteRPCError.disconnected }
         writes += 1; sendingTargets.insert(key)
         defer { writes -= 1; sendingTargets.remove(key) }
-        let operation = PendingOperation(scope: scope, target: target, kind: kind, payload: try JSONEncoder().encode(payload))
-        try await store.prepare(operation)
+        let operation = PendingOperation(id: operationID ?? UUID(), scope: scope, target: target,
+                                         kind: kind, payload: try JSONEncoder().encode(payload))
+        let prepared = try await store.prepare(operation)
         if closed { throw CancellationError() }
-        try await store.markSending(operation.id)
+        if retrying { try await store.markRetrying(prepared.id) }
+        else { try await store.markSending(prepared.id) }
         do {
             let result = try await connection.request(method, sessionID: target.sessionID, projectID: target.projectID,
-                                                      operationID: operation.id, payload: payload)
+                                                      operationID: prepared.id, payload: payload)
             guard let status = operationStatus(result["status"]?.string) else { throw RemoteConnectionError.protocolIncompatible }
-            try await store.resolve(operation.id, status: status, result: JSONEncoder().encode(result))
+            try await store.resolve(prepared.id, status: status, result: JSONEncoder().encode(result))
             operations = try await store.snapshot().operations
             if status == .rejected || status == .outcomeUnknown { throw RemoteRPCError.rejected(result["code"]?.string ?? "uncertain") }
             return result
@@ -963,6 +1014,20 @@ final class HostClient {
             throw error
         }
     }
+}
+
+/// A prompt the phone has already shown but the host has not yet confirmed.
+/// It is deliberately short-lived: the durable timeline replaces it once the
+/// admission event arrives.
+struct OutboxPrompt: Identifiable, Equatable {
+    enum Status: Equatable { case sending, failed, uncertain }
+    let id: UUID
+    let text: String
+    let queued: Bool
+    let attachments: [ComposerAttachment]
+    var status: Status
+    var detail: String?
+    var retryable: Bool
 }
 
 @MainActor @Observable
@@ -982,6 +1047,7 @@ final class RemoteSession {
     var error: String?
     var loading = true
     var diff: JSONValue?
+    var outbox: [OutboxPrompt] = []
     private var viewers = 0
     private var poll: Task<Void, Never>?
     private var draftTail: Task<Void, Never>?
@@ -1161,11 +1227,102 @@ final class RemoteSession {
         await draftTail?.value
     }
 
-    func send(queue: Bool) async {
-        guard client != nil, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    func send(queue: Bool, attachments: [ComposerAttachment] = []) async {
+        guard client != nil,
+              !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+        else { return }
         let text = draft
-        let accepted = await command(.sessionPrompt, kind: .prompt, payload: .object(["text": .string(text), "delivery": .string(queue ? "queue" : "steer")]))
-        if accepted && draft == text { edit("") }
+        let item = OutboxPrompt(id: UUID(), text: text, queued: queue, attachments: attachments, status: .sending,
+                                detail: nil, retryable: false)
+        outbox.append(item)
+        // The bubble is the acknowledgement; keeping the draft beside it would
+        // make one message look like two.
+        if draft == text { edit("") }
+        await submit(item, retrying: false)
+    }
+
+    func retry(_ item: OutboxPrompt) async {
+        guard item.retryable, let index = outbox.firstIndex(where: { $0.id == item.id }) else { return }
+        outbox[index].status = .sending
+        outbox[index].detail = nil
+        error = nil
+        await submit(item, retrying: true)
+    }
+
+    /// An uncertain admission is reconciled by operation id; it is never
+    /// retransmitted automatically because the host may already own it.
+    func reconcile(_ item: OutboxPrompt) async {
+        guard let client else { return }
+        await client.reconcileOperations()
+        if let operation = client.operations.first(where: { $0.id == item.id }),
+           [.accepted, .completed, .rejected, .expired].contains(operation.status) {
+            outbox.removeAll { $0.id == item.id }
+        }
+    }
+
+    func dismissOutbox(_ id: UUID) {
+        outbox.removeAll { $0.id == id }
+        if outbox.allSatisfy({ $0.status == .sending }) { error = nil }
+    }
+
+    private func submit(_ item: OutboxPrompt, retrying: Bool) async {
+        guard let client else { return }
+        var payload: [String: JSONValue] = [
+            "text": .string(item.text),
+            "delivery": .string(item.queued ? "queue" : "steer"),
+        ]
+        if !item.attachments.isEmpty {
+            let encoded = item.attachments.reduce(0) { $0 + $1.data.base64EncodedString().utf8.count }
+            let limit = client.capabilities.maxAttachmentBytes ?? 96 * 1024
+            guard encoded <= limit else {
+                if let index = outbox.firstIndex(where: { $0.id == item.id }) {
+                    outbox[index].status = .failed
+                    outbox[index].retryable = false
+                    outbox[index].detail = "附件总大小超过当前连接上限"
+                    self.error = "附件总大小超过当前连接上限"
+                }
+                return
+            }
+            payload["attachments"] = .array(item.attachments.map { attachment in
+                .object([
+                    "type": .string("image"),
+                    "name": .string(attachment.name),
+                    "mimeType": .string(attachment.mimeType),
+                    "data": .string(attachment.data.base64EncodedString()),
+                ])
+            })
+        }
+        do {
+            _ = try await client.mutate(.sessionPrompt, kind: .prompt,
+                target: OperationTarget(session: address),
+                payload: .object(payload),
+                operationID: item.id, retrying: retrying)
+            outbox.removeAll { $0.id == item.id }
+            error = nil
+        } catch {
+            guard let index = outbox.firstIndex(where: { $0.id == item.id }) else { return }
+            let uncertain: Bool
+            let retryable: Bool
+            if case RemoteRPCError.rejected(let code) = error {
+                uncertain = code == "uncertain"
+                retryable = false
+            } else {
+                uncertain = false
+                retryable = true
+            }
+            outbox[index].status = uncertain ? .uncertain : .failed
+            outbox[index].retryable = retryable
+            outbox[index].detail = userMessage(error)
+            self.error = userMessage(error)
+        }
+    }
+
+    func refresh() async {
+        guard viewers > 0, client?.ready == true else { return }
+        let previous = poll
+        pause()
+        await previous?.value
+        resume()
     }
 
     @discardableResult

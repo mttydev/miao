@@ -41,6 +41,72 @@ public enum RemoteMethod: String, Codable, Sendable {
     case sessionArchive = "session.archive"
 }
 
+/// The host's advertised surface. Unknown fields are ignored so a newer host
+/// never breaks an older phone; absent fields mean the capability is absent.
+public struct HostCapabilities: Sendable, Equatable {
+    public struct Command: Sendable, Equatable, Identifiable {
+        public let name: String
+        public let description: String
+        public var id: String { name }
+    }
+
+    public let protocolVersion: Int
+    public let features: Set<String>
+    public let commands: [Command]
+    public let maxPromptCharacters: Int?
+    public let maxAttachmentBytes: Int?
+
+    public static let legacy = HostCapabilities(protocolVersion: 1, features: [],
+                                                commands: [], maxPromptCharacters: nil,
+                                                maxAttachmentBytes: nil)
+
+    public init(protocolVersion: Int, features: Set<String>, commands: [Command],
+                maxPromptCharacters: Int?, maxAttachmentBytes: Int?) {
+        self.protocolVersion = protocolVersion
+        self.features = features
+        self.commands = commands
+        self.maxPromptCharacters = maxPromptCharacters
+        self.maxAttachmentBytes = maxAttachmentBytes
+    }
+
+    public init(_ value: JSONValue) {
+        let object = value.object ?? [:]
+        protocolVersion = Int(object["protocol"]?.number ?? 1)
+        var advertised = Set((object["features"]?.array ?? []).compactMap(\.string))
+        advertised.formUnion((object["capabilities"]?.array ?? []).compactMap(\.string))
+        for (key, value) in object where value == .bool(true) { advertised.insert(key) }
+        features = advertised
+        commands = (object["commands"]?.array ?? []).compactMap { entry in
+            if let name = entry.string {
+                return Command(name: name, description: "")
+            }
+            guard let name = entry["name"]?.string, !name.isEmpty else { return nil }
+            return Command(name: name, description: entry["description"]?.string ?? "")
+        }
+        let limit = object["maxPromptCharacters"]?.number
+            ?? object["promptMaxCharacters"]?.number
+            ?? object["maxPrompt"]?.number
+        maxPromptCharacters = limit.map { Int($0) }.flatMap { $0 > 0 ? $0 : nil }
+        let attachmentLimit = object["maxAttachmentBytes"]?.number
+            ?? object["attachmentMaxBytes"]?.number
+        maxAttachmentBytes = attachmentLimit.map { Int($0) }.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    public func supports(_ feature: String) -> Bool { features.contains(feature) }
+    public var supportsAttachments: Bool {
+        supports("attachments") || supports("prompt.attachments")
+    }
+    public var supportsCommands: Bool {
+        !commands.isEmpty || supports("commands")
+    }
+    public var supportsFileSearch: Bool {
+        supports("file-search") || supports("file.search")
+    }
+    public var supportsSessionActivity: Bool {
+        supports("session-activity") || supports("session.activity")
+    }
+}
+
 public struct ApprovedHost: Codable, Sendable, Equatable, Identifiable {
     public let id: UUID
     public var label: String

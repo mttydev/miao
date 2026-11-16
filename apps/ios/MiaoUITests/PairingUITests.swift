@@ -430,9 +430,15 @@ final class PairingUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        XCTAssertTrue(app.tabBars.buttons["本机"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.tabBars.buttons["本机"].isSelected)
-        XCTAssertTrue(app.tabBars.buttons["电脑"].exists)
+        // The remote workbench is the default. This test still covers the
+        // standalone surfaces, so switch explicitly instead of assuming launch.
+        // iPadOS 26 presents the adaptable TabView outside a TabBar element;
+        // the buttons themselves are the same on both families.
+        let local = app.buttons["本机"].firstMatch
+        XCTAssertTrue(local.waitForExistence(timeout: 20))
+        local.tap()
+        XCTAssertTrue(local.isSelected)
+        XCTAssertTrue(app.buttons["电脑"].firstMatch.exists)
 
         // The drawer lists Sessions and can start a new one.
         app.buttons["localSessions"].tap()

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 import MiaoCore
 
 @MainActor
@@ -9,6 +10,11 @@ struct RemoteView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var sceneID = UUID()
     @State private var hostID: UUID?
+    /// Scene-scoped so a cold launch or a second iPad window returns to the
+    /// Session the reader was last in, not whichever list row is first.
+    @SceneStorage("miao.selectedHost") private var storedHost = ""
+    @SceneStorage("miao.selectedSession") private var storedSession = ""
+    @State private var sidebarAutoOpened = false
     @State private var pairing = false
     @State private var accountPresented = false
     @State private var providersHost: UUID?
@@ -21,6 +27,7 @@ struct RemoteView: View {
     @State private var notificationSession: NotificationDestination?
     @State private var sidebarVisible = false
     @State private var sessionID: String?
+    @State private var pendingDeepLink: DeepLinkTarget?
     @State private var creating = false
     @State private var forgetConfirmation = false
     @State private var hostToForget: AuthorizedHost?
@@ -28,6 +35,10 @@ struct RemoteView: View {
     var body: some View {
         layout
         .task {
+            if sizeClass == .regular, !sidebarAutoOpened {
+                sidebarAutoOpened = true
+                sidebarVisible = true
+            }
             model.scene(sceneID, phase: phase)
             await model.load()
             applyNotification()
@@ -36,10 +47,29 @@ struct RemoteView: View {
                 if model.accountSignedIn || AppTestConfiguration.allowLegacyTransport { pairing = true }
                 else { accountPresented = true }
             }
-            if hostID == nil { hostID = model.hosts.first?.id }
+            if hostID == nil {
+                if let restored = UUID(uuidString: storedHost),
+                   model.hosts.contains(where: { $0.id == restored }) {
+                    hostID = restored
+                } else {
+                    hostID = model.hosts.first?.id
+                }
+            }
+            if sessionID == nil, !storedSession.isEmpty { sessionID = storedSession }
+            consumeDeepLink()
             await attach()
         }
-        .onChange(of: hostID) { _, _ in Task { await attach() } }
+        .onChange(of: hostID) { _, value in
+            storedHost = value?.uuidString ?? ""
+            Task { await attach() }
+        }
+        .onChange(of: sessionID) { _, value in storedSession = value ?? "" }
+        .onChange(of: sizeClass) { _, value in
+            if value == .regular, !sidebarAutoOpened {
+                sidebarAutoOpened = true
+                sidebarVisible = true
+            }
+        }
         .onChange(of: model.notificationHostID) { _, value in
             applyNotification()
         }
@@ -62,6 +92,7 @@ struct RemoteView: View {
         .onChange(of: model.connectionEpoch) { _, _ in Task { await attach() } }
         .onChange(of: model.hosts.map(\.id)) { _, ids in
             if hostID == nil || !ids.contains(hostID!) { hostID = ids.first; sessionID = nil }
+            consumeDeepLink()
         }
         .onChange(of: phase) { _, value in
             if value == .active { applyNotification() }
@@ -79,8 +110,13 @@ struct RemoteView: View {
                     // so skip their per-project reloads while it stays closed.
                     if client.ready, sidebarVisible || cycle % 3 == 0 {
                         await client.refreshLists()
+                    }
+                }
+                if sidebarVisible || cycle % 3 == 0 {
+                    for client in model.clients.values where client.ready {
                         await client.loadInbox()
                     }
+                    await model.refreshBadge()
                 }
                 cycle += 1
                 do { try await Task.sleep(for: .seconds(10)) } catch { return }
@@ -92,16 +128,40 @@ struct RemoteView: View {
             Task { if let previous { await model.clients[previous]?.removeScene(sceneID) } }
         }
         .onOpenURL { url in
+            if let target = DeepLinkTarget(url: url) {
+                pendingDeepLink = target
+                consumeDeepLink()
+                return
+            }
+            // The OAuth callback is consumed by ASWebAuthenticationSession.
+            if url.host?.lowercased() == "auth" { return }
             invitation = url.absoluteString
             if model.accountSignedIn || AppTestConfiguration.allowLegacyTransport { pairing = true }
             else { accountPresented = true }
+        }
+        .overlay {
+            if model.notificationOpening {
+                ZStack {
+                    Color.black.opacity(0.15).ignoresSafeArea()
+                    ProgressView("正在打开通知…")
+                        .padding(20)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .accessibilityElement(children: .combine)
+            }
         }
         .sheet(isPresented: $accountPresented, onDismiss: {
             if !invitation.isEmpty, model.accountSignedIn { pairing = true }
         }) { HubAccountView(model: model) }
         .sheet(isPresented: $pairing, onDismiss: { invitation = "" }) { PairingView(model: model, initialURI: $invitation) }
         .sheet(isPresented: $creating) {
-            if let hostID, let client = model.clients[hostID] { CreateSessionView(client: client) }
+            if let hostID, let client = model.clients[hostID] {
+                CreateSessionView(client: client) { created in
+                    self.hostID = client.record.id
+                    sessionID = created
+                    withAnimation(.easeInOut(duration: 0.25)) { sidebarVisible = false }
+                }
+            }
         }
         .confirmationDialog("从这台设备移除电脑？", isPresented: $forgetConfirmation, titleVisibility: .visible, presenting: hostToForget) { record in
             Button("移除", role: .destructive) {
@@ -143,12 +203,10 @@ struct RemoteView: View {
                 if let hostID, let client = model.clients[hostID] {
                     sessionContent(client)
                         .onAppear {
-                            if sessionID == nil { sessionID = client.lists.values.flatMap({ $0 }).first?.id }
+                            ensureSelection(client)
                         }
                         .onChange(of: sessionCount(client)) { _, count in
-                            if sessionID == nil, count > 0, let first = client.lists.values.flatMap({ $0 }).first {
-                                sessionID = first.id
-                            }
+                            if count > 0 { ensureSelection(client) }
                         }
                 } else {
                     ContentUnavailableView {
@@ -168,7 +226,8 @@ struct RemoteView: View {
                         withAnimation(.easeInOut(duration: 0.25)) { sidebarVisible = true }
                     } label: {
                         Image(systemName: "line.3.horizontal")
-                    }.accessibilityLabel("会话侧栏").accessibilityIdentifier("sessionSidebar")
+                    }.keyboardShortcut("[", modifiers: .command)
+                        .accessibilityLabel("会话侧栏").accessibilityIdentifier("sessionSidebar")
                         .accessibilityValue(model.accountSignedIn
                             ? "已登录；电脑：\(model.hosts.count)；已连接：\(model.clients.values.filter { $0.ready }.count)；状态：\(model.error ?? model.accountError ?? "正常")"
                             : "未登录")
@@ -198,6 +257,16 @@ struct RemoteView: View {
         if let cached = client.sessions[sessionID] { return cached }
         guard let summary = findSummary(client, id: sessionID) else { return nil }
         return client.session(summary)
+    }
+
+    /// A scene-restored id can outlive its Session (deleted on the computer,
+    /// archived away, or on another page). Fall back only after a list exists.
+    private func ensureSelection(_ client: HostClient) {
+        if let sessionID, client.sessions[sessionID] != nil || findSummary(client, id: sessionID) != nil {
+            return
+        }
+        guard let first = client.lists.values.flatMap({ $0 }).first else { return }
+        sessionID = first.id
     }
 
     private func findSummary(_ client: HostClient, id: String) -> SessionSummary? {
@@ -271,6 +340,12 @@ struct RemoteView: View {
         .onAppear {
             Task { await client.refreshLists() }
             Task { await client.loadInbox() }
+            Task { await model.refreshBadge() }
+        }
+        .refreshable {
+            await client.refreshLists()
+            await client.loadInbox()
+            await model.refreshBadge()
         }
         .searchable(text: $search, prompt: "搜索会话")
         .task(id: search) {
@@ -324,7 +399,7 @@ struct RemoteView: View {
 
     @ViewBuilder private func accountSessionSections(_ client: HostClient) -> some View {
         if !client.inbox.isEmpty {
-            Section("待处理") {
+            Section("待处理 · \(client.inbox.count) 个会话 · \(client.totalPending) 项") {
                 ForEach(client.inbox) { entry in
                     Button {
                         hostID = client.record.id
@@ -343,36 +418,7 @@ struct RemoteView: View {
         ForEach(client.lists.keys.sorted(), id: \.self) { project in
             Section(projectName(project)) {
                 ForEach(visible(client, project)) { session in
-                    Button {
-                        hostID = client.record.id
-                        select(session)
-                    } label: {
-                        Label(session.title, systemImage: "bubble.left.and.text.bubble.right")
-                    }.buttonStyle(.plain)
-                        .contextMenu {
-                            if client.record.grant.permissions.contains(.sessionRename) {
-                                Button {
-                                    Task { await setPinned(client, session, !session.pinned) }
-                                } label: {
-                                    Label(session.pinned ? "取消置顶" : "置顶",
-                                          systemImage: session.pinned ? "pin.slash" : "pin")
-                                }
-                                Button {
-                                    Task { await setArchived(client, session, !session.archived) }
-                                } label: {
-                                    Label(session.archived ? "取消归档" : "归档",
-                                          systemImage: session.archived ? "archivebox" : "archivebox.fill")
-                                }
-                            }
-                            if client.record.grant.permissions.contains(.sessionDelete) {
-                                Button(role: .destructive) { deleteTarget = session } label: {
-                                    Label("永久删除", systemImage: "trash")
-                                }
-                            }
-                        }
-                }
-                if client.next[project] != nil {
-                    Button("更多会话") { Task { await client.refreshLists(more: project) } }.disabled(!client.ready)
+                    sessionRow(client, session: session, project: project)
                 }
             }
         }
@@ -381,38 +427,135 @@ struct RemoteView: View {
     private func sessionSection(_ client: HostClient, project: String) -> some View {
         Section(projectName(project)) {
             ForEach(visible(client, project)) { session in
-                sessionRow(client, session: session)
-            }
-            if client.next[project] != nil {
-                Button("更多会话") { Task { await client.refreshLists(more: project) } }.disabled(!client.ready)
+                sessionRow(client, session: session, project: project)
             }
         }
     }
 
-    private func sessionRow(_ client: HostClient, session: SessionSummary) -> some View {
+    private func sessionRow(_ client: HostClient, session: SessionSummary, project: String?) -> some View {
         let active = sessionID == session.id
+        let pending = client.pendingCount(session.id)
+        let muted = model.isMuted(session.id)
+        let liveRunning = client.sessions[session.id]?.pending["execution"]?["type"]?.string == "running"
         return Button {
+            hostID = client.record.id
             select(session)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "bubble.left.and.text.bubble.right")
                     .foregroundStyle(active ? Color.accentColor : Color.secondary)
-                Text(session.title)
-                    .font(active ? Font.body.weight(.semibold) : Font.body)
-                    .lineLimit(2)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        if session.pinned {
+                            Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.orange)
+                        }
+                        Text(session.title)
+                            .font(active ? Font.body.weight(.semibold) : Font.body)
+                            .lineLimit(2)
+                    }
+                    HStack(spacing: 6) {
+                        if let updated = session.updated {
+                            Text(updated, format: .relative(presentation: .named))
+                        }
+                        if session.archived { Text("已归档") }
+                    }
+                    .font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 4)
+                if liveRunning {
+                    ProgressView().controlSize(.mini)
+                        .accessibilityLabel("正在执行")
+                }
+                if muted {
+                    Image(systemName: "bell.slash")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("已静音此会话的待办提醒")
+                } else if pending > 0 {
+                    Text("\(pending)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.16), in: Capsule())
+                        .accessibilityLabel("\(pending) 项待处理")
+                }
                 if active {
                     Image(systemName: "checkmark").font(.caption.weight(.semibold)).foregroundStyle(Color.accentColor)
                 }
             }.contentShape(Rectangle())
         }.buttonStyle(.plain)
+            .contextMenu {
+                Button {
+                    Task { await model.toggleMute(session.id) }
+                } label: {
+                    Label(muted ? "取消静音待办" : "静音待办（仅本机）",
+                          systemImage: muted ? "bell" : "bell.slash")
+                }
+                if client.record.grant.permissions.contains(.sessionRename) {
+                    Button {
+                        Task { await setPinned(client, session, !session.pinned) }
+                    } label: {
+                        Label(session.pinned ? "取消置顶" : "置顶",
+                              systemImage: session.pinned ? "pin.slash" : "pin")
+                    }
+                    Button {
+                        Task { await setArchived(client, session, !session.archived) }
+                    } label: {
+                        Label(session.archived ? "取消归档" : "归档",
+                              systemImage: session.archived ? "archivebox" : "archivebox.fill")
+                    }
+                }
+                if client.record.grant.permissions.contains(.sessionDelete) {
+                    Button(role: .destructive) { deleteTarget = session } label: {
+                        Label("永久删除", systemImage: "trash")
+                    }
+                }
+            }
+            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                if client.record.grant.permissions.contains(.sessionRename) {
+                    Button {
+                        Task { await setPinned(client, session, !session.pinned) }
+                    } label: {
+                        Label(session.pinned ? "取消置顶" : "置顶",
+                              systemImage: session.pinned ? "pin.slash" : "pin")
+                    }.tint(.blue)
+                }
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if client.record.grant.permissions.contains(.sessionDelete) {
+                    Button(role: .destructive) { deleteTarget = session } label: {
+                        Label("删除", systemImage: "trash")
+                    }
+                }
+                if client.record.grant.permissions.contains(.sessionRename) {
+                    Button {
+                        Task { await setArchived(client, session, !session.archived) }
+                    } label: {
+                        Label(session.archived ? "取消归档" : "归档",
+                              systemImage: session.archived ? "archivebox" : "archivebox.fill")
+                    }.tint(.orange)
+                }
+            }
+            .onAppear {
+                guard search.isEmpty, let project,
+                      session.id == visible(client, project).last?.id else { return }
+                Task { await loadMore(client, project) }
+            }
+    }
+
+    private func loadMore(_ client: HostClient, _ project: String) async {
+        guard client.next[project] != nil, !client.loadingMore.contains(project) else { return }
+        client.loadingMore.insert(project)
+        defer { client.loadingMore.remove(project) }
+        await client.refreshLists(more: project)
     }
 
     @ViewBuilder private func sidebarActions(_ client: HostClient) -> some View {
         if client.record.grant.permissions.contains(.sessionCreate) {
             Button { creating = true } label: {
                 Label("新会话", systemImage: "plus").frame(maxWidth: .infinity, alignment: .leading)
-            }.disabled(!client.ready)
+            }.keyboardShortcut("n", modifiers: .command)
+                .disabled(!client.ready)
         }
         Button { Task { await client.refreshLists() } } label: {
             Label("刷新会话", systemImage: "arrow.clockwise").frame(maxWidth: .infinity, alignment: .leading)
@@ -522,6 +665,18 @@ struct RemoteView: View {
         }
     }
 
+    /// A notification can arrive before the host registry has loaded. Keep the
+    /// target until the matching host appears instead of dropping the request.
+    private func consumeDeepLink() {
+        guard let target = pendingDeepLink,
+              let record = model.hosts.first(where: { $0.host.target.hostID == target.hostID })
+        else { return }
+        hostID = record.id
+        sessionID = target.sessionID
+        pendingDeepLink = nil
+        withAnimation(.easeInOut(duration: 0.25)) { sidebarVisible = false }
+    }
+
     @MainActor private func attach() async {
         attachEpoch += 1
         let generation = attachEpoch
@@ -548,6 +703,28 @@ struct RemoteView: View {
         @unknown default: return .background
         }
     }
+}
+
+struct DeepLinkTarget: Equatable {
+    let hostID: String
+    let sessionID: String
+
+    init?(url: URL) {
+        guard url.scheme?.lowercased() == "miao", url.host?.lowercased() == "session" else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count >= 2 else { return nil }
+        hostID = parts[0]
+        sessionID = parts[1]
+    }
+}
+
+struct ComposerAttachment: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    let mimeType: String
+    let data: Data
+
+    var image: UIImage? { UIImage(data: data) }
 }
 
 @MainActor
@@ -596,6 +773,7 @@ private struct PairingView: View {
 @MainActor
 private struct CreateSessionView: View {
     @Bindable var client: HostClient
+    var onCreated: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var creating = false
     var body: some View {
@@ -610,11 +788,13 @@ private struct CreateSessionView: View {
                                         creating = true
                                         Task {
                                             do {
-                                                _ = try await client.mutate(.sessionCreate, kind: .sessionCreate,
+                                                let created = try await client.mutate(.sessionCreate, kind: .sessionCreate,
                                                     target: OperationTarget(hostID: client.record.host.target.hostID,
                                                         runtimeID: client.record.host.target.runtimeID, projectID: projectID),
                                                     payload: .object(["directoryID": .string(directoryID)]))
-                                                await client.refreshLists(); dismiss()
+                                                await client.refreshLists()
+                                                if let id = created["data"]?["id"]?.string { onCreated(id) }
+                                                dismiss()
                                             } catch { client.error = userMessage(error) }
                                             creating = false
                                         }
@@ -639,6 +819,8 @@ private struct SessionView: View {
     var showsSidebarToggle = false
     var onSidebar: (() -> Void)?
     @State private var speech = SpeechInput()
+    @State private var pickedPhotos: [PhotosPickerItem] = []
+    @State private var attachments: [ComposerAttachment] = []
     @State private var diffPresented = false
     @State private var renamePresented = false
     @State private var selectionPresented = false
@@ -653,6 +835,14 @@ private struct SessionView: View {
     private let bottomID = "session-bottom"
     /// Queueing is only meaningful while a turn is running.
     private var running: Bool { session.pending["execution"]?["type"]?.string == "running" }
+    private var executionID: String? {
+        guard running else { return nil }
+        return session.pending["execution"]?["executionID"]?.string
+    }
+    private var waitingCount: Int {
+        (session.pending["permissions"]?.array?.count ?? 0)
+            + (session.pending["questions"]?.array?.count ?? 0)
+    }
     @State private var notice: String?
     @FocusState private var composing: Bool
     @Environment(\.scenePhase) private var phase
@@ -661,14 +851,18 @@ private struct SessionView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 20) {
-                    if !client.ready { Label("连接恢复后可继续操作，输入会保存在本机", systemImage: "wifi.slash").font(.footnote).foregroundStyle(.secondary) }
                     if session.loading { ProgressView("正在同步会话…") }
                     if session.timeline.revert != nil { Label("电脑上有待确认的回退操作", systemImage: "arrow.uturn.backward").font(.footnote) }
                     ForEach(Array(session.displayed.enumerated()), id: \.element.messageID) { _, message in
                         MessageView(message: message)
                     }
-                    PendingView(client: client, session: session)
-                    if let error = session.error { Text(error).font(.footnote).foregroundStyle(.red) }
+                    ForEach(session.outbox) { item in
+                        OutboxView(item: item,
+                            retry: { Task { await session.retry(item) } },
+                            reconcile: { Task { await session.reconcile(item) } },
+                            dismiss: { session.dismissOutbox(item.id) })
+                    }
+                    PendingView(client: client, session: session).id("pending-requests")
                     // A real anchor at the end scrolls past the last bubble, which
                     // anchoring to a message cannot do while it grows.
                     Color.clear.frame(height: 1).id(bottomID)
@@ -682,6 +876,7 @@ private struct SessionView: View {
             }
             .coordinateSpace(name: "session")
             .scrollDismissesKeyboard(.interactively)
+            .refreshable { await session.refresh() }
             .onChange(of: session.revision) { _, _ in pin(proxy) }
             .onAppear { pin(proxy) }
             .onChange(of: jumpTarget) { _, target in
@@ -708,6 +903,7 @@ private struct SessionView: View {
                 Color.clear.onAppear { viewport = geo.size.height }
                     .onChange(of: geo.size.height) { _, value in viewport = value }
             })
+            .safeAreaInset(edge: .top) { sessionBanner(proxy) }
         }
         .safeAreaInset(edge: .bottom) { composer }
         .navigationTitle(session.timeline.title.isEmpty ? session.summary.title : session.timeline.title)
@@ -718,6 +914,22 @@ private struct SessionView: View {
                     Button(action: onSidebar) { Image(systemName: "line.3.horizontal") }
                         .accessibilityLabel("会话侧栏").accessibilityIdentifier("sessionSidebar")
                 }
+            }
+            if let executionID {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(role: .destructive) {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        Task { _ = await session.command(.sessionInterrupt, kind: .interrupt,
+                            payload: .object(["executionID": .string(executionID)])) }
+                    } label: { Image(systemName: "stop.circle.fill") }
+                        .accessibilityLabel("停止执行")
+                        .disabled(!client.ready || client.sending(session.summary.id))
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { searchPresented = true } label: { Image(systemName: "magnifyingglass") }
+                    .accessibilityLabel("搜索消息")
+                    .keyboardShortcut("k", modifiers: .command)
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { composing = false; menuPresented = true } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("会话菜单")
@@ -752,6 +964,14 @@ private struct SessionView: View {
                     if client.record.grant.permissions.contains(.sessionRename) {
                         Button("重命名") { selectedAction = "rename"; menuPresented = false }
                     }
+                    ShareLink(item: transcriptText) {
+                        Label("导出对话", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(session.displayed.isEmpty)
+                    Button("复制最后回复") {
+                        if let text = lastAssistantText { UIPasteboard.general.string = text }
+                    }
+                    .disabled(lastAssistantText == nil)
                 }
                 .navigationTitle("会话操作")
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { menuPresented = false } } }
@@ -781,6 +1001,39 @@ private struct SessionView: View {
         }
     }
 
+    /// A banner that survives scrolling. Connection loss, a failed command and
+    /// a waiting approval all otherwise live at the bottom of a long transcript.
+    @ViewBuilder private func sessionBanner(_ proxy: ScrollViewProxy) -> some View {
+        if !client.ready {
+            bannerRow(icon: "wifi.slash", text: client.connectionDescription, tint: .orange)
+        } else if let error = session.error ?? client.error {
+            bannerRow(icon: "exclamationmark.triangle.fill", text: error, tint: .red, action: "重试") {
+                Task { await session.refresh() }
+            }
+        } else if waitingCount > 0 {
+            bannerRow(icon: "hand.raised.fill", text: "\(waitingCount) 项等待你处理", tint: .orange, action: "查看") {
+                followsLatest = false
+                jump(proxy, to: "pending-requests")
+            }
+        }
+    }
+
+    private func bannerRow(icon: String, text: String, tint: Color,
+                           action: String? = nil, perform: (() -> Void)? = nil) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+            Text(text).font(.footnote).lineLimit(2)
+            Spacer(minLength: 4)
+            if let action, let perform {
+                Button(action, action: perform).font(.footnote.weight(.semibold))
+            }
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.12))
+    }
+
     private func pin(_ proxy: ScrollViewProxy) {
         guard followsLatest else { return }
         proxy.scrollTo(bottomID, anchor: .bottom)
@@ -796,6 +1049,34 @@ private struct SessionView: View {
         }
     }
 
+    private var transcriptText: String {
+        session.displayed.map { message in
+            let role = switch message["type"]?.string {
+            case "user": "我"
+            case "assistant": "miao"
+            default: message["type"]?.string ?? "记录"
+            }
+            return "**\(role)**\n\n" + readableText(message)
+        }
+        .filter { !$0.hasSuffix("\n\n") }
+        .joined(separator: "\n\n---\n\n")
+    }
+
+    private var lastAssistantText: String? {
+        session.displayed.last(where: { $0["type"]?.string == "assistant" })
+            .map(readableText)
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private func readableText(_ message: JSONValue) -> String {
+        let parts = [message["text"]?.string, message["summary"]?.string,
+                     message["command"]?.string, message["output"]?.string]
+            + (message["content"]?.array ?? []).compactMap { part in
+                part["type"]?.string == "text" ? part["text"]?.string : nil
+            }
+        return parts.compactMap { $0 }.joined(separator: "\n")
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
             if let error = speech.error { Text(error).font(.caption).foregroundStyle(.red) }
@@ -805,32 +1086,115 @@ private struct SessionView: View {
                     .accessibilityIdentifier("composerNotice")
             }
             if client.record.grant.permissions.contains(.prompt) {
+                if !attachments.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(attachments) { item in
+                                ZStack(alignment: .topTrailing) {
+                                    if let image = item.image {
+                                        Image(uiImage: image)
+                                            .resizable().scaledToFill()
+                                            .frame(width: 56, height: 56)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    }
+                                    Button {
+                                        attachments.removeAll { $0.id == item.id }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundStyle(.white, .black.opacity(0.55))
+                                    }
+                                    .padding(2)
+                                    .accessibilityLabel("移除附件 \(item.name)")
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 TextField("给 miao 的消息", text: Binding(get: { session.draft }, set: { session.edit($0) }), axis: .vertical)
                     .focused($composing)
                     .lineLimit(2...8).padding(10).background(.background, in: RoundedRectangle(cornerRadius: 12))
                     .disabled(speech.recording).accessibilityIdentifier("messageDraft")
                 HStack {
-                    Button(speech.recording ? "停止听写" : "语音输入", systemImage: speech.recording ? "stop.circle.fill" : "mic") {
-                        if speech.recording || speech.requesting { speech.stop() }
-                        else { Task { await speech.start(text: session.draft) { expected, value in
-                            guard session.draft == expected else { return false }
-                            session.edit(value); return true
-                        } } }
-                    }.disabled(speech.requesting)
+                    if speech.recording {
+                        Button("停止", systemImage: "stop.circle.fill") {
+                            speech.stop()
+                            UIAccessibility.post(notification: .announcement, argument: "听写已停止，文字保留在输入框")
+                        }
+                        .accessibilityLabel("停止听写")
+                        Button("取消", role: .cancel) {
+                            speech.cancel { session.edit($0) }
+                            UIAccessibility.post(notification: .announcement, argument: "已取消听写，恢复原草稿")
+                        }
+                        Text(speech.durationText)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("已录音 \(speech.durationText)")
+                    } else {
+                        Button("语音输入", systemImage: "mic") {
+                            UIAccessibility.post(notification: .announcement, argument: "开始听写")
+                            Task { await speech.start(text: session.draft, locale: speech.localeIdentifier) { expected, value in
+                                guard session.draft == expected else { return false }
+                                session.edit(value); return true
+                            } }
+                        }
+                        .disabled(speech.requesting)
+                        .accessibilityLabel("语音输入")
+                    }
+                    Menu {
+                        Button("自动（设备语言）") { speech.localeIdentifier = "" }
+                        Button("普通话") { speech.localeIdentifier = "zh-CN" }
+                        Button("English") { speech.localeIdentifier = "en-US" }
+                    } label: {
+                        Image(systemName: "globe")
+                    }
+                    .accessibilityLabel("语音识别语言")
+                    .disabled(speech.recording || speech.requesting)
+                    if client.record.grant.permissions.contains(.sessionSelection) {
+                        Button { selectionPresented = true } label: {
+                            Image(systemName: "cpu")
+                        }
+                        .accessibilityLabel("切换 Agent 或模型")
+                    }
+                    if client.capabilities.supportsAttachments, !speech.recording {
+                        PhotosPicker(selection: $pickedPhotos, maxSelectionCount: 4, matching: .images) {
+                            Image(systemName: "photo.on.rectangle")
+                        }
+                        .accessibilityLabel("添加图片")
+                        .accessibilityIdentifier("attachImage")
+                    }
+                    if !client.capabilities.commands.isEmpty, !speech.recording {
+                        Menu {
+                            ForEach(client.capabilities.commands) { command in
+                                Button {
+                                    let prefix = session.draft.isEmpty || session.draft.hasSuffix(" ") ? "" : " "
+                                    session.edit(session.draft + prefix + "/" + command.name + " ")
+                                } label: {
+                                    Text("/" + command.name + (command.description.isEmpty ? "" : " · " + command.description))
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "slash.circle")
+                        }
+                        .accessibilityLabel("插入命令")
+                    }
                     Spacer()
                     if running {
                         Toggle("排队", isOn: $queue).toggleStyle(.button).font(.caption)
                             .accessibilityIdentifier("queueInput")
                     }
                     Button("发送", systemImage: "arrow.up") {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         speech.stop()
                         // Queueing is a per-message choice, not a mode: a sticky
                         // toggle silently queued every later message.
                         let queued = running && queue
                         queue = false
                         notice = queued ? "已排队：这一轮结束后发送" : nil
+                        let sendingAttachments = attachments
+                        attachments = []
                         Task {
-                            await session.send(queue: queued)
+                            await session.send(queue: queued, attachments: sendingAttachments)
                             if queued {
                                 try? await Task.sleep(for: .seconds(3))
                                 if notice?.hasPrefix("已排队") == true { notice = nil }
@@ -838,39 +1202,132 @@ private struct SessionView: View {
                         }
                     }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!client.ready || client.sending(session.summary.id) || session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || session.draft.utf16.count > 65_536)
+                        .disabled(!client.ready || client.sending(session.summary.id)
+                            || (session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
+                            || session.draft.utf16.count > (client.capabilities.maxPromptCharacters ?? 65_536))
+                        .keyboardShortcut(.return, modifiers: .command)
                         .accessibilityIdentifier("sendMessage")
                 }
             } else { Text("此设备拥有只读会话权限").font(.footnote).foregroundStyle(.secondary) }
         }.padding().background(.bar)
+            .onChange(of: pickedPhotos) { _, items in
+                guard !items.isEmpty else { return }
+                Task { await loadPhotos(items) }
+            }
+    }
+
+    private func loadPhotos(_ items: [PhotosPickerItem]) async {
+        var next = attachments
+        for item in items.prefix(max(0, 4 - next.count)) {
+            guard let data = try? await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data),
+                  let jpeg = downscaledJPEG(image) else { continue }
+            next.append(ComposerAttachment(id: UUID(), name: "图片 \(next.count + 1).jpg",
+                                           mimeType: "image/jpeg", data: jpeg))
+        }
+        attachments = next
+        pickedPhotos = []
+    }
+
+    private func downscaledJPEG(_ image: UIImage) -> Data? {
+        let maximum: CGFloat = 1600
+        let scale = min(1, maximum / max(image.size.width, image.size.height))
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let resized = UIGraphicsImageRenderer(size: size).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return resized.jpegData(compressionQuality: 0.8)
     }
 }
 
 private extension JSONValue { var messageID: String { self["id"]?.string ?? "" } }
 
+/// A prompt whose admission is still being confirmed. It mirrors the user
+/// bubble so the phone never looks like it dropped the message while waiting.
+@MainActor
+private struct OutboxView: View {
+    let item: OutboxPrompt
+    let retry: () -> Void
+    let reconcile: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .bottom) {
+            Spacer(minLength: 56)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(item.text)
+                    .padding(12)
+                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 16))
+                HStack(spacing: 8) {
+                    switch item.status {
+                    case .sending:
+                        ProgressView().controlSize(.mini)
+                        Text(item.queued ? "排队中…" : "发送中…")
+                    case .failed:
+                        Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
+                        Text("发送失败").foregroundStyle(.red)
+                        if item.retryable { Button("重试", action: retry) }
+                        Button("删除", role: .destructive, action: dismiss)
+                    case .uncertain:
+                        Image(systemName: "questionmark.circle.fill").foregroundStyle(.orange)
+                        Text("结果待核对").foregroundStyle(.orange)
+                        Button("核对", action: reconcile)
+                        Button("删除", role: .destructive, action: dismiss)
+                    }
+                }
+                .font(.caption)
+                if let detail = item.detail {
+                    Text(detail).font(.caption2).foregroundStyle(.secondary)
+                        .lineLimit(2).multilineTextAlignment(.trailing)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("outbox-\(item.id.uuidString)")
+    }
+}
+
 @MainActor
 private struct MessageView: View, Equatable {
     let message: JSONValue
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.message == rhs.message }
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.message == rhs.message }
 
     var body: some View {
-        if message["type"]?.string == "user" {
-            HStack(alignment: .bottom) {
-                Spacer(minLength: 56)
+        Group {
+            if message["type"]?.string == "user" {
+                HStack(alignment: .bottom) {
+                    Spacer(minLength: 56)
+                    content
+                        .padding(12)
+                        .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 16))
+                }
+            } else {
                 content
-                    .padding(12)
-                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 16))
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-        } else {
-            content
-                .padding(.vertical, 2)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .contextMenu {
+            Button { UIPasteboard.general.string = plainText } label: {
+                Label("复制", systemImage: "doc.on.doc")
+            }
+            .disabled(plainText.isEmpty)
+        }
+    }
+
+    private var plainText: String {
+        let parts = [message["text"]?.string, message["summary"]?.string, message["command"]?.string,
+                     message["output"]?.string]
+            + (message["content"]?.array ?? []).compactMap { $0["text"]?.string }
+        return parts.compactMap { $0 }.joined(separator: "\n")
     }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let attachments = message["attachments"]?.array, !attachments.isEmpty {
+                AttachmentStrip(attachments: attachments)
+            }
             if let text = message["text"]?.string { Text(text).textSelection(.enabled) }
             if let summary = message["summary"]?.string { LocalMarkdown(text: summary) }
             ForEach(Array((message["content"]?.array ?? []).enumerated()), id: \.offset) { _, part in
@@ -884,10 +1341,7 @@ private struct MessageView: View, Equatable {
                 } else if let text = part["text"]?.string {
                     Text(text).textSelection(.enabled)
                 } else {
-                    DisclosureGroup { ExpandingText(text: part.formatted) } label: {
-                        Label(part["name"]?.string ?? part["type"]?.string ?? "操作详情", systemImage: "wrench.and.screwdriver")
-                            .font(.footnote.weight(.medium))
-                    }.accentColor(.secondary)
+                    ToolPartView(part: part)
                 }
             }
             if let command = message["command"]?.string {
@@ -903,8 +1357,135 @@ private struct MessageView: View, Equatable {
             if ["agent-switched", "model-switched"].contains(message["type"]?.string ?? "") {
                 Text(message["agent"]?.string ?? message["model"]?.formatted ?? "").font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
             }
+            if message["type"]?.string == "assistant" { AssistantMetrics(message: message) }
             if let error = message["error"] { Text(error.formatted).font(.footnote).foregroundStyle(.red) }
         }
+    }
+}
+
+/// A tool call is context, not content: one line with its live status and
+/// duration, expandable for the full input/result.
+@MainActor
+private struct AttachmentStrip: View {
+    let attachments: [JSONValue]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(attachments.enumerated()), id: \.offset) { _, attachment in
+                    if let encoded = attachment["data"]?.string,
+                       let data = Data(base64Encoded: encoded),
+                       let image = UIImage(data: data) {
+                        Image(uiImage: image)
+                            .resizable().scaledToFill()
+                            .frame(width: 96, height: 96)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .accessibilityLabel(attachment["name"]?.string ?? "图片")
+                    } else if let name = attachment["name"]?.string {
+                        Label(name, systemImage: "doc")
+                            .font(.footnote)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private struct ToolPartView: View {
+    let part: JSONValue
+    @State private var expanded = false
+
+    private var state: JSONValue? { part["state"] }
+    private var status: String { state?["status"]?.string ?? "pending" }
+    private var name: String { part["name"]?.string ?? part["type"]?.string ?? "工具" }
+    private var tint: Color {
+        switch status {
+        case "running": return .blue
+        case "error": return .red
+        case "completed": return .green
+        default: return .secondary
+        }
+    }
+    private var icon: String {
+        switch status {
+        case "running": return "arrow.triangle.2.circlepath"
+        case "error": return "xmark.octagon.fill"
+        case "completed": return "checkmark.circle.fill"
+        default: return "clock"
+        }
+    }
+    private var duration: String? {
+        guard let ran = part["time"]?["ran"]?.number,
+              let completed = part["time"]?["completed"]?.number,
+              completed >= ran else { return nil }
+        let milliseconds = completed - ran
+        return milliseconds >= 1000
+            ? String(format: "%.1fs", milliseconds / 1000)
+            : String(format: "%.0fms", milliseconds)
+    }
+    private var detail: String {
+        if let error = state?["error"]?.formatted, !error.isEmpty { return error }
+        if let content = state?["content"]?.array, !content.isEmpty {
+            return content.map(\.formatted).joined(separator: "\n")
+        }
+        return part.formatted
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ExpandingText(text: detail)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon).foregroundStyle(tint)
+                Text(name).lineLimit(1)
+                if let duration { Text(duration).foregroundStyle(.secondary) }
+                Spacer(minLength: 0)
+                if status == "error" { Text("失败").foregroundStyle(.red) }
+            }
+            .font(.footnote.weight(.medium))
+        }
+        .accentColor(.secondary)
+        .padding(6)
+        .background(tint.opacity(status == "error" ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+@MainActor
+private struct AssistantMetrics: View {
+    let message: JSONValue
+
+    private var tokens: JSONValue? { message["tokens"] }
+    private var total: Int {
+        ["input", "output", "reasoning"].reduce(0) { $0 + Int(tokens?[$1]?.number ?? 0) }
+    }
+    private var cost: Double? { message["cost"]?.number }
+    private var ttft: Double? { message["ttft"]?.number }
+
+    var body: some View {
+        if total > 0 || cost != nil || ttft != nil {
+            HStack(spacing: 10) {
+                if let cost { Text(String(format: "$%.3f", cost)) }
+                if total > 0 { Text(compact(total) + " tokens") }
+                if let ttft, ttft > 0 { Text(String(format: "首字 %.1fs", ttft / 1000)) }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("用量：\(accessibilitySummary)")
+        }
+    }
+
+    private func compact(_ value: Int) -> String {
+        value >= 1000 ? String(format: "%.1fk", Double(value) / 1000) : "\(value)"
+    }
+
+    private var accessibilitySummary: String {
+        var parts: [String] = []
+        if let cost { parts.append(String(format: "成本 %.3f 美元", cost)) }
+        if total > 0 { parts.append("\(total) 个 token") }
+        if let ttft, ttft > 0 { parts.append(String(format: "首字 %.1f 秒", ttft / 1000)) }
+        return parts.joined(separator: "，")
     }
 }
 
@@ -936,109 +1517,179 @@ private struct ExpandingText: View {
 @MainActor
 private struct DiffView: View {
     let diff: JSONValue
-    @State private var expandedAll = false
+    @State private var expanded: Set<Int> = []
 
-    private struct Line: Identifiable {
+    private struct FileChange: Identifiable {
         let id: Int
-        let text: String
-        let color: Color?
+        let name: String
+        let patch: String
+        let additions: Int
+        let deletions: Int
     }
 
-    private static let lineLimit = 4000
+    private static let lineLimit = 2000
 
-    private var lines: [Line] {
-        let files = diff["data"]?.array ?? []
-        let raw = files.flatMap { file -> [String] in
-            var out = [file["file"]?.string ?? ""]
-            if let patch = file["patch"]?.string {
-                out += patch.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            }
-            return out
-        }
-        let shown = expandedAll ? raw : Array(raw.prefix(Self.lineLimit))
-        return shown.enumerated().map { index, line in
-            let color: Color? = line.hasPrefix("+++") || line.hasPrefix("---") ? .secondary
-                : line.hasPrefix("@@") ? .blue
-                : line.hasPrefix("+") ? .green
-                : line.hasPrefix("-") ? .red
-                : nil
-            return Line(id: index, text: line, color: color)
+    private var files: [FileChange] {
+        (diff["data"]?.array ?? []).enumerated().map { index, value in
+            let patch = value["patch"]?.string ?? ""
+            let lines = patch.split(separator: "\n", omittingEmptySubsequences: false)
+            return FileChange(
+                id: index,
+                name: value["file"]?.string ?? "文件 \(index + 1)",
+                patch: patch,
+                additions: lines.filter { $0.hasPrefix("+") && !$0.hasPrefix("+++") }.count,
+                deletions: lines.filter { $0.hasPrefix("-") && !$0.hasPrefix("---") }.count
+            )
         }
     }
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(lines) { line in
-                Text(line.text)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(line.color ?? .primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
+        LazyVStack(alignment: .leading, spacing: 10) {
+            if files.isEmpty {
+                Text("没有文件变化").font(.footnote).foregroundStyle(.secondary)
             }
-            if !expandedAll {
-                Button("展开全部") { expandedAll = true }.font(.footnote).padding(.top, 8)
+            ForEach(files) { file in
+                DisclosureGroup(isExpanded: binding(file.id)) {
+                    let lines = Array(file.patch.split(separator: "\n", omittingEmptySubsequences: false)
+                        .prefix(Self.lineLimit))
+                    if lines.isEmpty {
+                        Text("无文本差异").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        Text(String(line))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(color(line) ?? .primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    if file.patch.split(separator: "\n", omittingEmptySubsequences: false).count > Self.lineLimit {
+                        Text("仅显示前 \(Self.lineLimit) 行").font(.caption2).foregroundStyle(.secondary)
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(file.name)
+                            .font(.system(.footnote, design: .monospaced))
+                            .lineLimit(2)
+                        HStack(spacing: 8) {
+                            Text("+\(file.additions)").foregroundStyle(.green)
+                            Text("-\(file.deletions)").foregroundStyle(.red)
+                            Spacer()
+                            Text("\(file.additions + file.deletions) 行变化").foregroundStyle(.secondary)
+                        }
+                        .font(.caption2)
+                    }
+                }
             }
         }
         .padding()
     }
+
+    private func binding(_ id: Int) -> Binding<Bool> {
+        Binding(
+            get: { expanded.contains(id) },
+            set: { open in
+                if open { expanded.insert(id) } else { expanded.remove(id) }
+            }
+        )
+    }
+
+    private func color(_ line: Substring) -> Color? {
+        if line.hasPrefix("+++") || line.hasPrefix("---") { return .secondary }
+        if line.hasPrefix("@@") { return .blue }
+        if line.hasPrefix("+") { return .green }
+        if line.hasPrefix("-") { return .red }
+        return nil
+    }
 }
 
-/// Searches the loaded timeline and jumps to the tapped message.
+/// Searches the loaded timeline and jumps to the tapped message. The scan runs
+/// off the main actor: a 10k-message transcript must not hitch the sheet.
 @MainActor
 private struct MessageSearchView: View {
     let messages: [JSONValue]
     let onSelect: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var matches: [Match] = []
+    @State private var searching = false
 
-    private struct Match: Identifiable {
+    private struct Match: Identifiable, Sendable {
         let id: String
         let snippet: String
     }
 
-    private static let resultLimit = 200
-
-    private var matches: [Match] {
-        guard query.count >= 2 else { return [] }
-        var found: [Match] = []
-        for message in messages {
-            guard let id = message["id"]?.string, !id.isEmpty,
-                  let text = searchableText(message),
-                  let range = text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) else { continue }
-            let start = text.index(range.lowerBound, offsetBy: -40, limitedBy: text.startIndex) ?? text.startIndex
-            let end = text.index(range.upperBound, offsetBy: 80, limitedBy: text.endIndex) ?? text.endIndex
-            found.append(Match(id: id, snippet: String(text[start..<end])))
-            if found.count >= Self.resultLimit { break }
-        }
-        return found
-    }
-
-    private func searchableText(_ message: JSONValue) -> String? {
-        let parts = [message["text"]?.string, message["summary"]?.string, message["output"]?.string, message["command"]?.string]
-            + (message["content"]?.array ?? []).compactMap { $0["text"]?.string }
-        let joined = parts.compactMap { $0 }.joined(separator: "\n")
-        return joined.isEmpty ? nil : joined
-    }
+    nonisolated private static let resultLimit = 200
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(matches) { match in
-                    Button {
-                        onSelect(match.id)
-                        dismiss()
-                    } label: {
-                        Text(match.snippet).font(.footnote).lineLimit(3)
-                    }.buttonStyle(.plain)
+                Section {
+                    ForEach(matches) { match in
+                        Button {
+                            onSelect(match.id)
+                            dismiss()
+                        } label: {
+                            Text(match.snippet).font(.footnote).lineLimit(3)
+                        }.buttonStyle(.plain)
+                    }
+                } header: {
+                    if searching {
+                        ProgressView("正在搜索…")
+                    } else if query.count >= 2 {
+                        Text(matches.count >= Self.resultLimit
+                             ? "前 \(Self.resultLimit) 条结果"
+                             : "\(matches.count) 条结果")
+                    }
                 }
             }
             .overlay {
-                if matches.isEmpty { ContentUnavailableView.search(text: query) }
+                if !searching, !query.isEmpty, matches.isEmpty {
+                    ContentUnavailableView.search(text: query)
+                }
             }
             .navigationTitle("搜索消息")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
             .searchable(text: $query, prompt: "在会话中搜索")
+            .task(id: query) {
+                let term = query
+                guard term.count >= 2 else {
+                    matches = []
+                    searching = false
+                    return
+                }
+                searching = true
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                let found = await Task.detached(priority: .userInitiated) {
+                    Self.find(term, in: messages)
+                }.value
+                guard !Task.isCancelled else { return }
+                matches = found
+                searching = false
+            }
         }
+    }
+
+    nonisolated private static func find(_ query: String, in messages: [JSONValue]) -> [Match] {
+        var found: [Match] = []
+        for message in messages {
+            guard let id = message["id"]?.string, !id.isEmpty,
+                  let text = searchableText(message),
+                  let range = text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive])
+            else { continue }
+            let start = text.index(range.lowerBound, offsetBy: -40, limitedBy: text.startIndex) ?? text.startIndex
+            let end = text.index(range.upperBound, offsetBy: 80, limitedBy: text.endIndex) ?? text.endIndex
+            found.append(Match(id: id, snippet: String(text[start..<end])))
+            if found.count >= resultLimit { break }
+        }
+        return found
+    }
+
+    nonisolated private static func searchableText(_ message: JSONValue) -> String? {
+        let parts = [message["text"]?.string, message["summary"]?.string, message["output"]?.string, message["command"]?.string]
+            + (message["content"]?.array ?? []).compactMap { $0["text"]?.string }
+        let joined = parts.compactMap { $0 }.joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
     }
 }
 
@@ -1151,8 +1802,6 @@ private struct RenameSessionView: View {
         NavigationStack {
             Form {
                 TextField("会话名称", text: $value).accessibilityIdentifier("renameTitle")
-                Button("清除会话名称") { value = "" }
-                    .accessibilityIdentifier("clearRenameTitle").disabled(value.isEmpty)
             }
             .navigationTitle("重命名会话")
             .toolbar {
