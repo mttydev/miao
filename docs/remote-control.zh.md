@@ -107,10 +107,20 @@ loopback，并把本次 serve 的 URL、token 和一次性 runtimeID 通过环�
 `miao-remote`；serve 退出时一并回收宿主进程。`/remote-control` 仍然是 TUI 的入口，
 两者不共享 runtime 身份。
 
-1. 发布归档已把 `miao-remote` 放在 `miao` 同目录；源码检出用 `bun run build:remote`
+1. 注册主机（只需一次）：
+
+   ```sh
+   MIAO_REMOTE_CONTROL_CONFIG=~/.config/miao/remote-control/control.json \
+   MIAO_HUB_URL=https://hub.example MIAO_HUB_EMAIL=you@example.com \
+   MIAO_HUB_PASSWORD=… miao-remote register
+   ```
+
+   它用 `devices.json` 里的稳定主机身份向 Hub 注册，并把 `hubURL`/`hostToken`（权限 0600）
+   写入配置文件；密码只在内存中。源码检出用 `bun run remote:register`。
+2. 发布归档已把 `miao-remote` 放在 `miao` 同目录；源码检出用 `bun run build:remote`
    生成 `dist/miao-remote` 并放到 `miao` 同目录。也可以用 `MIAO_REMOTE_HOST_BIN` 指路，
    或设 `MIAO_REMOTE_HOST_SCRIPT=packages/engine-ts/remote-control/script/host.ts` 由 `bun run` 启动。
-2. 写 `control.json`：
+3. 写 `control.json`：
 
    ```json
    {"hubURL":"https://hub.example","hostToken":"…","grantFile":"devices.json","sessionIDs":["ses_…"]}
@@ -118,7 +128,7 @@ loopback，并把本次 serve 的 URL、token 和一次性 runtimeID 通过环�
 
    `grantFile` 相对配置文件解析。`sessionIDs` 是发布门：只有列出的会话会出现在设备列表里，
    其余会话的方法一律拒绝。`accountID` 与 `allowLoopbackHTTP` 可选。
-3. 运行 `miao serve --remote-host ~/.config/miao/remote-control/control.json`。
+4. 运行 `miao serve --remote-host ~/.config/miao/remote-control/control.json`。
 
 ## 在手机上整理会话
 

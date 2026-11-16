@@ -1,6 +1,12 @@
 import { EngineHttpClient } from "@miao/client/engine"
 import { ControlHostRunner } from "../src/host-runner"
 
+if (process.argv.includes("register")) {
+  const { register } = await import("./register")
+  await register()
+  process.exit(0)
+}
+
 const filename = process.env.MIAO_REMOTE_CONTROL_CONFIG
 const url = process.env.MIAO_ENGINE_HTTP_URL
 const token = process.env.MIAO_ENGINE_HTTP_TOKEN
