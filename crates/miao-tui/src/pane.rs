@@ -191,6 +191,40 @@ impl Shell {
         self.last = Some(transcript.clone());
     }
 
+    /// Whether the oldest row is on screen, so scrolling further back has
+    /// nothing left to reveal and the next notch should ask for an older page.
+    pub fn at_transcript_start(&self) -> bool {
+        self.transcript.scroll == 0
+    }
+
+    /// Put one page of older history in front of the transcript, keeping the
+    /// row the operator was reading where it was.
+    pub fn prepend_transcript(&mut self, older: &Transcript) {
+        let Some(current) = self.last.as_mut() else {
+            return;
+        };
+        current.prepend(older);
+        let projected = transcript_lines(
+            current,
+            &self.transcript.theme,
+            self.transcript.expanded,
+            self.toggle_chord.as_deref(),
+        );
+        let width = self.transcript.width;
+        let before = wrap_rows(&self.transcript.rows, width).len();
+        self.transcript.set_rows(projected.rows);
+        self.transcript.user_anchors = projected.anchors;
+        // The new rows all sit above the viewport, so the scroll offset grows
+        // by exactly the rows they added at this width.
+        let after = wrap_rows(&self.transcript.rows, width).len();
+        if width > 0 {
+            self.transcript.scroll = self
+                .transcript
+                .scroll
+                .saturating_add(after.saturating_sub(before) as u16);
+        }
+    }
+
     /// The operator cleared the Session's context: the painted rows go, one
     /// marker stays, and nothing stale re-enters until the next snapshot.
     pub fn clear_transcript(&mut self) {

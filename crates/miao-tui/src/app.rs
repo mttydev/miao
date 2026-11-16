@@ -454,6 +454,12 @@ pub struct App {
     pub engine: Option<engine::Handle>,
     pub session: Option<SessionSummary>,
     pub state: SessionState,
+    /// The older-history boundary of the open Session: where the next
+    /// scroll-to-top resumes, and whether another page exists behind it.
+    older: Option<(u64, bool)>,
+    /// One older-page request is in flight, so a second notch must not ask for
+    /// the same boundary twice.
+    older_loading: bool,
     pub quit: bool,
     /// The prompt owns the keyboard on the landing screen, the way every other
     /// agent CLI behaves: the first thing typed is the first prompt. `Tab`
@@ -703,6 +709,8 @@ impl App {
             // walking the prompt's history. Tab hands the keys to the prompt.
             named_sessions: std::collections::HashSet::new(),
             pending_update: None,
+            older: None,
+            older_loading: false,
             dialog: None,
             permission_generation: 0,
             workspace_changes_generation: 0,
@@ -1227,6 +1235,22 @@ impl App {
                 self.usage_hourly = Some(hourly);
                 self.shell.set_usage_hourly(self.usage_hourly.as_ref());
             }
+            AppEvent::HistoryWindow {
+                next_before,
+                has_more,
+            } => {
+                self.older = next_before.map(|seq| (seq, has_more));
+                self.older_loading = false;
+            }
+            AppEvent::HistoryPrepended {
+                older,
+                next_before,
+                has_more,
+            } => {
+                self.shell.prepend_transcript(&older);
+                self.older = next_before.map(|seq| (seq, has_more));
+                self.older_loading = false;
+            }
             AppEvent::SessionRemoved(id) => {
                 if self
                     .session
@@ -1689,6 +1713,21 @@ impl App {
                 // arrive in a burst and acceleration is enabled.
                 let rows = self.scroll.rows(Instant::now(), delta as i8) as i32;
                 self.shell.scroll_transcript(delta * rows);
+                // The oldest row is on screen and the wheel still asks for
+                // more: fetch the page behind it instead of scrolling against
+                // the edge.
+                if delta < 0
+                    && !self.older_loading
+                    && self.shell.at_transcript_start()
+                    && matches!(self.older, Some((_, true)))
+                {
+                    if let (Some(session), Some((before, _)), Some(engine)) =
+                        (self.session.as_ref(), self.older, self.engine.as_ref())
+                    {
+                        self.older_loading = true;
+                        engine.load_older(&session.id, before);
+                    }
+                }
             }
             // The launcher has no scrollable surface.
             Screen::Home => {}

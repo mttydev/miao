@@ -671,6 +671,38 @@ pub struct Transcript {
 }
 
 impl Transcript {
+    /// The entries of one older page, built through the same path as a
+    /// snapshot's messages so a page and a projection render identically.
+    pub fn page(page: &Value) -> Self {
+        let mut transcript = Self::default();
+        for message in page
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            transcript.push_message(message);
+        }
+        transcript
+    }
+
+    /// Put a page of older entries in front of what is on screen. Display
+    /// diffs travel per tool call, so an older page keeps the ones it brought
+    /// and never displaces a newer one.
+    pub fn prepend(&mut self, older: &Transcript) {
+        if older.entries.is_empty() {
+            return;
+        }
+        let mut entries = older.entries.clone();
+        entries.append(&mut self.entries);
+        self.entries = entries;
+        for (call, files) in &older.displays {
+            self.displays
+                .entry(call.clone())
+                .or_insert_with(|| files.clone());
+        }
+    }
+
     /// Close every tool call that will never get a result. Called when the run
     /// that owned them is over: the row's state is inferred from the result
     /// alone, so an unanswered call otherwise kept the running glyph forever.
@@ -991,6 +1023,44 @@ fn failure_of(seq: u64, data: &Value) -> Option<(u64, String)> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A page of older messages lands in front of what is on screen, in the
+    /// order it was read, and nothing newer moves.
+    #[test]
+    fn an_older_page_prepends_in_order() {
+        let older = Transcript::page(&json!({
+            "messages": [
+                {"seq": 1, "role": "user", "content": [{"type": "text", "text": "first"}]},
+                {"seq": 2, "role": "user", "content": [{"type": "text", "text": "second"}]}
+            ]
+        }));
+        let mut current = Transcript::page(&json!({
+            "messages": [
+                {"seq": 9, "role": "user", "content": [{"type": "text", "text": "newest"}]}
+            ]
+        }));
+        current.prepend(&older);
+        let users: Vec<&str> = current
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, vec!["first", "second", "newest"]);
+    }
+
+    /// An empty page is what the first page of a short Session looks like back
+    /// to front: it must leave the transcript alone rather than blank it.
+    #[test]
+    fn an_empty_page_leaves_the_transcript_alone() {
+        let mut current = Transcript::page(&json!({
+            "messages": [{"seq": 3, "role": "user", "content": [{"type": "text", "text": "kept"}]}]
+        }));
+        current.prepend(&Transcript::page(&json!({ "messages": [] })));
+        assert_eq!(current.entries.len(), 1);
+    }
 
     /// A finished run closes the calls that never got a result, and leaves the
     /// ones that did exactly as they were.

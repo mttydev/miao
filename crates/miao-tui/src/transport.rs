@@ -554,6 +554,35 @@ impl EngineClient {
             .await
     }
 
+    /// The Session's state anchor without its transcript: where it is, not what
+    /// it said. Opening a long Session reads this instead of the projection.
+    pub async fn snapshot_metadata(&self, session_id: &str) -> Result<Value, TransportError> {
+        self.request(
+            "snapshot",
+            json!({ "session_id": session_id, "metadata_only": true }),
+        )
+        .await
+    }
+
+    /// One page of committed messages, newest page first. `before_seq` walks
+    /// backwards, so reading a Session costs the page that is on screen.
+    pub async fn history_page(
+        &self,
+        session_id: &str,
+        before_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Value, TransportError> {
+        self.request(
+            "history_page",
+            json!({
+                "session_id": session_id,
+                "before_seq": before_seq,
+                "limit": limit
+            }),
+        )
+        .await
+    }
+
     /// Shut the child down gracefully, then kill it if it lingers. No failure
     /// notice is emitted: an explicit close is not a transport fault.
     pub async fn close(mut self) {
