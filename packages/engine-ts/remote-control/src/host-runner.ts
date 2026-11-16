@@ -14,6 +14,7 @@ export type Configuration = {
   readonly grantFile: string
   readonly accountID?: string
   readonly allowLoopbackHTTP?: boolean
+  readonly sessionIDs?: ReadonlyArray<string>
 }
 
 export async function readConfiguration(filename: string): Promise<Configuration> {
@@ -29,6 +30,9 @@ export async function readConfiguration(filename: string): Promise<Configuration
     grantFile: path.resolve(path.dirname(filename), grant),
     ...(typeof value.accountID === "string" ? { accountID: value.accountID } : {}),
     ...(typeof value.allowLoopbackHTTP === "boolean" ? { allowLoopbackHTTP: value.allowLoopbackHTTP } : {}),
+    ...(Array.isArray(value.sessionIDs)
+      ? { sessionIDs: value.sessionIDs.filter((id): id is string => typeof id === "string") }
+      : {}),
   }
 }
 

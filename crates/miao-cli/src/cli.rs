@@ -4208,6 +4208,7 @@ fn serve_forever(rest: &[String]) -> Result<(), String> {
     let mut workspace: Option<PathBuf> = None;
     let mut model: Option<String> = None;
     let mut idle_ms: Option<u64> = None;
+    let mut remote_host: Option<PathBuf> = None;
     let mut index = 0;
     while index < rest.len() {
         let value = |offset: usize| rest.get(offset + 1).cloned();
@@ -4233,6 +4234,12 @@ fn serve_forever(rest: &[String]) -> Result<(), String> {
             }
             "--idle-ms" => {
                 idle_ms = value(index).and_then(|value| value.parse().ok());
+                index += 2;
+            }
+            "--remote-host" => {
+                remote_host = Some(PathBuf::from(
+                    value(index).ok_or("--remote-host needs a value")?,
+                ));
                 index += 2;
             }
             _ => index += 1,
@@ -4269,16 +4276,84 @@ fn serve_forever(rest: &[String]) -> Result<(), String> {
         let address = listener.local_addr().map_err(|error| error.to_string())?;
         let token = std::env::var("MIAO_SERVER_PASSWORD")
             .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+        let remote = match remote_host {
+            Some(config) => Some(spawn_remote_host(&config, address, &token)?),
+            None => None,
+        };
         println!("miao serve listening on http://{address} token={token}");
-        miao_engine::http::serve_with_idle_timeout(
+        let served = miao_engine::http::serve_with_idle_timeout(
             configured.runtime,
             listener,
             token,
             idle_ms.map(Duration::from_millis),
         )
-        .await
-        .map_err(|error| error.to_string())
+        .await;
+        if let Some(mut child) = remote {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        served.map_err(|error| error.to_string())
     })
+}
+
+/// Start the optional Remote Control host for this serve process.
+///
+/// The sidecar is one process per window, so its runtime identity is fresh on
+/// every start. The engine token travels in the environment, never argv: the
+/// process table is readable by other local users on most systems.
+fn spawn_remote_host(
+    config: &Path,
+    address: std::net::SocketAddr,
+    token: &str,
+) -> Result<std::process::Child, String> {
+    if !config.is_file() {
+        return Err(format!("--remote-host {} is not a file", config.display()));
+    }
+    let name = if cfg!(windows) {
+        "miao-remote.exe"
+    } else {
+        "miao-remote"
+    };
+    let explicit = std::env::var_os("MIAO_REMOTE_HOST_BIN").map(PathBuf::from);
+    let script = std::env::var_os("MIAO_REMOTE_HOST_SCRIPT").map(PathBuf::from);
+    let binary = explicit.or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|directory| directory.join(name)))
+    });
+    let (program, args) = match (&binary, &script) {
+        (Some(binary), _) if binary.is_file() => (binary.clone(), Vec::new()),
+        (_, Some(script)) if script.is_file() => (
+            PathBuf::from("bun"),
+            vec!["run".to_string(), script.display().to_string()],
+        ),
+        (Some(binary), _) => {
+            return Err(format!(
+                "Remote Control needs {} beside miao (or set MIAO_REMOTE_HOST_BIN)",
+                binary.display()
+            ))
+        }
+        (None, Some(script)) => {
+            return Err(format!(
+                "MIAO_REMOTE_HOST_SCRIPT {} is not a file",
+                script.display()
+            ))
+        }
+        (None, None) => return Err(
+            "cannot locate miao-remote beside miao; build it with `bun script/build-remote.ts` \
+                 or set MIAO_REMOTE_HOST_BIN"
+                .into(),
+        ),
+    };
+    std::process::Command::new(program)
+        .args(args)
+        .env("MIAO_ENGINE_HTTP_URL", format!("http://{address}"))
+        .env("MIAO_ENGINE_HTTP_TOKEN", token)
+        .env("MIAO_RUNTIME_ID", uuid::Uuid::new_v4().to_string())
+        .env("MIAO_REMOTE_CONTROL_CONFIG", config)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("start remote host: {error}"))
 }
 
 /// Read the operator's standing instructions the way the product does: the
