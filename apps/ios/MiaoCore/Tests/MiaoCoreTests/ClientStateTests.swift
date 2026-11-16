@@ -111,4 +111,26 @@ final class ClientStateTests: XCTestCase {
         XCTAssertEqual(pending.first?.id, create.id)
     }
 
+    func testFailedTransmissionRetriesOnlyWithTheOriginalIdentityAndPayload() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CheckpointStore(directory: directory, scope: scope)
+        let operation = PendingOperation(scope: scope, address: address, kind: .prompt,
+                                         payload: Data("{\"text\":\"hello\"}".utf8))
+        _ = try await store.prepare(operation)
+        try await store.markSending(operation.id)
+        try await store.markRetrying(operation.id)
+        let pending = try await store.reconciliation()
+        XCTAssertEqual(pending.map(\.id), [operation.id])
+        XCTAssertEqual(pending.first?.status, .awaitingConfirmation)
+        XCTAssertEqual(pending.first?.payload, operation.payload)
+
+        let conflicting = PendingOperation(id: operation.id, scope: scope, address: address,
+                                           kind: .prompt, payload: Data("{\"text\":\"changed\"}".utf8))
+        do {
+            _ = try await store.prepare(conflicting)
+            XCTFail("A retry may not change immutable parameters")
+        } catch { XCTAssertEqual(error as? ClientStateError, .operationConflict) }
+    }
+
 }

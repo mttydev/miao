@@ -52,6 +52,20 @@ public actor CheckpointStore {
         try persist(next)
     }
 
+    /// A failed socket write may be retried only with the original identity and
+    /// payload. The host reconciles an exact retry; a new id would duplicate it.
+    public func markRetrying(_ id: UUID) throws {
+        var next = try load()
+        guard let index = next.operations.firstIndex(where: { $0.id == id }) else {
+            throw ClientStateError.operationMissing
+        }
+        guard [.prepared, .awaitingConfirmation].contains(next.operations[index].status) else {
+            throw ClientStateError.invalidTransition
+        }
+        try next.operations[index].transition(.awaitingConfirmation, result: nil)
+        try persist(next)
+    }
+
     public func resolve(_ id: UUID, status: OperationStatus, result: Data? = nil) throws {
         var next = try load()
         guard let index = next.operations.firstIndex(where: { $0.id == id }) else {

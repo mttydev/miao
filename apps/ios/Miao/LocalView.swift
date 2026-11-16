@@ -16,7 +16,6 @@ struct LocalView: View {
     @State private var speech = SpeechInput()
     @State private var appearance = false
     @State private var viewing: String?
-    @AppStorage("localTypeSize") private var typeSize = 1
     @AppStorage("localAccent") private var accent = 0
 
     private var tint: Color {
@@ -59,7 +58,6 @@ struct LocalView: View {
                 }
             }
             .tint(tint)
-            .dynamicTypeSize(typeSize == 0 ? .medium : typeSize == 1 ? .large : .xLarge)
             .navigationTitle(agent.provider.model.isEmpty ? "本机" : agent.provider.model)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -96,10 +94,12 @@ struct LocalView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                     .accessibilityIdentifier("localSettings")
+                    .accessibilityLabel("设置与导出")
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     Button { sidebarVisible ? close() : open() } label: { Image(systemName: "list.bullet") }
                         .accessibilityIdentifier("localSessions")
+                        .accessibilityLabel("会话列表")
                 }
             }
             .sheet(isPresented: $configuring) {
@@ -118,12 +118,6 @@ struct LocalView: View {
                 NavigationStack {
                     Form {
                         Section {
-                            Picker("对话字号", selection: $typeSize) {
-                                Text("标准").tag(0)
-                                Text("较大").tag(1)
-                                Text("最大").tag(2)
-                            }
-                            .pickerStyle(.segmented)
                             Toggle("自动允许本机工具", isOn: Binding(
                                 get: { agent.autoAllowTools },
                                 set: { agent.autoAllowTools = $0 }
@@ -331,12 +325,14 @@ struct LocalView: View {
                     Image(systemName: "photo.on.rectangle").font(.title3)
                 }
                 .accessibilityIdentifier("localAttach")
+                .accessibilityLabel("添加图片")
                 Button { Task { await dictate() } } label: {
                     Image(systemName: speech.recording ? "waveform.circle.fill" : "mic")
                         .font(.title3)
                         .foregroundStyle(speech.recording ? Color.red : Color.accentColor)
                 }
                 .accessibilityIdentifier("localDictate")
+                .accessibilityLabel(speech.recording ? "停止听写" : "语音输入")
                 TextField("说点什么…", text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .textFieldStyle(.plain)
@@ -348,10 +344,12 @@ struct LocalView: View {
             if agent.busy {
                 Button { tap(); agent.stop() } label: { Image(systemName: "stop.circle.fill").font(.title2) }
                     .accessibilityIdentifier("localStop")
+                    .accessibilityLabel("停止生成")
             } else {
                 Button { send() } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
                     .disabled(!agent.ready || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty))
                     .accessibilityIdentifier("localSend")
+                    .accessibilityLabel("发送")
             }
             }
         }

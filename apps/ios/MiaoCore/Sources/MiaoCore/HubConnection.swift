@@ -13,6 +13,7 @@ public actor HubConnection: ClientConnection {
     private let channel: SecureSession
     private let reconcile: Reconcile
     private var pending: [String: Pending] = [:]
+    public private(set) var capabilities = HostCapabilities.legacy
     private var reader: Task<Void, Never>?
     private var sender: Task<Void, Never>?
     private var assembler = ResponseAssembler()
@@ -77,7 +78,7 @@ public actor HubConnection: ClientConnection {
     public var target: RemoteTarget { host.target }
 
     public func synchronize() async throws {
-        _ = try await request(.capabilities)
+        capabilities = HostCapabilities(try await request(.capabilities))
         try await reconcile(self)
     }
 

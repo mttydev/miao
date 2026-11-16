@@ -41,6 +41,30 @@ final class RemoteRPCTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value)), value)
     }
 
+    func testHostCapabilitiesAdvertiseOnlyWhatTheHostDeclares() {
+        let value = JSONValue.object([
+            "protocol": .number(1),
+            "features": .array([.string("attachments"), .string("file-search")]),
+            "commands": .array([
+                .object(["name": .string("compact"), "description": .string("压缩上下文")]),
+                .string("review"),
+            ]),
+            "maxPromptCharacters": .number(120_000),
+            "maxAttachmentBytes": .number(65_536),
+            "session-activity": .bool(true),
+        ])
+        let capabilities = HostCapabilities(value)
+        XCTAssertEqual(capabilities.protocolVersion, 1)
+        XCTAssertTrue(capabilities.supportsAttachments)
+        XCTAssertTrue(capabilities.supportsFileSearch)
+        XCTAssertTrue(capabilities.supportsSessionActivity)
+        XCTAssertEqual(capabilities.commands.map(\.name), ["compact", "review"])
+        XCTAssertEqual(capabilities.commands.first?.description, "压缩上下文")
+        XCTAssertEqual(capabilities.maxPromptCharacters, 120_000)
+        XCTAssertEqual(capabilities.maxAttachmentBytes, 65_536)
+        XCTAssertEqual(HostCapabilities(.object([:])), .legacy)
+    }
+
     private func chunk(_ transferID: String, _ index: Int, _ total: Int, _ value: Data) throws -> Data {
         try JSONSerialization.data(withJSONObject: ["version": 1, "type": "chunk", "transferID": transferID,
                                                     "index": index, "total": total, "payload": value.base64URL])

@@ -8,15 +8,29 @@ final class SpeechInput {
     var recording = false
     var requesting = false
     var error: String?
+    /// Empty means the device language. A selected identifier is passed to the
+    /// recognizer before it starts, so changing it never restarts a live task.
+    var localeIdentifier = ""
+    private(set) var duration: TimeInterval = 0
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var generation = 0
     private var tapped = false
     private var expectedDraft = ""
+    private var origin = ""
+    private var startedAt: Date?
+    private var ticker: Task<Void, Never>?
+    private var interruptionObserver: NSObjectProtocol?
+    private var routeObserver: NSObjectProtocol?
+
+    var durationText: String {
+        String(format: "%d:%02d", Int(duration) / 60, Int(duration) % 60)
+    }
 
     /// Recognition only edits the draft. It never submits a prompt or approval.
-    func start(text: String, accept: @escaping @MainActor (String, String) -> Bool) async {
+    func start(text: String, locale: String? = nil,
+               accept: @escaping @MainActor (String, String) -> Bool) async {
         guard !recording, !requesting else { return }
         generation += 1; let current = generation
         requesting = true; error = nil
@@ -29,9 +43,11 @@ final class SpeechInput {
         guard generation == current else { return }
         requesting = false
         guard speech == .authorized, microphone else { error = "请在系统设置中允许麦克风和语音识别"; return }
-        guard let recognizer = SFSpeechRecognizer(locale: .autoupdatingCurrent), recognizer.isAvailable,
+        let selected = locale ?? localeIdentifier
+        let recognizerLocale = selected.isEmpty ? Locale.autoupdatingCurrent : Locale(identifier: selected)
+        guard let recognizer = SFSpeechRecognizer(locale: recognizerLocale), recognizer.isAvailable,
               recognizer.supportsOnDeviceRecognition else {
-            error = "当前无法使用离线语音识别，也可以使用系统键盘的听写功能"; return
+            error = "当前语言无法使用离线语音识别，也可以使用系统键盘的听写功能"; return
         }
         do {
             let audio = AVAudioSession.sharedInstance()
@@ -47,6 +63,11 @@ final class SpeechInput {
             tapped = true
             engine.prepare(); try engine.start(); recording = true
             expectedDraft = text
+            origin = text
+            startedAt = Date()
+            duration = 0
+            startTicker()
+            observeAudioSession()
             task = recognizer.recognitionTask(with: request) { [weak self] result, failure in
                 let words = result?.bestTranscription.formattedString
                 let finished = result?.isFinal == true || failure != nil
@@ -63,11 +84,66 @@ final class SpeechInput {
         } catch { stop(); self.error = "语音输入暂时不可用" }
     }
 
+    /// Stop keeps the recognized text. Cancel restores the draft captured when
+    /// recording began, so a mis-tap never leaves half a sentence behind.
+    func cancel(restore: @MainActor (String) -> Void) {
+        let original = origin
+        stop()
+        restore(original)
+    }
+
     func stop() {
         generation += 1; requesting = false; recording = false
+        ticker?.cancel(); ticker = nil
+        removeAudioObservers()
+        startedAt = nil
         engine.stop()
         if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
         request?.endAudio(); task?.cancel(); task = nil; request = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    private func startTicker() {
+        ticker?.cancel()
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard let self, self.recording, let startedAt = self.startedAt else { return }
+                self.duration = Date().timeIntervalSince(startedAt)
+            }
+        }
+    }
+
+    private func observeAudioSession() {
+        removeAudioObservers()
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.recording else { return }
+                self.stop()
+                self.error = "录音被系统中断，已保留已识别文字"
+            }
+        }
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.recording else { return }
+                self.stop()
+                self.error = "音频设备已断开，语音已停止"
+            }
+        }
+    }
+
+    private func removeAudioObservers() {
+        if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        interruptionObserver = nil
+        routeObserver = nil
     }
 }
