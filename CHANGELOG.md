@@ -11,6 +11,15 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.81] - 2026-11-16
+
+### Added
+- **ios**: strengthen remote session usability (#3108) (`d593d56d6a`)
+
+### Fixed
+- **tui**: open a Session at its tail instead of replaying its history (#3106) (`962a9490be`)
+- **tui**: paint edit diffs and keep them in view (#3107) (`5249f677b8`)
+
 ## [0.3.80] - 2026-11-16
 
 ### Added
