@@ -439,9 +439,10 @@ impl Parser for ResponsesState {
         };
         match event["type"].as_str() {
             Some("response.created") => {
-                if self.created {
-                    return Err(ProviderError::Stream("duplicate response.created".into()));
-                }
+                // A replayed `created` (resubscribe after a dropped socket)
+                // carries the same response; skipping it keeps the stream
+                // alive where a hard failure would kill a turn the provider
+                // was still going to finish.
                 self.created = true;
             }
             Some("response.completed") => self.completed = Some(event["response"].clone()),
@@ -658,8 +659,11 @@ impl Parser for ResponsesState {
                         .as_str()
                         .filter(|s| !s.is_empty())
                         .ok_or_else(invalid)?;
+                    // A replayed call carries nothing new; the first instance
+                    // already entered the content, so a duplicate skips
+                    // instead of failing the whole turn.
                     if !calls.insert(id.to_owned()) {
-                        return Err(invalid());
+                        continue;
                     }
                     content.push(crate::provider::decode_tool_call(
                         id,
@@ -700,3 +704,83 @@ impl Parser for ResponsesState {
 #[cfg(test)]
 #[path = "openai_responses_websocket_tests.rs"]
 mod websocket_tests;
+
+#[cfg(test)]
+mod stream_dedup_tests {
+    use super::*;
+
+    fn completed_frame(output: Value) -> Frame {
+        Frame::Json(json!({
+            "type": "response.completed",
+            "response": {"id": "r1", "status": "completed", "output": output}
+        }))
+    }
+
+    #[test]
+    fn a_replayed_created_is_skipped_not_fatal() {
+        let mut state = ResponsesState::default();
+        let created = Frame::Json(json!({"type": "response.created", "response": {"id": "r1"}}));
+        state.frame(&created).unwrap();
+        state.frame(&created).unwrap();
+        let message = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "ok"}]
+        });
+        state
+            .frame(&Frame::Json(json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": message
+            })))
+            .unwrap();
+        state
+            .frame(&completed_frame(json!([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}])))
+            .unwrap();
+        let reply = state.finish().unwrap();
+        assert_eq!(reply.content[0]["text"], "ok");
+    }
+
+    #[test]
+    fn a_duplicated_function_call_is_deduplicated_by_call_id() {
+        let mut state = ResponsesState::default();
+        state
+            .frame(&Frame::Json(
+                json!({"type": "response.created", "response": {"id": "r1"}}),
+            ))
+            .unwrap();
+        let call = json!({
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "read_file",
+            "arguments": "{}",
+            "status": "completed"
+        });
+        let done = Frame::Json(json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": call
+        }));
+        state.frame(&done).unwrap();
+        state.frame(&done).unwrap();
+        state
+            .frame(&completed_frame(json!([{
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": "{}",
+                "status": "completed"
+            }])))
+            .unwrap();
+        let reply = state.finish().unwrap();
+        let calls: Vec<_> = reply
+            .content
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert!(reply.needs_tools);
+    }
+}
