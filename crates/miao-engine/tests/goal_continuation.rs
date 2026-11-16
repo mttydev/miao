@@ -275,13 +275,75 @@ async fn continues_independent_work_without_a_human_prompt_then_idles_with_locke
 }
 
 #[tokio::test]
-async fn no_progress_is_bounded_and_synthetic_admissions_do_not_restart_the_loop_budget() {
+async fn a_paced_text_only_wait_ends_the_drain_instead_of_re_requesting_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    setup(&store, "active", true, true, dir.path()).await;
+    let provider = Arc::new(Script {
+        calls: AtomicUsize::new(0),
+        progress: false,
+        churn: false,
+        finish_after: None,
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        Policy::new(Config {
+            // The production pacing interval. The bug only appears when the
+            // next continuation is too soon, so a zero interval never drove it.
+            continuation_min_interval_ms: 30_000,
+            mode: Mode::Workspace,
+            ..Config::default()
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime.resume("s").await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), finished_runs(&store, 1))
+        .await
+        .expect("a paced continuation must end the drain, not re-request the same reply");
+
+    let calls = provider.calls.load(Ordering::SeqCst);
+    assert!(
+        calls <= 2,
+        "the same text-only reply was requested again while the interval ran: {calls} calls"
+    );
+    let events = store.events("s", 0, 5000).await.unwrap();
+    assert!(
+        events.iter().any(|event| event.kind == "loop.paced"),
+        "{:?}",
+        events
+            .iter()
+            .filter(|event| event.kind.starts_with("loop."))
+            .map(|event| event.kind.clone())
+            .collect::<Vec<_>>()
+    );
+    let waiting = events
+        .iter()
+        .filter(|event| {
+            event.kind == "message.committed"
+                && event.data["role"] == "assistant"
+                && event.data["content"].to_string().contains("waiting")
+        })
+        .count();
+    assert!(
+        waiting <= 2,
+        "the wait line flooded the transcript: {waiting} messages"
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_paced_text_only_reply_pauses_with_one_visible_note() {
     let _env = NO_PROGRESS_ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("engine.db")).await.unwrap();
     setup(&store, "active", true, true, dir.path()).await;
-    // The no-progress pause fires on the second text-only stall; this test
-    // pins that behaviour with the operator-tunable grace pinned to zero.
+    // The first continuation is allowed; the next one is paced. The old loop
+    // re-requested the model instead of waiting, which repeated the same
+    // text-only reply indefinitely. This test pins the visible pause.
     std::env::set_var("MIAO_NO_PROGRESS_MIN_SECS", "0");
     let provider = Arc::new(Script {
         calls: AtomicUsize::new(0),
@@ -299,13 +361,13 @@ async fn no_progress_is_bounded_and_synthetic_admissions_do_not_restart_the_loop
     runtime.resume("s").await.unwrap();
     finished(&store).await;
     std::env::remove_var("MIAO_NO_PROGRESS_MIN_SECS");
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     assert!(store
         .events("s", 0, 500)
         .await
         .unwrap()
         .iter()
-        .any(|event| event.kind == "loop.stopped" && event.data["reason"] == "no-progress"));
+        .any(|event| event.kind == "loop.paced"));
     assert!(store
         .events("s", 0, 500)
         .await
@@ -316,20 +378,19 @@ async fn no_progress_is_bounded_and_synthetic_admissions_do_not_restart_the_loop
                 && event.data["source"] == "engine"
                 && event.data["input_id"]
                     .as_str()
-                    .is_some_and(|id| id.starts_with("loop-paused-"))
+                    .is_some_and(|id| id.starts_with("loop-paced-"))
                 && event.data["text"]
                     .as_str()
                     .is_some_and(|text| text.contains("Task paused"))
         }));
 }
 
-/// A model that answers a goal continuation with text only, twice, on an
-/// unchanged todo list is reporting that it has nothing it can do. Holding that
-/// pause behind a wall-clock window billed the whole context to every paced
-/// continuation in between, which is the "等待中" churn an operator saw for
-/// minutes at a time.
+/// A model that answers a goal continuation with text only is reporting that
+/// it has nothing it can do. Re-requesting it while the pacing interval runs
+/// repeated the same reply indefinitely; the drain now pauses after the first
+/// continuation and leaves the loop active for the next real notice.
 #[tokio::test]
-async fn a_text_only_wait_pauses_at_the_second_stall_without_a_wall_clock_floor() {
+async fn a_text_only_wait_pauses_at_the_first_paced_turn() {
     let _env = NO_PROGRESS_ENV_LOCK.lock().await;
     std::env::remove_var("MIAO_NO_PROGRESS_MIN_SECS");
     let dir = tempfile::tempdir().unwrap();
@@ -355,13 +416,13 @@ async fn a_text_only_wait_pauses_at_the_second_stall_without_a_wall_clock_floor(
     .await
     .expect("a repeated text-only reply must pause without waiting out a floor");
     let calls = provider.calls.load(Ordering::SeqCst);
-    assert!(calls <= 4, "paused after {calls} provider calls");
+    assert_eq!(calls, 2, "the paced reply was re-requested");
     assert!(store
         .events("s", 0, 500)
         .await
         .unwrap()
         .iter()
-        .any(|event| event.kind == "loop.stopped" && event.data["reason"] == "no-progress"));
+        .any(|event| event.kind == "loop.paced"));
 }
 
 #[tokio::test]
@@ -635,13 +696,13 @@ async fn stalled_todos_pause_the_loop_without_any_goal() {
     .unwrap();
     runtime.resume("s").await.unwrap();
     finished(&store).await;
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     assert!(store
         .events("s", 0, 500)
         .await
         .unwrap()
         .iter()
-        .any(|event| event.kind == "loop.stopped" && event.data["reason"] == "no-progress"));
+        .any(|event| event.kind == "loop.paced"));
     runtime.shutdown().await;
 }
 

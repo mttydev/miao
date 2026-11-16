@@ -6130,7 +6130,33 @@ command: None,
                         .map(|t| t.elapsed().as_millis())
                         .unwrap_or(u128::MAX);
                     if waited < floor {
-                        continue;
+                        // Re-entering the provider here with no new input asks
+                        // the model the same question again. A model that
+                        // answered with a wait line repeats it on every
+                        // re-request — the "等待 CI 结论中。" flood — and the
+                        // flat/no-progress bounds never run because this branch
+                        // returns before they are counted. End the drain with a
+                        // single visible pause instead: the next background
+                        // notice or operator message re-arms the loop with real
+                        // input.
+                        inner
+                            .store
+                            .record(
+                                session,
+                                "loop.paced",
+                                json!({"run_id":run,"waited_ms":waited,"floor_ms":floor}),
+                            )
+                            .await?;
+                        inner
+                            .store
+                            .inject(
+                                session,
+                                &format!("loop-paced-{run}"),
+                                "Task paused: the model answered with text only and the next continuation is not due yet. Nothing is running now; a background notice or your next message resumes the task.",
+                                "engine",
+                            )
+                            .await?;
+                        return Ok(());
                     }
                     goal_last = Some(std::time::Instant::now());
                     goal_iterations += 1;
