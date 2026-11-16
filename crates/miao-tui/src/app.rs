@@ -1527,6 +1527,10 @@ impl App {
                 self.shell.composer.restore_shell(&command);
                 self.shell.composer.notice = Some(message);
             }
+            AppEvent::UpdateReady(version) => {
+                self.set_pending_update(Some(version.clone()));
+                self.notice(&format!("{version} installed · restart to apply"));
+            }
             AppEvent::EngineFailure(message) => {
                 // A start failure leaves the operator looking at one line with
                 // no way forward; the failures this TUI can actually explain
@@ -4566,6 +4570,7 @@ impl App {
                 self.shell.status.hints.push(StatusHint {
                     text: "auto-approve".to_string(),
                     warning: true,
+                    success: false,
                 });
             }
             self.mtty_state.update(crate::mtty_state::State::Idle);
@@ -4781,11 +4786,13 @@ impl App {
             }
             .to_string(),
             warning: false,
+            success: false,
         }];
         if let Some(installed) = &self.pending_update {
             hints.push(StatusHint {
-                text: format!("{installed} installed · restart to apply"),
-                warning: true,
+                text: format!("{installed} ready · restart to apply"),
+                warning: false,
+                success: true,
             });
         }
         // Scrolled away from the newest row: the transcript keeps filling below
@@ -4795,6 +4802,7 @@ impl App {
             hints.push(StatusHint {
                 text: "not following · end to resume".to_string(),
                 warning: false,
+                success: false,
             });
         }
         // A blocking approval or question is already the phase line, so
@@ -4810,6 +4818,7 @@ impl App {
                     "esc interrupt".to_string()
                 },
                 warning: false,
+                success: false,
             });
         }
         // A spent balance and a vendor rate limit are the two waits whose
@@ -4832,6 +4841,7 @@ impl App {
                 hints.push(StatusHint {
                     text,
                     warning: false,
+                    success: false,
                 });
             }
         }
@@ -4844,6 +4854,7 @@ impl App {
             hints.push(StatusHint {
                 text: "auto-approve".to_string(),
                 warning: true,
+                success: false,
             });
         }
         // A hidden column took its own chord with it. Naming it here is what
@@ -4853,6 +4864,7 @@ impl App {
             hints.push(StatusHint {
                 text: format!("{chord} sidebar"),
                 warning: false,
+                success: false,
             });
         }
         self.shell.status.hints = hints;

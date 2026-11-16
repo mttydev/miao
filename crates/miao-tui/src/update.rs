@@ -6,6 +6,7 @@
 //! and concludes the upgrade did not happen.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// The stable launcher the installer repoints. `miao-preview` and `miao-dev`
 /// live elsewhere and are their own channels, so a build that is not this file
@@ -69,6 +70,87 @@ pub fn pending() -> Option<String> {
         .ok()?;
     let installed = parse(std::str::from_utf8(&output.stdout).ok()?)?;
     newer(&installed, crate::VERSION).then_some(installed)
+}
+
+/// Whether this process is the release launcher's own build. `miao-dev` and
+/// `miao-preview` are separate channels: they must never repoint the release
+/// launcher, and the release launcher is the only build that may update itself.
+pub fn is_release_build() -> bool {
+    let Some(running) = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+    else {
+        return false;
+    };
+    let Some(installed) = launcher().and_then(|path| std::fs::canonicalize(path).ok()) else {
+        return false;
+    };
+    running == installed
+}
+
+/// How often a running release build re-checks. The upstream docs promise
+/// "startup and periodically while running" without a number; an hour notices
+/// a release within one work session and costs one redirect per check.
+pub fn check_interval() -> Duration {
+    let seconds = std::env::var("MIAO_UPDATE_CHECK_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds >= 60)
+        .unwrap_or(3600);
+    Duration::from_secs(seconds)
+}
+
+/// The version staged by this check, if any. Installs the newest release in the
+/// background, the way `miao upgrade` repoints the launcher, and leaves the
+/// running process on its own build until the operator restarts.
+pub fn auto_update() -> Option<String> {
+    if let Some(installed) = pending() {
+        return Some(installed);
+    }
+    if !is_release_build() {
+        return None;
+    }
+    let _lock = UpdateLock::acquire()?;
+    let running = std::env::current_exe().ok()?;
+    let _ = std::process::Command::new(running)
+        .arg("upgrade")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    pending()
+}
+
+/// One updater per installation. A window that loses the race checks again on
+/// its next interval instead of installing the same release twice.
+struct UpdateLock(PathBuf);
+
+impl UpdateLock {
+    fn acquire() -> Option<Self> {
+        let path = launcher()?.with_file_name(".update.lock");
+        // A process killed mid-install leaves the file behind; age it out so
+        // the next check is not suppressed forever.
+        if std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(10 * 60))
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .ok()?;
+        Some(Self(path))
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[cfg(test)]

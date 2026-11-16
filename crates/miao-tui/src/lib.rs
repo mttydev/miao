@@ -190,7 +190,7 @@ async fn drive(
         Err(message) => app.handle(AppEvent::EngineFailure(message)),
     }
     app.set_bus(bus.clone());
-    let input = input::spawn(bus);
+    let input = input::spawn(bus.clone());
     app.start();
     let mut title = terminal_title::Title::new(std::io::stdout());
     // A paint whose PTY cannot accept it must never end the run. A hidden
@@ -204,6 +204,8 @@ async fn drive(
     // unrelated full repaint (a keystroke, a resize) repairs it. `clear`
     // resets the back buffer so the next draw repaints everything.
     let mut repaint_all = false;
+    let mut update_check = tokio::time::interval(update::check_interval());
+    update_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let _ = title.update(app.terminal_title().as_deref());
         if repaint_all {
@@ -290,6 +292,14 @@ async fn drive(
         tokio::select! {
             _ = termination.next() => return Ok(()),
             _ = repaint => {}
+            _ = update_check.tick() => {
+                let bus = bus.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(version) = update::auto_update() {
+                        bus.send(AppEvent::UpdateReady(version));
+                    }
+                });
+            }
             event = events.recv() => match event {
                 Some(app_event) => {
                     if matches!(&app_event, AppEvent::Focus(true) | AppEvent::Resize { .. }) {

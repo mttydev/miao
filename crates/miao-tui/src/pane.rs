@@ -2265,10 +2265,12 @@ pub struct StatusStrip {
 }
 
 /// One right-aligned status hint. `warning` marks something the operator must
-/// act on rather than a fact about the run.
+/// act on, `success` something that went right; both keep a glyph so they read
+/// on a monochrome terminal.
 pub struct StatusHint {
     pub text: String,
     pub warning: bool,
+    pub success: bool,
 }
 
 /// What the Session composer's bottom border carries: the facts the status
@@ -5583,10 +5585,12 @@ mod tests {
                 StatusHint {
                     text: "approve or deny".into(),
                     warning: true,
+                    success: false,
                 },
                 StatusHint {
                     text: "ctrl+c to interrupt".into(),
                     warning: false,
+                    success: false,
                 },
             ],
         };
@@ -6869,6 +6873,7 @@ mod tests {
         status.hints.push(StatusHint {
             text: "queued (2)".to_string(),
             warning: false,
+            success: false,
         });
         let painted = paint_composer_footer(&status, None, 80);
         assert!(painted.contains("queued (2)"), "{painted}");
