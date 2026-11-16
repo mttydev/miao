@@ -78,6 +78,23 @@ function Publish-Miao {
   } finally { Remove-Item -LiteralPath $stage -Recurse -Force }
 }
 
+# Remote Control's host ships beside miao. Archives from before the sidecar
+# existed stay valid: the call site only invokes this when the file exists.
+function Publish-MiaoSidecar {
+  param([string]$Source, [string]$Destination)
+  $directory = Split-Path -Parent $Destination
+  $stage = Join-Path $directory ('.remote-' + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $stage | Out-Null
+  try {
+    $candidate = Join-Path $stage (Split-Path -Leaf $Destination)
+    Copy-Item -LiteralPath $Source -Destination $candidate
+    if ((Test-Path -LiteralPath $Destination) -and (Get-FileHash -LiteralPath $candidate).Hash -eq (Get-FileHash -LiteralPath $Destination).Hash) { return }
+    if (Test-Path -LiteralPath $Destination) {
+      [IO.File]::Replace($candidate, $Destination, $null)
+    } else { [IO.File]::Move($candidate, $Destination) }
+  } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 function Get-MiaoEngineCapabilities {
   param([string]$Binary)
   # Windows PowerShell 5.1 promotes native stderr into an error record. A
@@ -301,6 +318,8 @@ function Install-Miao {
       $actual = Get-MiaoVersionWord (& $downloaded.FullName --version | Out-String)
       if ($LASTEXITCODE -ne 0 -or $actual -ne $Version) { throw 'Release failed version verification' }
       Publish-Miao $downloaded.FullName $exe
+      $remote = Get-ChildItem -Path $tmp -Recurse -Filter 'miao-remote.exe' | Select-Object -First 1
+      if ($remote) { Publish-MiaoSidecar $remote.FullName (Join-Path $installDir 'miao-remote.exe') }
       Install-MiaoEngine -InstallDirectory $installDir -Version $Version -Binary $EngineBinary -Download:$true
     }
     finally {

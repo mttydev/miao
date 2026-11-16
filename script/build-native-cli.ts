@@ -181,6 +181,21 @@ async function buildNativeArchives(spec: {
       copyFile(bin, path.join(staging, staged)),
       ...spec.licenses.map((file) => copyFile(file, path.join(staging, path.basename(file)))),
     ])
+    // Remote Control's host is a Bun-compiled sidecar: shipping it beside the
+    // single binary keeps the engine free of a JavaScript runtime while the
+    // opt-in feature stays installable.
+    const remote = `${spec.binary}-remote${suffix}`
+    const bunTarget = `bun-${os}-${arch}`
+    await $`bun build --compile --minify --target ${bunTarget} --outfile ${path.join(staging, remote)} packages/engine-ts/remote-control/script/host.ts`
+    files.push(remote)
+    if (process.platform === "darwin") {
+      const identity = await developerIdIdentity()
+      if (identity) {
+        await codesign(["--force", "--options", "runtime", "--timestamp", "--sign", identity, path.join(staging, remote)])
+      } else {
+        await codesign(["--force", "--sign", "-", path.join(staging, remote)])
+      }
+    }
     if (process.platform === "win32") {
       await $`powershell -NoProfile -Command ${`Compress-Archive -Path ${staging}/* -DestinationPath dist/${name}.zip -Force`}`
       archives.push(`./dist/${name}.zip`)
