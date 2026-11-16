@@ -1065,119 +1065,46 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
         }
     }
     tools = tools.with_mcp_disclosure(mcp_disclosure, mcp_disclosure_allowlist);
-    if let Some(path) = options.get("--worker-config") {
-        let path = tokio::fs::canonicalize(path).await?;
-        if crate::placement::plain(&path)
-            .starts_with(crate::placement::plain(std::path::Path::new(tools.location())).as_ref())
-        {
-            return Err("Worker host config must be outside model-writable workspace".into());
-        }
-        let bytes = tokio::fs::read(&path).await?;
-        if bytes.len() > 65536 {
-            return Err("Worker config exceeds 64 KiB".into());
-        }
-        let config = serde_json::from_slice::<miao_engine::worker::Config>(&bytes)
-            .map_err(|_| "invalid Worker host config")?;
+    // Worker, MCP and LSP startup are independent: each validates its own
+    // manifest and connects or spawns its own children, sharing only the
+    // workspace path. Sequential awaits meant a slow MCP handshake delayed the
+    // LSP registry and vice versa. Results are still applied in the original
+    // order below, so the first reported failure and the tool attachments are
+    // the same as before.
+    let location = std::path::PathBuf::from(tools.location());
+    let (worker, mcp, lsp) = tokio::join!(
+        connect_worker(options.get("--worker-config").cloned(), location.clone()),
+        connect_mcp(
+            options.get("--mcp-config").cloned(),
+            std::env::var_os("MIAO_ENGINE_MCP_SERVERS")
+                .map(|raw| raw.to_string_lossy().into_owned()),
+            policy.mcp_enabled(),
+            location.clone(),
+        ),
+        connect_lsp(
+            options.get("--lsp-config").cloned(),
+            options.get("--config-sources").cloned(),
+            options.get("--config-dir").cloned(),
+            location,
+        ),
+    );
+    if let Some((path, registry)) = worker? {
+        tools = tools.with_protected_resource(&path).with_worker(registry);
+    }
+    let (mcp_registry, mcp_origin, mcp_manifest) = mcp?;
+    if let Some(path) = mcp_manifest {
         tools = tools.with_protected_resource(&path);
-        match miao_engine::worker::Registry::connect(config, std::path::Path::new(tools.location()))
-            .await
-        {
-            Ok(registry) => tools = tools.with_worker(Arc::new(registry)),
-            Err(error) => eprintln!(
-                "miao-engine extension worker unavailable: {error}; built-in tools remain available"
-            ),
-        }
     }
-    let mut mcp_origin = None;
-    if let Some(raw) = std::env::var_os("MIAO_ENGINE_MCP_SERVERS") {
-        // A host that already holds the server list hands it over inline: no
-        // temporary file to write, guard, and clean up. An explicit
-        // `--mcp-config` still wins, so an operator's on-disk manifest is never
-        // silently replaced by a product default.
-        if !options.contains_key("--mcp-config") {
-            if !policy.mcp_enabled() {
-                return Err("MCP config requires explicit workspace allow_mcp authority".into());
-            }
-            let value: serde_json::Value = serde_json::from_str(&raw.to_string_lossy())
-                .map_err(|_| "invalid inline MCP host config")?;
-            let origin = miao_engine::config_derive::McpOrigin::Inline(value);
-            let registry = miao_engine::mcp::Registry::connect(
-                origin.derive()?,
-                std::path::Path::new(tools.location()),
-            )
-            .await?;
-            let registry = Arc::new(registry);
-            registry.start_watchers();
-            tools = tools.with_mcp(registry);
-            mcp_origin = Some(origin);
-        }
-    }
-    if let Some(path) = options.get("--mcp-config") {
-        if !policy.mcp_enabled() {
-            return Err("MCP config requires explicit workspace allow_mcp authority".into());
-        }
-        let path = tokio::fs::canonicalize(path).await?;
-        if path.starts_with(std::path::Path::new(tools.location())) {
-            return Err("MCP host config must be outside model-writable workspace".into());
-        }
-        let origin = miao_engine::config_derive::McpOrigin::Manifest(path.clone());
-        let registry = miao_engine::mcp::Registry::connect(
-            origin.derive()?,
-            std::path::Path::new(tools.location()),
-        )
-        .await?;
-        let registry = Arc::new(registry);
+    if let Some(registry) = mcp_registry {
         registry.start_watchers();
-        tools = tools.with_protected_resource(&path).with_mcp(registry);
-        mcp_origin = Some(origin);
+        tools = tools.with_mcp(registry);
     }
-    // The origin a reload re-derives from. Every branch below records one, so
-    // `config_reload` reads exactly the files startup read.
-    let mut lsp_origin = None;
-    if let Some(path) = options.get("--lsp-config") {
-        let path = tokio::fs::canonicalize(path).await?;
-        if path.starts_with(std::path::Path::new(tools.location())) {
-            return Err("LSP host config must be outside model-writable workspace".into());
-        }
-        let origin = miao_engine::config_derive::LspOrigin::Manifest(path.clone());
-        let registry = miao_engine::lsp::Registry::connect(
-            origin.derive()?,
-            std::path::Path::new(tools.location()),
-        )
-        .await?;
-        tools = tools
-            .with_protected_resource(&path)
-            .with_lsp(Arc::new(registry));
-        lsp_origin = Some(origin);
-    } else if let Some(json) = options.get("--config-sources") {
-        // Derive the servers from the same ordered plan the policy used, so
-        // project-level `lsp` sections override the global directory.
-        let origin =
-            miao_engine::config_derive::LspOrigin::Sources(miao_engine::config_derive::plan(json)?);
-        let configs = origin.derive()?;
-        if !configs.is_empty() {
-            let registry = miao_engine::lsp::Registry::connect(
-                configs,
-                std::path::Path::new(tools.location()),
-            )
-            .await?;
-            tools = tools.with_lsp(Arc::new(registry));
-        }
-        lsp_origin = Some(origin);
-    } else if let Some(directory) = options.get("--config-dir") {
-        // No explicit LSP manifest: derive the servers from the config
-        // directory the way the product used to before materializing one.
-        let origin = miao_engine::config_derive::LspOrigin::Directory(directory.into());
-        let configs = origin.derive()?;
-        if !configs.is_empty() {
-            let registry = miao_engine::lsp::Registry::connect(
-                configs,
-                std::path::Path::new(tools.location()),
-            )
-            .await?;
-            tools = tools.with_lsp(Arc::new(registry));
-        }
-        lsp_origin = Some(origin);
+    let (lsp_registry, lsp_manifest, lsp_origin) = lsp?;
+    if let Some(path) = lsp_manifest {
+        tools = tools.with_protected_resource(&path);
+    }
+    if let Some(registry) = lsp_registry {
+        tools = tools.with_lsp(registry);
     }
     let replay = options
         .get("--tool-replay")
@@ -1362,11 +1289,149 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     runtime
         .verify_with(options.get("--verify-command").cloned())
         .await;
+    // Warm the configured provider endpoints while the host finishes starting.
+    // The warmup is detached on purpose: no start path awaits it, a failed
+    // handshake is dropped, and loopback endpoints are skipped because they are
+    // already local and a local fixture must not see traffic it did not ask for.
+    let mut endpoints = endpoint.iter().cloned().collect::<Vec<_>>();
+    endpoints.extend(options.get("--fallback-endpoint").cloned());
+    if let Some(origin) = &model_origin {
+        if let Ok(bytes) = tokio::fs::read(&origin.path).await {
+            endpoints.extend(miao_engine::model_routes::endpoints(&bytes));
+        }
+    }
+    let warm = miao_engine::prewarm::targets(endpoints)
+        .into_iter()
+        .filter(|url| !miao_engine::prewarm::is_loopback(url))
+        .collect::<Vec<_>>();
+    if !warm.is_empty() {
+        let _prewarm = miao_engine::prewarm::spawn(warm);
+    }
     Ok(Configured {
         runtime,
         options,
         acp,
     })
+}
+
+type StartupError = Box<dyn Error + Send + Sync>;
+
+/// Validate and connect the extension worker. Independent of the MCP and LSP
+/// units, so it runs beside them; a worker that cannot start is only a warning
+/// and leaves the built-in tools in place.
+async fn connect_worker(
+    config: Option<String>,
+    location: std::path::PathBuf,
+) -> Result<Option<(std::path::PathBuf, Arc<miao_engine::worker::Registry>)>, StartupError> {
+    let Some(path) = config else {
+        return Ok(None);
+    };
+    let path = tokio::fs::canonicalize(path).await?;
+    if crate::placement::plain(&path).starts_with(crate::placement::plain(&location).as_ref()) {
+        return Err("Worker host config must be outside model-writable workspace".into());
+    }
+    let bytes = tokio::fs::read(&path).await?;
+    if bytes.len() > 65536 {
+        return Err("Worker config exceeds 64 KiB".into());
+    }
+    let config = serde_json::from_slice::<miao_engine::worker::Config>(&bytes)
+        .map_err(|_| "invalid Worker host config")?;
+    Ok(
+        match miao_engine::worker::Registry::connect(config, &location).await {
+            Ok(registry) => Some((path, Arc::new(registry))),
+            Err(error) => {
+                eprintln!(
+                    "miao-engine extension worker unavailable: {error}; built-in tools remain available"
+                );
+                None
+            }
+        },
+    )
+}
+
+type McpStartup = (
+    Option<Arc<miao_engine::mcp::Registry>>,
+    Option<miao_engine::config_derive::McpOrigin>,
+    Option<std::path::PathBuf>,
+);
+
+/// Connect the MCP registry from whichever source the host selected. An inline
+/// server list handed over by a host still loses to an explicit
+/// `--mcp-config`, so an operator's on-disk manifest is never silently
+/// replaced by a product default.
+async fn connect_mcp(
+    manifest: Option<String>,
+    inline: Option<String>,
+    authorized: bool,
+    location: std::path::PathBuf,
+) -> Result<McpStartup, StartupError> {
+    if let Some(raw) = inline.filter(|_| manifest.is_none()) {
+        if !authorized {
+            return Err("MCP config requires explicit workspace allow_mcp authority".into());
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|_| "invalid inline MCP host config")?;
+        let origin = miao_engine::config_derive::McpOrigin::Inline(value);
+        let registry = miao_engine::mcp::Registry::connect(origin.derive()?, &location).await?;
+        return Ok((Some(Arc::new(registry)), Some(origin), None));
+    }
+    let Some(path) = manifest else {
+        return Ok((None, None, None));
+    };
+    if !authorized {
+        return Err("MCP config requires explicit workspace allow_mcp authority".into());
+    }
+    let path = tokio::fs::canonicalize(path).await?;
+    if path.starts_with(&location) {
+        return Err("MCP host config must be outside model-writable workspace".into());
+    }
+    let origin = miao_engine::config_derive::McpOrigin::Manifest(path.clone());
+    let registry = miao_engine::mcp::Registry::connect(origin.derive()?, &location).await?;
+    Ok((Some(Arc::new(registry)), Some(origin), Some(path)))
+}
+
+/// Connect the LSP registry from the explicit manifest, the host's ordered
+/// config plan, or the config directory, in that precedence.
+async fn connect_lsp(
+    manifest: Option<String>,
+    sources: Option<String>,
+    directory: Option<String>,
+    location: std::path::PathBuf,
+) -> Result<
+    (
+        Option<Arc<miao_engine::lsp::Registry>>,
+        Option<std::path::PathBuf>,
+        Option<miao_engine::config_derive::LspOrigin>,
+    ),
+    StartupError,
+> {
+    let protected = match &manifest {
+        Some(path) => Some(tokio::fs::canonicalize(path).await?),
+        None => None,
+    };
+    if let Some(path) = &protected {
+        if path.starts_with(&location) {
+            return Err("LSP host config must be outside model-writable workspace".into());
+        }
+    }
+    let origin = match (&protected, sources, directory) {
+        (Some(path), _, _) => miao_engine::config_derive::LspOrigin::Manifest(path.clone()),
+        (None, Some(json), _) => {
+            miao_engine::config_derive::LspOrigin::Sources(miao_engine::config_derive::plan(&json)?)
+        }
+        (None, None, Some(directory)) => {
+            miao_engine::config_derive::LspOrigin::Directory(directory.into())
+        }
+        (None, None, None) => return Ok((None, None, None)),
+    };
+    let configs = origin.derive()?;
+    // An explicit manifest connects even when it names no server; a derived
+    // plan only connects when it found one, matching the previous branches.
+    if protected.is_none() && configs.is_empty() {
+        return Ok((None, None, Some(origin)));
+    }
+    let registry = miao_engine::lsp::Registry::connect(configs, &location).await?;
+    Ok((Some(Arc::new(registry)), protected, Some(origin)))
 }
 
 /// The serve/acp flags, scanned per token instead of in flag/value pairs so a
@@ -1532,6 +1597,33 @@ fn config_stamp(files: &[std::path::PathBuf]) -> Vec<Option<(u128, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A start with no worker, no MCP and no LSP configuration returns from
+    /// each startup unit immediately: none may open a socket, spawn a child, or
+    /// demand authority before the first admission. The three run concurrently
+    /// in `configure`, so their no-config paths are what keep a plain start
+    /// free of network waits.
+    #[tokio::test]
+    async fn startup_units_do_nothing_without_extension_config() {
+        let location = std::env::temp_dir();
+        assert!(connect_worker(None, location.clone())
+            .await
+            .expect("no worker config is not an error")
+            .is_none());
+        let (mcp, mcp_origin, mcp_manifest) = connect_mcp(None, None, false, location.clone())
+            .await
+            .expect("no MCP config is not an error");
+        assert!(mcp.is_none() && mcp_origin.is_none() && mcp_manifest.is_none());
+        let (lsp, lsp_manifest, lsp_origin) = connect_lsp(None, None, None, location.clone())
+            .await
+            .expect("no LSP config is not an error");
+        assert!(lsp.is_none() && lsp_manifest.is_none() && lsp_origin.is_none());
+        // An inline server list still requires the workspace's MCP authority,
+        // and is refused before any registry is connected.
+        assert!(connect_mcp(None, Some("{}".into()), false, location)
+            .await
+            .is_err());
+    }
 
     /// `config_stamp` moved here with the CLI; the test that covers it moved
     /// with it so the binary's test build does not reference a function this

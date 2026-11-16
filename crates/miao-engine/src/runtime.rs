@@ -3929,6 +3929,21 @@ async fn execute(
                 .map_err(|error| Error::Invalid(error.to_string()))?,
             None => selected_provider,
         };
+        // Preparing the advertised tool surface depends only on the tools,
+        // policy, agent and delegation, never on instruction discovery. Left
+        // where it was, it ran twice per turn (once for the disclosure digest,
+        // once for the request) and after every context read. Preparing it on
+        // the blocking pool lets it overlap with those reads, and both the
+        // digest and the request then use the same surface.
+        let prepared_surface = {
+            let tools = inner.tools.clone();
+            let agent = agent.clone();
+            let policy = policy.clone();
+            let deny = deny.to_vec();
+            tokio::task::spawn_blocking(move || {
+                agent_tools(&tools, agent.as_ref(), &policy, delegated, &deny)
+            })
+        };
         let (observed, paths) = inner
             .store
             .instruction_reads(session, inner.tools.location())
@@ -4230,7 +4245,10 @@ async fn execute(
         // a policy bump that leaves this digest unchanged did not churn the
         // prefix, and any surface change (catalogue growth on a small server,
         // an allow-listed alias leaving) shows up here before the model sees it.
-        let disclosure_digest = crate::permission::digest(&serde_json::to_vec(&json!({"tools": agent_tools(&inner.tools, agent.as_ref(), &policy, delegated, deny).iter().map(|tool| (&tool.name, &tool.input_schema)).collect::<Vec<_>>()})).expect("tool surface serializes"));
+        let surface = prepared_surface
+            .await
+            .map_err(|error| Error::Invalid(format!("tool surface preparation failed: {error}")))?;
+        let disclosure_digest = crate::permission::digest(&serde_json::to_vec(&json!({"tools": surface.iter().map(|tool| (&tool.name, &tool.input_schema)).collect::<Vec<_>>()})).expect("tool surface serializes"));
         let started = inner
             .store
             .record(
@@ -4293,7 +4311,7 @@ async fn execute(
             }
         }
         let named = inner.store.named_agents(session).await?;
-        let mut tools = agent_tools(&inner.tools, agent.as_ref(), &policy, delegated, deny);
+        let mut tools = surface;
         for tool in &mut tools {
             if tool.name == "task" && !named.is_empty() {
                 tool.input_schema["properties"]["agent"] = json!({"type":"string","enum":named.iter().map(|agent|&agent.name).collect::<Vec<_>>()});

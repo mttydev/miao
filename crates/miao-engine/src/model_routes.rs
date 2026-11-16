@@ -53,6 +53,20 @@ struct Route {
     limit: Option<Limit>,
 }
 
+/// Endpoints a host route manifest names, for a start's one-shot connection
+/// prewarm. A manifest that cannot be read yields none: the prewarm is best
+/// effort and must never refuse a start.
+pub(crate) fn endpoints(bytes: &[u8]) -> Vec<String> {
+    serde_json::from_slice::<Vec<Route>>(bytes)
+        .map(|routes| {
+            routes
+                .into_iter()
+                .filter_map(|route| route.endpoint)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Variant {
@@ -415,4 +429,22 @@ async fn derive(
             .with_accounts(accounts, primary_account_route)?,
     );
     Ok((provider, RouteLimits { limits }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoints;
+
+    #[test]
+    fn endpoints_lists_declared_urls_and_ignores_unreadable_manifests() {
+        let manifest = br#"[
+          {"id":"prov-a/model-1","provider":"openai-chat","model":"model-1","endpoint":"https://a.example/v1","credential":{"type":"environment","key":"PROV_A_KEY"},"primary":true},
+          {"id":"prov-b/model-b","provider":"openai-chat","model":"model-b","credential":{"type":"environment","key":"PROV_B_KEY"}}
+        ]"#;
+        assert_eq!(
+            endpoints(manifest),
+            vec!["https://a.example/v1".to_string()]
+        );
+        assert!(endpoints(b"{").is_empty());
+    }
 }

@@ -71,6 +71,7 @@ pub mod permission_source;
 pub mod permission_source_control;
 mod persona;
 pub mod placement;
+pub mod prewarm;
 pub mod process;
 pub mod protocol;
 pub mod provider;
