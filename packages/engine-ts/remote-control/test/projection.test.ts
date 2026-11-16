@@ -121,3 +121,75 @@ describe("ControlProjection.history", () => {
     expect(at(page, 0)).toMatchObject({ type: "session.next.info.updated", data: { sessionID: session, title: "Remote" } })
   })
 })
+
+describe("ControlProjection.committed", () => {
+  const run = () => {
+    const state: ControlProjection.RunState = {}
+    let cursor = 0
+    const next = () => ++cursor
+    return { state, next, emit: (event: ControlProjection.EngineEvent) => ControlProjection.committed(session, event, state, next) }
+  }
+
+  test("one provider step keeps its anchor across the committed assistant message", () => {
+    const { emit } = run()
+    expect(emit({ seq: 10, kind: "provider.started", data: { identity: { model: "gpt" } }, recorded_at_ms: 1000 })).toMatchObject([
+      { type: "session.next.step.started", data: { assistantMessageID: "msg_10", model: "gpt" } },
+    ])
+    expect(
+      emit({
+        seq: 11,
+        kind: "message.committed",
+        data: {
+          role: "assistant",
+          anchor_seq: 10,
+          content: [
+            { type: "text", text: "hello" },
+            { type: "tool_use", id: "call_1", name: "bash", input: { command: "ls" } },
+          ],
+        },
+      }).map((event) => event.type),
+    ).toEqual([
+      "session.next.text.started",
+      "session.next.text.ended",
+      "session.next.tool.input.started",
+      "session.next.tool.input.ended",
+      "session.next.tool.called",
+    ])
+    expect(emit({ seq: 12, kind: "assistant.identity", data: { anchor_seq: 10, provider: { model: "gpt" }, agent: "build", tokens: { input: 1, output: 2 } } })).toEqual([])
+    expect(
+      emit({
+        seq: 13,
+        kind: "message.committed",
+        data: { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: '{"output":"ok"}', is_error: false }] },
+      }),
+    ).toMatchObject([{ type: "session.next.tool.success", data: { assistantMessageID: "msg_10", callID: "call_1", structured: { output: "ok" } } }])
+    expect(emit({ seq: 14, kind: "run.finished", data: { reason: "completed" }, recorded_at_ms: 2000 })).toMatchObject([
+      { type: "session.next.step.ended", data: { assistantMessageID: "msg_10", finish: "stop", tokens: { input: 1, output: 2 } } },
+    ])
+  })
+
+  test("a failed run ends the step as failed with its error", () => {
+    const { emit } = run()
+    emit({ seq: 1, kind: "provider.started", data: {} })
+    emit({ seq: 2, kind: "message.committed", data: { role: "assistant", anchor_seq: 1, content: [{ type: "text", text: "partial" }] } })
+    expect(emit({ seq: 3, kind: "run.finished", data: { reason: "failed", message: "provider failed" } })).toMatchObject([
+      { type: "session.next.step.failed", data: { assistantMessageID: "msg_1", error: "provider failed" } },
+    ])
+  })
+
+  test("the host's cursor, not the engine sequence, numbers the protocol events", () => {
+    const { emit } = run()
+    const events = emit({ seq: 900, kind: "message.committed", data: { role: "user", content: [{ type: "text", text: "hi" }] } })
+    expect(events.map((event) => event.durable.seq)).toEqual([1])
+    expect(events[0]?.durable.aggregateID).toBe(session)
+    expect(events[0]?.data.sessionID).toBe(session)
+  })
+
+  test("history uses the same anchor for the committed assistant id", () => {
+    const page = ControlProjection.history(session, [
+      { seq: 7, role: "assistant", content: [{ type: "text", text: "hi" }], identity: { anchor_seq: 5 } },
+    ])
+    expect(at(page, 0).data.assistantMessageID).toBe("msg_5")
+    expect(at(page, 1).data).toMatchObject({ assistantMessageID: "msg_5", textID: "text_msg_5_0" })
+  })
+})
