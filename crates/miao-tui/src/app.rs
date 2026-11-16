@@ -6767,6 +6767,73 @@ mod tests {
         );
     }
 
+    /// The operator's flow: one screenshot, then another, in the same draft.
+    /// Each empty paste asks the host handoff file for the picture it just
+    /// wrote; both must land, not just the first.
+    #[test]
+    fn two_screenshots_paste_as_two_attachments() {
+        let dir = std::env::temp_dir().join(format!(
+            "miao-tui-two-pictures-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The pane was created by a host that has since restarted: its
+        // MTTY_CLIPBOARD_FILE names the dead pid, while the live host writes a
+        // sibling with its own pid.
+        let dead = dir.join("mtty-clipboard-1504.png");
+        let host = dir.join("mtty-clipboard-5554.png");
+        let previous = std::env::var_os("MTTY_CLIPBOARD_FILE");
+        std::env::set_var("MTTY_CLIPBOARD_FILE", &dead);
+
+        let (bus, mut rx) = crate::event::bus();
+        let mut app = session_app();
+        app.set_bus(bus);
+        for bytes in [b"first-picture".as_slice(), b"second-picture".as_slice()] {
+            std::fs::write(&host, bytes).unwrap();
+            // A paste is a write; keep the mtime distinct even on a coarse
+            // clock, and inside the handoff freshness window.
+            let file = std::fs::File::options().write(true).open(&host).unwrap();
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_millis(100))
+                .unwrap();
+            app.handle(AppEvent::Paste(String::new()));
+            let started = std::time::Instant::now();
+            let clipboard = loop {
+                match rx.try_recv() {
+                    Ok(event @ AppEvent::Clipboard(_)) => break event,
+                    Ok(other) => app.handle(other),
+                    Err(_) => {
+                        assert!(
+                            started.elapsed() < std::time::Duration::from_secs(5),
+                            "the clipboard read never landed"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+            };
+            app.handle(clipboard);
+        }
+
+        assert_eq!(app.shell.composer.editor.text(), "[Image 1] [Image 2] ");
+        assert_eq!(app.shell.composer.attachments().len(), 2);
+        assert_eq!(
+            app.shell.composer.attachments()[0]["data"],
+            "Zmlyc3QtcGljdHVyZQ==",
+            "the first picture is the host file's first write"
+        );
+        assert_eq!(
+            app.shell.composer.attachments()[1]["data"],
+            "c2Vjb25kLXBpY3R1cmU=",
+            "the second picture is the host file's second write"
+        );
+        match previous {
+            Some(value) => std::env::set_var("MTTY_CLIPBOARD_FILE", value),
+            None => std::env::remove_var("MTTY_CLIPBOARD_FILE"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn an_image_pasted_on_the_landing_screen_rides_into_the_new_session() {
         let mut app = app();

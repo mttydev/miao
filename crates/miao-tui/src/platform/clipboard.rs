@@ -11,13 +11,28 @@ use std::process::{Command, Stdio};
 
 use base64::Engine;
 
-/// An image paste is served once per picture. The host rewrites the handoff
-/// file on every paste, and the file is no longer deleted after a read: deleting
-/// it made the second screenshot depend on the platform fallback (`osascript`
-/// inside a pane the host may sandbox), and a refused fallback looked like the
-/// paste doing nothing at all. Identity, not age, is what keeps a repeated empty
-/// paste from attaching one picture twice.
-static LAST_HANDOFF: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+/// A paste serves the image the host most recently wrote. The file is not
+/// deleted after a read: the host rewrites it on every paste, and the platform
+/// fallback inside a sandboxed pane may be refused.
+///
+/// Identity is the *write* (mtime, length, digest), not the bytes alone: a
+/// second screenshot can be byte-identical (the same window twice) and must
+/// still attach, while reading the same write twice must not. A pane restored
+/// after the host restarted also keeps the handoff path of the dead host, so the
+/// read falls back to the newest fresh `mtty-clipboard-*.png` beside it.
+static LAST_HANDOFF: std::sync::Mutex<Option<Handoff>> = std::sync::Mutex::new(None);
+
+/// How recently the host must have written a handoff file for a paste to use it.
+/// The host writes immediately before sending the empty paste, so this only
+/// rejects a file left over from an earlier paste (or another pane).
+const HANDOFF_FRESH_MS: u128 = 10_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Handoff {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    digest: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
@@ -118,32 +133,89 @@ pub fn read(host_file: Option<&Path>) -> Option<Content> {
 }
 
 fn read_host_image(path: Option<&Path>) -> Option<Content> {
-    let path = path?;
-    let bytes = std::fs::read(path).ok()?;
+    let path = fresh_handoff(path?)?;
+    let bytes = std::fs::read(&path).ok()?;
     if bytes.is_empty() {
         return None;
     }
-    // One picture, one attachment: an empty paste the host repeats (a terminal
-    // without image support, a text paste next to a stale file) must not attach
-    // the same bytes twice. A new screenshot rewrites the file and hashes
-    // differently, so it is served.
-    let digest = {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        hasher.finish()
+    let metadata = std::fs::metadata(&path).ok()?;
+    // A concurrent write can truncate the file between the read and the
+    // metadata call. The next paste carries that write; this one cannot claim
+    // a half picture.
+    if metadata.len() != bytes.len() as u64 {
+        return None;
+    }
+    // One paste, one attachment: a repeated empty paste (a terminal without
+    // image support, a duplicate event) must not attach the same write twice.
+    // The same picture pasted again is a new write with a new mtime, so it is
+    // still served.
+    let identity = Handoff {
+        modified: metadata.modified().ok(),
+        len: bytes.len() as u64,
+        digest: digest(&bytes),
     };
     {
         let mut last = LAST_HANDOFF.lock().expect("handoff lock");
-        if *last == Some(digest) {
+        if *last == Some(identity) {
             return None;
         }
-        *last = Some(digest);
+        *last = Some(identity);
     }
     Some(Content::Image {
         mime: "image/png".into(),
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
     })
+}
+
+fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The handoff file this paste wrote.
+///
+/// `configured` is the path the pane inherited. A restored pane keeps the
+/// environment of the mtty process that created it, so after a host restart it
+/// still names the dead host's file while the live host writes a sibling
+/// `mtty-clipboard-<pid>.png`. The newest fresh sibling is the one this paste
+/// wrote.
+///
+/// Only a fresh file is a paste. An old file is an earlier paste, and serving
+/// it again would attach yesterday's screenshot to today's prompt; the host
+/// writes immediately before sending the empty paste, so ten seconds is
+/// generous even for a large Retina capture.
+fn fresh_handoff(configured: &Path) -> Option<std::path::PathBuf> {
+    let fresh = |path: &Path| {
+        std::fs::metadata(path)
+            .ok()?
+            .modified()
+            .ok()?
+            .elapsed()
+            .ok()
+            .filter(|age| age.as_millis() <= HANDOFF_FRESH_MS)
+            .map(|_| path.to_path_buf())
+    };
+    if let Some(path) = fresh(configured) {
+        return Some(path);
+    }
+    let dir = configured.parent()?;
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("mtty-clipboard-") && name.ends_with(".png"))
+        })
+        .filter_map(|entry| fresh(&entry.path()))
+        .max_by_key(|path| {
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
 }
 
 fn read_macos() -> Option<Content> {
@@ -459,6 +531,36 @@ fn unique_suffix() -> u128 {
 mod tests {
     use super::*;
 
+    /// `LAST_HANDOFF` and the temp directory are process-wide; serialise the
+    /// handoff tests so one test's write cannot be served by another.
+    fn handoff_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *LAST_HANDOFF.lock().expect("handoff lock") = None;
+        guard
+    }
+
+    /// Write a picture and give it an mtime distinct from the previous write,
+    /// even on a coarse filesystem clock. The host's write is what a paste is;
+    /// the bytes alone are not, because the same screen can be captured twice.
+    fn rewrite(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_millis(100))
+            .unwrap();
+    }
+
+    fn handoff_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "miao-clipboard-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn has(name: &'static str) -> impl Fn(&str) -> bool {
         move |candidate| candidate == name
     }
@@ -498,12 +600,11 @@ mod tests {
     /// `osascript`, which a sandboxed pane may refuse, so the paste silently did
     /// nothing.
     #[test]
-    fn the_host_clipboard_file_is_served_once_per_picture() {
-        let dir = std::env::temp_dir().join(format!("miao-clipboard-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let fresh = dir.join("fresh.png");
-        std::fs::write(&fresh, b"first-picture").unwrap();
+    fn the_host_clipboard_file_is_served_once_per_write() {
+        let _guard = handoff_guard();
+        let dir = handoff_dir("served-once");
+        let fresh = dir.join("mtty-clipboard-5554.png");
+        rewrite(&fresh, b"first-picture");
         let content = read_host_image(Some(&fresh)).expect("fresh image");
         assert_eq!(
             content,
@@ -514,13 +615,25 @@ mod tests {
         );
         assert!(fresh.exists(), "the host keeps the file it will rewrite");
 
-        // The same bytes again (a text paste next to a stale file, an empty
-        // paste the host repeats) do not attach a second copy.
+        // Reading the same write again (a duplicate empty paste) does not
+        // attach a second copy.
         assert!(read_host_image(Some(&fresh)).is_none());
 
-        // A new screenshot rewrites the file; its bytes hash differently and it
-        // is served, even though the path never changed.
-        std::fs::write(&fresh, b"second-picture").unwrap();
+        // The same picture pasted again is a new write with a new mtime. The
+        // bytes are identical, so content alone cannot tell it apart — and the
+        // operator did paste it again.
+        rewrite(&fresh, b"first-picture");
+        let content = read_host_image(Some(&fresh)).expect("the same picture, pasted again");
+        assert_eq!(
+            content,
+            Content::Image {
+                mime: "image/png".into(),
+                data: "Zmlyc3QtcGljdHVyZQ==".into()
+            }
+        );
+
+        // A different picture is served for its own write too.
+        rewrite(&fresh, b"second-picture");
         let content = read_host_image(Some(&fresh)).expect("the second picture");
         assert_eq!(
             content,
@@ -532,12 +645,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A pane restored after the host restarted keeps the dead host's path in
+    /// `MTTY_CLIPBOARD_FILE`. The live host writes a sibling with its own pid;
+    /// that is the file the paste just produced.
+    #[test]
+    fn a_restored_pane_reads_the_live_hosts_handoff() {
+        let _guard = handoff_guard();
+        let dir = handoff_dir("restored");
+        let dead = dir.join("mtty-clipboard-1504.png");
+        let live = dir.join("mtty-clipboard-5554.png");
+        rewrite(&live, b"live-picture");
+
+        let content = read_host_image(Some(&dead)).expect("the live host's file");
+        assert_eq!(
+            content,
+            Content::Image {
+                mime: "image/png".into(),
+                data: "bGl2ZS1waWN0dXJl".into()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An old handoff is an earlier paste, not this one. Serving it again would
+    /// attach yesterday's screenshot to today's prompt.
+    #[test]
+    fn an_old_handoff_is_not_todays_paste() {
+        let _guard = handoff_guard();
+        let dir = handoff_dir("old");
+        let dead = dir.join("mtty-clipboard-1504.png");
+        let old = dir.join("mtty-clipboard-5554.png");
+        std::fs::write(&old, b"old-picture").unwrap();
+        let file = std::fs::File::options().write(true).open(&old).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(30))
+            .unwrap();
+        assert!(read_host_image(Some(&dead)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn an_empty_handoff_file_is_not_an_image() {
-        let dir = std::env::temp_dir().join(format!("miao-clipboard-empty-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("empty.png");
+        let _guard = handoff_guard();
+        let dir = handoff_dir("empty");
+        let path = dir.join("mtty-clipboard-5554.png");
         std::fs::write(&path, b"").unwrap();
         assert!(read_host_image(Some(&path)).is_none());
         let _ = std::fs::remove_dir_all(&dir);
