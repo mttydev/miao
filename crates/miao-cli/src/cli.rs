@@ -4277,7 +4277,7 @@ fn serve_forever(rest: &[String]) -> Result<(), String> {
         let token = std::env::var("MIAO_SERVER_PASSWORD")
             .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
         let remote = match remote_host {
-            Some(config) => Some(spawn_remote_host(&config, address, &token)?),
+            Some(config) => Some(spawn_remote_host(&config, &db, address, &token)?),
             None => None,
         };
         println!("miao serve listening on http://{address} token={token}");
@@ -4303,6 +4303,7 @@ fn serve_forever(rest: &[String]) -> Result<(), String> {
 /// process table is readable by other local users on most systems.
 fn spawn_remote_host(
     config: &Path,
+    storage: &Path,
     address: std::net::SocketAddr,
     token: &str,
 ) -> Result<std::process::Child, String> {
@@ -4351,6 +4352,7 @@ fn spawn_remote_host(
         .env("MIAO_ENGINE_HTTP_TOKEN", token)
         .env("MIAO_RUNTIME_ID", uuid::Uuid::new_v4().to_string())
         .env("MIAO_REMOTE_CONTROL_CONFIG", config)
+        .env("MIAO_REMOTE_STORAGE", storage)
         .stdin(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("start remote host: {error}"))

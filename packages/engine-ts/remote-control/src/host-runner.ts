@@ -1,7 +1,8 @@
 export * as ControlHostRunner from "./host-runner"
 
-import { readFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { ControlAdmin } from "./admin"
 import { ControlAgent } from "./agent"
 import { DeviceGrants } from "./grants"
 import { ControlHostEngine } from "./host-engine"
@@ -48,6 +49,8 @@ export type Options = {
   /** Sessions this Runtime publishes; the RPC can see nothing else. */
   readonly sessionIDs?: ReadonlyArray<string>
   readonly push?: boolean
+  /** Engine database path; its presence enables the private administration surface. */
+  readonly storage?: string
 }
 
 export type Runner = {
@@ -63,6 +66,7 @@ export type Runner = {
     runtimeID: string
     sessionIDs: string[]
   }
+  readonly admin?: { url: string; file: string }
   readonly stop: () => Promise<void>
 }
 
@@ -80,6 +84,7 @@ export async function start(options: Options): Promise<Runner> {
     )
     return typeof row?.location === "string" ? row.location : undefined
   }
+  const state = { stopped: false }
   const pairing = ControlPairing.make({
     grants,
     target: { hostID: grants.hostID, runtimeID: options.runtimeID },
@@ -121,7 +126,40 @@ export async function start(options: Options): Promise<Runner> {
         allowLoopbackHTTP: options.allowLoopbackHTTP,
       })
     : undefined
-  const state = { stopped: false }
+  const admin = options.storage
+    ? await (async () => {
+        const admin = ControlAdmin.listen({
+          runtimeID: options.runtimeID,
+          hostID: grants.hostID,
+          hostPublicKey: grants.identity.publicKey,
+          hubURL: options.hubURL,
+          accountID: options.accountID,
+          sessionIDs: () => [...published],
+          connected: () => !state.stopped && agent.connected(),
+          enabled: () => !state.stopped,
+          pairing,
+          grants,
+          revoke: (grantID, version) => agent.revoke(grantID, version),
+        })
+        const file = `${options.storage}.remote-host-${options.runtimeID}.json`
+        await mkdir(path.dirname(file), { recursive: true })
+        const temporary = `${file}.${process.pid}.tmp`
+        await writeFile(
+          temporary,
+          JSON.stringify({
+            version: 1,
+            url: admin.url,
+            token: admin.token,
+            runtimeID: options.runtimeID,
+            hostID: grants.hostID,
+          }) + "\n",
+          { mode: 0o600 },
+        )
+        await chmod(temporary, 0o600)
+        await rename(temporary, file)
+        return { url: admin.url, file, stop: admin.stop }
+      })()
+    : undefined
   return {
     hostID: grants.hostID,
     runtimeID: options.runtimeID,
@@ -139,9 +177,14 @@ export async function start(options: Options): Promise<Runner> {
       runtimeID: options.runtimeID,
       sessionIDs: [...published],
     }),
+    ...(admin ? { admin: { url: admin.url, file: admin.file } } : {}),
     stop: async () => {
       if (state.stopped) return
       state.stopped = true
+      if (admin) {
+        await admin.stop()
+        await rm(admin.file, { force: true })
+      }
       agent.stop()
       await Promise.all([pairing.stop(), push?.stop()])
     },

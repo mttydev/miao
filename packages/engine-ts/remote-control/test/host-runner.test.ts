@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { ControlAgent } from "../src/agent"
@@ -86,6 +86,7 @@ describe("ControlHostRunner", () => {
       allowLoopbackHTTP: true,
       sessionIDs: ["one"],
       push: false,
+      storage: path.join(directory, "miao.db"),
     })
     cleanup.push(() => runner.stop())
     const deadline = Date.now() + 3000
@@ -117,6 +118,45 @@ describe("ControlHostRunner", () => {
         data?: Record<string, unknown>
       }
     }
+
+    expect(runner.admin).toBeDefined()
+    const registration = JSON.parse(await readFile(runner.admin!.file, "utf8")) as {
+      url: string
+      token: string
+      runtimeID: string
+      hostID: string
+    }
+    expect(registration).toMatchObject({ version: 1, runtimeID, hostID: grants.hostID })
+    if (process.platform !== "win32")
+      expect((await stat(runner.admin!.file)).mode & 0o777).toBe(0o600)
+    const administration = async (body: unknown, token = registration.token) => {
+      const response = await fetch(registration.url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+      const text = await response.text()
+      let parsed: Record<string, unknown> = {}
+      if (text.startsWith("{")) parsed = JSON.parse(text) as Record<string, unknown>
+      return { status: response.status, body: parsed }
+    }
+    const status = await administration({ version: 1, runtimeID, method: "status" })
+    expect(status.body).toMatchObject({
+      ok: true,
+      data: { hostID: grants.hostID, runtimeID, sessionIDs: ["one"], connected: true },
+    })
+    const devices = await administration({ version: 1, runtimeID, method: "devices" })
+    expect(devices.body.data).toHaveLength(1)
+    const pairingPending = await administration({ version: 1, runtimeID, method: "pending" })
+    expect(pairingPending.body.data).toEqual([])
+    const invite = await administration({
+      version: 1,
+      runtimeID,
+      method: "invite",
+      policy: { permissions: ["read"], projectIDs: ["p1"], sessionIDs: [], expiresAt: Date.now() + 60_000 },
+    })
+    expect(invite.body).toMatchObject({ ok: true, data: { version: 1, hostID: grants.hostID, runtimeID } })
+    expect((await administration({ version: 1, runtimeID, method: "status" }, "wrong")).status).toBe(403)
 
     const capabilities = await call({ method: "capabilities" })
     expect(capabilities.type).toBe("result")
