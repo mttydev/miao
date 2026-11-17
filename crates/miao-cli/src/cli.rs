@@ -80,6 +80,7 @@ Usage:
   miao web              serve and print the address to open
   miao attach URL       probe a running miao server
   miao remote           show this machine's pairing state
+  miao runtime access   answer one private-pipe Remote Control request
   miao pr [NUMBER]      show the current branch and working tree
   miao upgrade          update to the newest release (--check only reports)
   miao uninstall        list install artifacts to remove (--apply to remove)
@@ -365,6 +366,189 @@ fn remote() -> Result<(), String> {
         .unwrap_or("paired");
     println!("remote    {account} ({})", path.display());
     Ok(())
+}
+
+/// Answer one private-pipe Remote Control administration request.
+///
+/// mtty owns the calling side: one JSON request on stdin, one reply on stdout,
+/// and no engine credential in argv. The running host publishes its loopback
+/// endpoint and token in `<storage>.remote-host-<runtimeID>.json`.
+fn runtime_command(rest: &[String]) -> Result<(), String> {
+    match rest.first().map(String::as_str) {
+        Some("access") => runtime_access(),
+        _ => Err("usage: miao runtime access".into()),
+    }
+}
+
+fn runtime_access() -> Result<(), String> {
+    use std::io::Read;
+    let mut request = String::new();
+    std::io::stdin()
+        .take(65_537)
+        .read_to_string(&mut request)
+        .map_err(|error| error.to_string())?;
+    let invalid = || {
+        runtime_reply(serde_json::json!({ "version": 1, "ok": false, "error": "invalidRequest" }))
+    };
+    if request.len() > 65_536 {
+        return invalid();
+    }
+    let mut value: serde_json::Value = match serde_json::from_str(&request) {
+        Ok(value) => value,
+        Err(_) => return invalid(),
+    };
+    if !value.is_object() {
+        return invalid();
+    }
+    let storage = value
+        .get("storage")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    let observed = value
+        .get("runtimeID")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let Some(storage) = storage else {
+        return runtime_reply(
+            serde_json::json!({ "version": 1, "ok": false, "error": "noRuntime" }),
+        );
+    };
+    let Some(registration) = read_host_registration(&storage, observed.as_deref()) else {
+        return runtime_reply(
+            serde_json::json!({ "version": 1, "ok": false, "error": "noRuntime" }),
+        );
+    };
+    if observed
+        .as_deref()
+        .is_some_and(|id| id != registration.runtime_id)
+    {
+        return runtime_reply(
+            serde_json::json!({ "version": 1, "ok": false, "error": "runtimeChanged" }),
+        );
+    }
+    // Status calls may omit the runtime identity; the host still requires the
+    // request to name the Runtime it is administering.
+    if value.get("runtimeID").is_none() {
+        value["runtimeID"] = serde_json::Value::String(registration.runtime_id.clone());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let reply = runtime.block_on(forward_host_request(&registration, &value.to_string()))?;
+    if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return runtime_reply(reply);
+    }
+    if reply.get("runtimeID").and_then(serde_json::Value::as_str)
+        != Some(registration.runtime_id.as_str())
+    {
+        return runtime_reply(
+            serde_json::json!({ "version": 1, "ok": false, "error": "runtimeChanged" }),
+        );
+    }
+    runtime_reply(reply)
+}
+
+fn runtime_reply(value: serde_json::Value) -> Result<(), String> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &value).map_err(|error| error.to_string())?;
+    writeln!(stdout).map_err(|error| error.to_string())?;
+    stdout.flush().map_err(|error| error.to_string())
+}
+
+struct HostRegistration {
+    url: String,
+    token: String,
+    runtime_id: String,
+}
+
+fn read_host_registration(storage: &Path, runtime_id: Option<&str>) -> Option<HostRegistration> {
+    let path = match runtime_id {
+        Some(id) => PathBuf::from(format!("{}.remote-host-{id}.json", storage.display())),
+        None => latest_host_registration(storage)?,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&path).ok()?;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return None;
+    }
+    let url = value.get("url").and_then(serde_json::Value::as_str)?;
+    let token = value.get("token").and_then(serde_json::Value::as_str)?;
+    let runtime_id = value.get("runtimeID").and_then(serde_json::Value::as_str)?;
+    let parsed = reqwest::Url::parse(url).ok()?;
+    // A tampered registration must not be able to send the host token to a
+    // remote address; the administration surface is loopback only.
+    if parsed.scheme() != "http"
+        || !matches!(parsed.host_str(), Some("127.0.0.1") | Some("localhost"))
+    {
+        return None;
+    }
+    if token.len() < 32 || runtime_id.is_empty() {
+        return None;
+    }
+    Some(HostRegistration {
+        url: url.to_owned(),
+        token: token.to_owned(),
+        runtime_id: runtime_id.to_owned(),
+    })
+}
+
+fn latest_host_registration(storage: &Path) -> Option<PathBuf> {
+    let directory = storage.parent()?;
+    let name = storage.file_name()?.to_string_lossy();
+    let prefix = format!("{name}.remote-host-");
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        let path = entry.path();
+        let Some(file) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !file.starts_with(&prefix) || !file.ends_with(".json") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        if latest.as_ref().map_or(true, |(time, _)| modified > *time) {
+            latest = Some((modified, path));
+        }
+    }
+    latest.map(|(_, path)| path)
+}
+
+async fn forward_host_request(
+    registration: &HostRegistration,
+    request: &str,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(registration.url.as_str())
+        .header("authorization", format!("Bearer {}", registration.token))
+        .header("content-type", "application/json")
+        .body(request.to_owned())
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Ok(serde_json::json!({ "version": 1, "ok": false, "error": "unavailable" }));
+    }
+    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    if bytes.len() > 1_048_576 {
+        return Ok(serde_json::json!({ "version": 1, "ok": false, "error": "unavailable" }));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
 /// Git state for the current directory. Reports facts, changes nothing.
@@ -5616,6 +5800,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 std::process::ExitCode::from(1)
             }
         },
+        Some("runtime") => match runtime_command(&args.collect::<Vec<_>>()) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("miao runtime: {message}");
+                std::process::ExitCode::from(1)
+            }
+        },
         Some("pr") => match pr(&args.collect::<Vec<_>>()) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(message) => {
@@ -7706,5 +7897,46 @@ mod identity {
             serde_json::from_slice(&std::fs::read(root).expect("root package.json"))
                 .expect("valid root package.json");
         assert_eq!(super::VERSION, manifest["version"].as_str().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod runtime_access_tests {
+    use super::*;
+
+    fn registration(path: &Path, url: &str) {
+        let value = serde_json::json!({
+            "version": 1,
+            "url": url,
+            "token": "t".repeat(32),
+            "runtimeID": "runtime-one",
+        });
+        std::fs::write(path, value.to_string()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_host_registration_must_be_loopback_and_owner_only() {
+        let directory =
+            std::env::temp_dir().join(format!("miao-runtime-access-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let storage = directory.join("miao.db");
+        let path = directory.join("miao.db.remote-host-runtime-one.json");
+        registration(&path, "http://127.0.0.1:1234/access");
+        assert!(read_host_registration(&storage, Some("runtime-one")).is_some());
+        registration(&path, "http://example.invalid/access");
+        assert!(read_host_registration(&storage, Some("runtime-one")).is_none());
+        registration(&path, "http://127.0.0.1:1234/access");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(read_host_registration(&storage, Some("runtime-one")).is_none());
+        }
+        std::fs::remove_dir_all(&directory).ok();
     }
 }
