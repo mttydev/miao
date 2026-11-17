@@ -4679,7 +4679,7 @@ impl Store {
         let session = session.to_owned();
         self.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT kind,data,recorded_at_ms FROM engine_event WHERE session_id=?1 AND kind IN ('subagent_start','subagent_stop') ORDER BY seq",
+                "SELECT kind,data,recorded_at_ms FROM engine_event WHERE session_id=?1 AND kind IN ('subagent_start','subagent_stop','subagent_backgrounded') ORDER BY seq",
             )?;
             let mut rows = stmt.query(params![session])?;
             let mut tasks: Vec<Value> = Vec::new();
@@ -4690,8 +4690,8 @@ impl Store {
                 let Some(id) = data["subagent_id"].as_str() else {
                     continue;
                 };
-                if kind == "subagent_start" {
-                    if data["background"] != true {
+                if kind == "subagent_start" || kind == "subagent_backgrounded" {
+                    if kind == "subagent_start" && data["background"] != true {
                         continue;
                     }
                     // One child is one row. A re-dispatch, or an adopted child
@@ -4720,6 +4720,8 @@ impl Store {
                         "text":Value::Null,
                         "started_at_ms":recorded_at_ms,
                         "age_ms":age_ms,
+                        "background":true,
+                        "auto_background":kind=="subagent_backgrounded",
                     }));
                     continue;
                 }
@@ -4760,8 +4762,9 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT e.data FROM engine_event e \
                  JOIN engine_lineage l ON l.session_id=json_extract(e.data,'$.subagent_id') \
-                 WHERE e.session_id=?1 AND e.kind='subagent_start' \
-                   AND json_extract(e.data,'$.background')=1 AND l.parent_session_id=?1 \
+                 WHERE e.session_id=?1 \
+                   AND (e.kind='subagent_backgrounded' OR (e.kind='subagent_start' AND json_extract(e.data,'$.background')=1)) \
+                   AND l.parent_session_id=?1 \
                    AND NOT EXISTS(SELECT 1 FROM engine_event s WHERE s.session_id=?1 \
                                   AND s.kind='subagent_stop' \
                                   AND json_extract(s.data,'$.subagent_id')=json_extract(e.data,'$.subagent_id') \
