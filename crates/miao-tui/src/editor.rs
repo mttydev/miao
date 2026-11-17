@@ -947,6 +947,9 @@ pub struct Composer {
     /// The wait has gone long enough that the TS row turns its spinner
     /// warning-colored (30s while waiting for the model).
     pub phase_alert: bool,
+    /// What the operator can do about the state the title names — "Esc
+    /// interrupt" while a run is active. `None` when there is nothing to stop.
+    pub phase_action: Option<String>,
     /// What an idle composer says about the turn that just settled: "Idle",
     /// or "Worked for 2m 30s" once a run completes.
     pub idle: Option<String>,
@@ -1002,6 +1005,7 @@ impl Composer {
             phase: None,
             phase_elapsed: None,
             phase_alert: false,
+            phase_action: None,
             idle: None,
             placeholder: random_pick(),
             suggestion: None,
@@ -1904,6 +1908,7 @@ mod tests {
             phase: None,
             phase_elapsed: None,
             phase_alert: false,
+            phase_action: None,
             idle: None,
             placeholder: 0,
             suggestion: None,

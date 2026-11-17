@@ -1866,10 +1866,10 @@ fn a_prompt_typed_during_a_turn_steers_into_it_instead_of_queueing() {
         "the Session did not open:\n{}",
         harness.screen()
     );
-    // The strip offers the interrupt hint only while a run is in flight, so it
-    // is the state that used to switch the delivery class.
+    // The composer title offers the interrupt chord only while a run is in
+    // flight, so it is the state that used to switch the delivery class.
     assert!(
-        wait_for_screen(&harness, "esc interrupt", Duration::from_secs(10)),
+        wait_for_screen(&harness, "Esc interrupt", Duration::from_secs(10)),
         "the fixture never reported a running turn:\n{}",
         harness.screen()
     );

@@ -4732,6 +4732,11 @@ impl App {
             false => None,
         };
         self.shell.composer.phase_alert = alert && self.shell.composer.phase.is_some();
+        self.shell.composer.phase_action = match (&self.state.active_run, self.state.pending) {
+            (Some(_), 0) => Some("Esc interrupt".to_string()),
+            (Some(_), _) => Some("Esc interrupt and send".to_string()),
+            (None, _) => None,
+        };
         // The title outlives the phase: once the run settles, say what it did
         // instead of going blank. The duration is the wall clock of the run the
         // engine reported, not a guess from the transcript.
@@ -4802,24 +4807,12 @@ impl App {
                         compact_tokens(usage.output_tokens)
                     )
                 });
-        // The state leads the strip: it is the one fact that is never absent.
-        // The composer title goes quiet on an idle Session and every hint below
-        // is conditional, so the row could render as a blank line — which is
-        // what a TUI that stopped painting looks like. The words carry the same
-        // judgement mtty's tab badge gets.
-        let mut hints = vec![StatusHint {
-            text: match crate::mtty_state::State::of(
-                phase_needs_operator,
-                self.state.active_run.is_some(),
-            ) {
-                crate::mtty_state::State::Idle => "idle",
-                crate::mtty_state::State::Processing => "working",
-                crate::mtty_state::State::Awaiting => "needs you",
-            }
-            .to_string(),
-            warning: false,
-            success: false,
-        }];
+        // The state rides the composer's own title — idle/working/needs you sit
+        // at the box's top-left, beside the input. This row only carries what
+        // the title cannot: an update waiting, a transcript scrolled away, a
+        // policy that widens what runs. The model follows at the row's left, so
+        // an idle Session still names what would answer.
+        let mut hints: Vec<StatusHint> = Vec::new();
         if let Some(installed) = &self.pending_update {
             hints.push(StatusHint {
                 text: format!("{installed} ready · restart to apply"),
@@ -4837,22 +4830,10 @@ impl App {
                 success: false,
             });
         }
-        // A blocking approval or question is already the phase line, so
-        // repeating it here would say the same thing twice in the one strip the
-        // operator scans. The queued count no longer rides these hints either:
-        // the composer box's title carries it now, and the facts below the
-        // draft would read the same number twice in the one box.
-        if self.state.active_run.is_some() {
-            hints.push(StatusHint {
-                text: if self.state.pending > 0 {
-                    "esc interrupt and send".to_string()
-                } else {
-                    "esc interrupt".to_string()
-                },
-                warning: false,
-                success: false,
-            });
-        }
+        // An approval or question is already the phase line, the queued count
+        // and the interrupt chord ride the composer's title, and the state is
+        // the title itself: repeating any of them here would say the same thing
+        // twice in the one row the operator scans.
         // A spent balance and a vendor rate limit are the two waits whose
         // remedy is switching what serves the Session, so the strip names the
         // keys at the moment they matter. The chords render from the live
@@ -7671,9 +7652,14 @@ mod tests {
             state: Box::new(state),
         });
         assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
+        assert_eq!(
+            app.shell.composer.phase_action.as_deref(),
+            Some("Esc interrupt")
+        );
         app.state.active_run = None;
         app.update_status();
         assert!(app.shell.composer.phase.is_none());
+        assert!(app.shell.composer.phase_action.is_none());
         assert!(
             app.shell.composer.idle.is_some(),
             "the settled turn speaks in the composer title"
@@ -7695,20 +7681,25 @@ mod tests {
         );
     }
 
-    /// The strip is what still says what the Session is doing once the composer
-    /// title goes quiet, and every other hint is conditional: an idle Session
-    /// with nothing queued and the sidebar showing used to paint a blank row,
-    /// which is what a TUI that stopped painting looks like.
+    /// The state is the box's own title: an idle Session names itself there, a
+    /// run names its phase and interrupt chord, and the facts row below keeps
+    /// only the model and any exception. A blank row is what a TUI that stopped
+    /// painting looks like, so the model keeps it occupied.
     #[test]
-    fn the_strip_names_the_session_state_instead_of_going_blank() {
+    fn the_composer_title_names_the_state_instead_of_going_blank() {
         let mut app = session_app();
         app.update_status();
-        assert_eq!(strip_hints(&app), vec!["idle"]);
+        assert!(strip_hints(&app).is_empty());
         assert_eq!(app.shell.composer.idle.as_deref(), Some("Idle"));
 
         app.state.active_run = Some("run-1".into());
         app.update_status();
-        assert_eq!(strip_hints(&app), vec!["working", "esc interrupt"]);
+        assert!(strip_hints(&app).is_empty());
+        assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
+        assert_eq!(
+            app.shell.composer.phase_action.as_deref(),
+            Some("Esc interrupt")
+        );
 
         app.state.active_run = None;
         app.state.approvals.push(crate::session::ApprovalView {
@@ -7722,7 +7713,11 @@ mod tests {
             expires_at_ms: None,
         });
         app.update_status();
-        assert_eq!(strip_hints(&app), vec!["needs you"]);
+        assert!(strip_hints(&app).is_empty());
+        assert_eq!(
+            app.shell.composer.phase.as_deref(),
+            Some("needs approval · bash")
+        );
     }
 
     fn strip_hints(app: &App) -> Vec<&str> {
@@ -7925,14 +7920,18 @@ mod tests {
             !hints.iter().any(|hint| hint.contains("approval")),
             "{hints:?}"
         );
-        assert!(hints.contains(&"esc interrupt"), "{hints:?}");
+        assert_eq!(
+            app.shell.composer.phase_action.as_deref(),
+            Some("Esc interrupt")
+        );
         assert!(app.shell.title.status_alert());
         app.state.approvals.clear();
         app.state.active_run = None;
         app.update_status();
-        // Idle still names itself: a blank strip is indistinguishable from one
-        // that stopped painting.
-        assert_eq!(strip_hints(&app), vec!["idle"]);
+        // Idle still names itself where the operator types: the title says
+        // "Idle" even when the facts row below carries only the model.
+        assert!(strip_hints(&app).is_empty());
+        assert!(app.shell.composer.idle.is_some());
     }
 
     /// `--auto` widens what runs without asking. A Session that stops
@@ -9311,7 +9310,8 @@ mod tests {
         );
         app.handle(opened(Transcript::default(), None));
         assert!(app.tool_running.is_none(), "no tool is still running");
-        assert_eq!(strip_hints(&app), vec!["idle"]);
+        assert!(strip_hints(&app).is_empty());
+        assert!(app.shell.composer.idle.is_some());
         assert_eq!(app.shell.title.status(), Some("Idle"));
     }
 
