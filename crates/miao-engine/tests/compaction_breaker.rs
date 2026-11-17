@@ -378,3 +378,106 @@ async fn stuck_passes_and_an_open_breaker_reach_the_store() {
         "an open breaker starts no pass"
     );
 }
+
+/// A pass that summarized something before one segment failed is progress, not
+/// a refusal: three of them must not disable automatic compaction, which is how
+/// a long Session stopped compacting itself after three unlucky segments.
+struct Partial {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for Partial {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        // The prefix attempt and a segment share one system prompt; the segment
+        // names its own range in the instruction, which is what tells them apart.
+        let instruction = request
+            .messages
+            .first()
+            .map(|message| message.content.to_string())
+            .unwrap_or_default();
+        if instruction.contains("Summarize this portion of the conversation") {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            // One segment answers, the next refuses: every pass ends with the
+            // first segment summarized and work on the table.
+            return if call.is_multiple_of(2) {
+                Ok(Reply {
+                    content: json!([{ "type": "text", "text": "a partial summary" }]),
+                    usage: json!({}),
+                    needs_tools: false,
+                })
+            } else {
+                Err(ProviderError::Transport("the summarizer gave up".into()))
+            };
+        }
+        if request
+            .system
+            .starts_with("Summarize the conversation portion")
+        {
+            // No prefix this time, so every pass takes the segmented path.
+            return Err(ProviderError::Transport("no prefix this time".into()));
+        }
+        Ok(Reply {
+            content: json!([{"type":"text","text":"the answer"}]),
+            usage: json!({"inputTokens": 990_000, "outputTokens": 1_000}),
+            needs_tools: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn partial_progress_never_trips_the_breaker() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(Partial {
+        calls: AtomicUsize::new(0),
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        Policy::new(Config::default()).unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .set_context_limits(Some(ContextLimits {
+            window: 1_000_000,
+            ratio: 0.5,
+            headroom: 100_000,
+            // One message per summarizer call, so a pass has several segments
+            // and can fail after summarizing one of them.
+            per_pass: 1,
+            fold_ratio: 0.0,
+            prune_chars: None,
+            prune_total_chars: None,
+            protect_turns: 2,
+            prefix_scope: Default::default(),
+            retention: None,
+        }))
+        .await;
+
+    for (index, id) in ["one", "two", "three"].iter().enumerate() {
+        drain(&runtime, &store, id, index + 1).await;
+    }
+    let rejected = store
+        .events("s", 0, 2000)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| event.kind == "compaction.rejected")
+        .count();
+    assert_eq!(rejected, 0, "partial passes are not refusals");
+
+    let before = provider.calls.load(Ordering::SeqCst);
+    drain(&runtime, &store, "four", 4).await;
+    assert!(
+        provider.calls.load(Ordering::SeqCst) > before,
+        "the trigger keeps running after three partial passes"
+    );
+}
