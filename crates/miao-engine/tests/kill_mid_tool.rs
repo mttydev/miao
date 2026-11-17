@@ -149,7 +149,12 @@ async fn kill_mid_tool_then_resume_consumes_one_unknown_guard() {
     // against a root naming the very same directory.
     let workspace = miao_engine::placement::canonical(&workspace);
     let marker = workspace.join("probe");
-    let command = format!("echo ran >> {}", marker.display());
+    // The call runs through bash on every platform (Git Bash on Windows), and
+    // bash reads backslashes as escapes: an unquoted `C:\Users\…` target loses
+    // its separators and the redirect lands on a mangled name instead of the
+    // marker. Forward slashes keep the path literal for both shells.
+    let literal = marker.to_string_lossy().replace('\\', "/");
+    let command = format!("echo ran >> '{literal}'");
 
     let store = Store::open(&db).await.unwrap();
     store
