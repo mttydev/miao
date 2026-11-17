@@ -51,8 +51,11 @@ final class SpeechInput {
         }
         do {
             let audio = AVAudioSession.sharedInstance()
-            try audio.setCategory(.record, mode: .measurement, options: .duckOthers)
-            try audio.setActive(true, options: .notifyOthersOnDeactivation)
+            // `duckOthers` is only legal for playAndRecord/playback/multiRoute;
+            // this session only records, so asking to duck other audio made
+            // setCategory fail before the engine could start.
+            try audio.setCategory(.record, mode: .measurement)
+            try audio.setActive(true)
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true; request.requiresOnDeviceRecognition = true
             self.request = request
@@ -73,12 +76,20 @@ final class SpeechInput {
                 let finished = result?.isFinal == true || failure != nil
                 Task { @MainActor in
                     guard let self, self.generation == current else { return }
-                    if let words {
+                    if let words, !words.isEmpty {
                         let value = text + (text.isEmpty || text.hasSuffix(" ") || text.hasSuffix("\n") ? "" : " ") + words
                         guard accept(self.expectedDraft, value) else { self.stop(); self.error = "输入已更改，语音已停止"; return }
                         self.expectedDraft = value
                     }
-                    if finished { self.stop() }
+                    guard finished else { return }
+                    self.stop()
+                    // A failure is not a normal end: without a message the
+                    // button simply snapped back and nothing explained why.
+                    if failure != nil {
+                        self.error = "语音识别失败，请检查麦克风权限，或在语言菜单里换一种语言"
+                    } else if self.expectedDraft == self.origin {
+                        self.error = "没有识别到语音，请靠近麦克风重试"
+                    }
                 }
             }
         } catch { stop(); self.error = "语音输入暂时不可用" }

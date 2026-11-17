@@ -27,6 +27,7 @@ struct LocalView: View {
         }
     }
     @FocusState private var focused: Bool
+    @Environment(\.scenePhase) private var phase
 
     var body: some View {
         NavigationStack {
@@ -140,6 +141,8 @@ struct LocalView: View {
                 }
                 .presentationDetents([.medium])
             }
+            .onDisappear { speech.stop() }
+            .onChange(of: phase) { _, value in if value == .background { speech.stop() } }
 
         }
     }
@@ -302,6 +305,10 @@ struct LocalView: View {
 
     private var composer: some View {
         VStack(spacing: 6) {
+            if let error = speech.error {
+                Text(error).font(.caption).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -326,20 +333,47 @@ struct LocalView: View {
                 }
                 .accessibilityIdentifier("localAttach")
                 .accessibilityLabel("添加图片")
-                Button { Task { await dictate() } } label: {
-                    Image(systemName: speech.recording ? "waveform.circle.fill" : "mic")
-                        .font(.title3)
-                        .foregroundStyle(speech.recording ? Color.red : Color.accentColor)
+                if speech.recording {
+                    Button { speech.stop() } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(Color.red)
+                    }
+                    .accessibilityIdentifier("localDictate")
+                    .accessibilityLabel("停止听写")
+                    Button { speech.cancel { draft = $0 } } label: {
+                        Image(systemName: "xmark.circle").font(.title3)
+                    }
+                    .accessibilityLabel("取消听写")
+                    Text(speech.durationText)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.red)
+                } else {
+                    Button { Task { await dictate() } } label: {
+                        Image(systemName: "mic")
+                            .font(.title3)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .accessibilityIdentifier("localDictate")
+                    .accessibilityLabel("语音输入")
+                    .disabled(speech.requesting)
                 }
-                .accessibilityIdentifier("localDictate")
-                .accessibilityLabel(speech.recording ? "停止听写" : "语音输入")
+                Menu {
+                    Button("自动（设备语言）") { speech.localeIdentifier = "" }
+                    Button("普通话") { speech.localeIdentifier = "zh-CN" }
+                    Button("English") { speech.localeIdentifier = "en-US" }
+                } label: {
+                    Image(systemName: "globe").font(.title3)
+                }
+                .accessibilityLabel("语音识别语言")
+                .disabled(speech.recording || speech.requesting)
                 TextField("说点什么…", text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 10).padding(.vertical, 8)
                 .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                 .focused($focused)
-                .disabled(!agent.ready)
+                .disabled(!agent.ready || speech.recording)
                 .accessibilityIdentifier("localInput")
             if agent.busy {
                 Button { tap(); agent.stop() } label: { Image(systemName: "stop.circle.fill").font(.title2) }
@@ -371,8 +405,11 @@ struct LocalView: View {
     /// Recognition only fills the draft; sending stays an explicit action.
     private func dictate() async {
         if speech.recording { speech.stop(); return }
-        await speech.start(text: draft) { recognized, _ in
-            draft = recognized
+        await speech.start(text: draft, locale: speech.localeIdentifier) { expected, value in
+            // An edit while listening wins: the next partial result must not
+            // overwrite what the operator typed.
+            guard draft == expected else { return false }
+            draft = value
             return true
         }
     }
@@ -406,6 +443,9 @@ struct LocalView: View {
     }
 
     private func send() {
+        // Sending ends listening first: otherwise a late partial result would
+        // land in the draft that was just cleared.
+        speech.stop()
         let text = draft
         let images = attachments
         draft = ""
