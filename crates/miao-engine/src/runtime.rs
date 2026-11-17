@@ -8145,6 +8145,7 @@ async fn delegate(
         auto_background_after()
     };
     let handed_off = Arc::new(std::sync::atomic::AtomicBool::new(task.background));
+    let settle_cancel = CancellationToken::new();
     let (settled_tx, mut settled_rx) = tokio::sync::oneshot::channel();
     {
         let background = inner.clone();
@@ -8153,7 +8154,7 @@ async fn delegate(
         let task_call = call.to_owned();
         let watcher_child = child.clone();
         let handed_off = handed_off.clone();
-        let settle = inner.stop.clone();
+        let settle = settle_cancel.clone();
         let admitted_seq = admission.admitted_seq;
         let started_at_ms = start.recorded_at_ms;
         tokio::spawn(async move {
@@ -8183,6 +8184,26 @@ async fn delegate(
                 .await;
             }
             let _ = settled_tx.send(settled);
+        });
+    }
+    // Until the child is handed to the background, the wait follows the turn's
+    // cancellation; after that only process shutdown may stop it. The gate is
+    // read at cancellation time, so a normal turn end cannot kill a child the
+    // parent no longer waits for.
+    {
+        let settle = settle_cancel.clone();
+        let handed_off = handed_off.clone();
+        let turn = cancel.clone();
+        let stop = inner.stop.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = turn.cancelled() => {
+                    if !handed_off.load(std::sync::atomic::Ordering::SeqCst) {
+                        settle.cancel();
+                    }
+                }
+                _ = stop.cancelled() => settle.cancel(),
+            }
         });
     }
     if task.background {
@@ -8453,7 +8474,25 @@ async fn finish_delegation(
                 .run_state(parent, run)
                 .await
                 .map_err(|_| ToolError::External("subagent run state unavailable".into()))?;
-            if parent_state.as_deref() == Some("interrupted") {
+            // The row's `interrupted` state is transient: the drain can finish
+            // and remove it between two polls. The durable finish event is the
+            // second witness, and it says `completed` for a normal end — which
+            // must leave the child running.
+            let interrupted = if parent_state.as_deref() == Some("interrupted") {
+                true
+            } else {
+                inner
+                    .store
+                    .latest_event(parent, "run.finished")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|event| {
+                        event.data["run_id"] == json!(run)
+                            && event.data["reason"] == json!("interrupted")
+                    })
+            };
+            if interrupted {
                 let _ = cancel_session(inner, child).await;
                 reason = "cancelled";
                 break;
