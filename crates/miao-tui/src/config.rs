@@ -75,6 +75,11 @@ pub struct Config {
     /// refactor needs. Off by default; a Session the operator pinned a variant
     /// on keeps that pin, because an explicit choice is never guessed over.
     pub auto_effort: bool,
+    /// `predict_next`: when a Session goes idle with an empty composer, ask the
+    /// engine's model for the next prompt it would send and offer it as ghost
+    /// text. Off by default: it spends a model call the operator did not ask
+    /// for.
+    pub predict_next: bool,
 }
 
 /// `prompt.max_width` from `tui.json`.
@@ -118,6 +123,7 @@ impl Default for Config {
             keybinds: BTreeMap::new(),
             prompt_max_width: PromptWidth::default(),
             auto_effort: false,
+            predict_next: false,
         }
     }
 }
@@ -345,6 +351,15 @@ fn merge(text: &str, path: &Path, config: &mut Config, warnings: &mut Vec<String
             )),
         }
     }
+    if let Some(predict) = field("predict_next") {
+        match predict.as_bool() {
+            Some(predict) => config.predict_next = predict,
+            None => warnings.push(format!(
+                "tui config {}: predict_next must be a boolean, ignoring",
+                path.display()
+            )),
+        }
+    }
     if let Some(keybinds) = field("keybinds") {
         merge_keybinds(keybinds, path, config, warnings);
     }
@@ -422,6 +437,7 @@ pub(crate) const KNOWN_FIELDS: &[&str] = &[
     "animations",
     "focus_reporting",
     "auto_effort",
+    "predict_next",
 ];
 
 /// Names every top-level field neither loader reads, pointing at the known

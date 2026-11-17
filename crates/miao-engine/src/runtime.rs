@@ -2164,6 +2164,68 @@ impl Runtime {
         self.inner.breakers.lock().await.remove(session);
     }
 
+    /// One suggested next prompt for this Session, from its own recent work.
+    ///
+    /// This is a single one-shot call on the Session's route and credential:
+    /// the engine owns both, so a client cannot ask for a suggestion without
+    /// them, and nothing is admitted, recorded as a message, or counted as a
+    /// turn. A provider that fails or answers nothing yields `None`: a missing
+    /// suggestion must never break the composer.
+    pub async fn predict_next(
+        &self,
+        session: &str,
+        draft: Option<&str>,
+    ) -> Result<Option<String>, Error> {
+        if self.inner.stop.is_cancelled() {
+            return Err(Error::Closed);
+        }
+        let binding = match (
+            self.inner.store.model_selection(session).await?,
+            self.inner.store.agent(session).await?,
+        ) {
+            (Some(selection), _) => Some(selection),
+            (None, Some((manifest, _))) => manifest.model,
+            (None, None) => None,
+        };
+        let binding = match self.inner.store.account_selection(session).await? {
+            Some(account) => crate::session_account::resolve(
+                &self.inner.provider(),
+                binding.as_ref(),
+                account.credential_id.as_deref(),
+            )?,
+            None => binding,
+        };
+        let provider = crate::session_model::select(&self.inner.provider(), binding.as_ref())?;
+        let (history, _) = self.inner.store.selected_input(session).await?;
+        let context = crate::prediction::context(&history, draft);
+        if context.is_empty() {
+            return Ok(None);
+        }
+        let request = crate::protocol::ModelRequest {
+            system: crate::prediction::SYSTEM.to_string(),
+            messages: vec![crate::protocol::Message {
+                role: "user".into(),
+                content: json!([{ "type": "text", "text": context }]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            }],
+            tools: Vec::new(),
+        };
+        // A stream nobody reads blocks its provider once the channel fills, so
+        // the progress is drained even though only the final text is used.
+        let (send, mut receive) = mpsc::channel(16);
+        tokio::spawn(async move { while receive.recv().await.is_some() {} });
+        // No tools are offered, so a plain stream is enough: the tool-free
+        // variant is opt-in per adapter and would refuse the rest.
+        let Ok(reply) = provider
+            .stream(request, send, self.inner.stop.child_token())
+            .await
+        else {
+            return Ok(None);
+        };
+        Ok(crate::prediction::one_line(&reply.content))
+    }
+
     /// Record a host-resolved agent for this Session's subsequent turns.
     ///
     /// A tool name the registry does not know is refused here rather than

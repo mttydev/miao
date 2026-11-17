@@ -62,6 +62,10 @@ impl Host {
                 .admit_with(input, attachments, resume)
                 .await
                 .and_then(|value| serde_json::to_value(value).map_err(Error::from)),
+            Command::Predict { session_id, draft } => runtime
+                .predict_next(&session_id, draft.as_deref())
+                .await
+                .map(|prediction| json!({ "prediction": prediction })),
             Command::Shell {
                 session_id,
                 call_id,

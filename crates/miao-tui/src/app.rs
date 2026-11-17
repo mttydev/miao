@@ -496,6 +496,12 @@ pub struct App {
     /// to serve its models as soon as that turn ends, because a restart cancels
     /// whatever the engine is running.
     pending_routes_reload: bool,
+    /// `predict_next` from `tui.json`: ask the engine for a suggested next
+    /// prompt when a Session goes idle with an empty composer.
+    predict_next: bool,
+    /// The Session a prediction is already in flight for, so an idle refresh
+    /// does not ask again before the answer arrives.
+    prediction_pending: Option<String>,
     /// `Ctrl+X` was pressed; the next key completes the chord.
     leader: bool,
     /// When the leader was armed, so a stale one expires instead of eating a
@@ -746,6 +752,8 @@ impl App {
             workspace_changes_generation: 0,
             pending_revert: None,
             pending_routes_reload: false,
+            predict_next: false,
+            prediction_pending: None,
             leader: false,
             leader_since: None,
             last_click: None,
@@ -887,6 +895,12 @@ impl App {
     /// prompt asks for when the Session pinned none.
     pub fn configure_auto_effort(&mut self, auto_effort: bool) {
         self.auto_effort = auto_effort;
+    }
+
+    /// `predict_next` from `tui.json`: ask for a suggested next prompt when a
+    /// Session goes idle.
+    pub fn configure_predict_next(&mut self, predict_next: bool) {
+        self.predict_next = predict_next;
     }
 
     /// How long the leader chord stays armed, from `tui.json`.
@@ -1068,6 +1082,25 @@ impl App {
             }
             AppEvent::RecallFailed(message) => self.notice(&format!("recall failed: {message}")),
             AppEvent::TagFailed(message) => self.notice(&format!("tag failed: {message}")),
+            AppEvent::Predicted { session_id, text } => {
+                if self.prediction_pending.as_deref() == Some(session_id.as_str()) {
+                    self.prediction_pending = None;
+                }
+                // A suggestion is only worth painting where the operator is
+                // still looking at the same idle composer; anything they typed
+                // since, a run that started, or a checklist suggestion that
+                // arrived first makes it stale.
+                let current =
+                    self.session.as_ref().map(|session| session.id.as_str()) == Some(&session_id);
+                let idle = self.state.active_run.is_none() && self.state.pending == 0;
+                if current
+                    && idle
+                    && self.shell.composer.editor.is_empty()
+                    && self.shell.composer.suggestion.is_none()
+                {
+                    self.shell.composer.set_suggestion(text);
+                }
+            }
             AppEvent::Clipboard(content) => {
                 self.clipboard_busy = false;
                 let pasted = std::mem::take(&mut self.clipboard_paste);
@@ -4967,9 +5000,9 @@ impl App {
     /// Nothing is offered while a turn runs or prompts are queued — then the
     /// composer belongs to steering the work in flight.
     fn refresh_suggestion(&mut self) {
-        let next = match self.state.active_run.is_some() || self.state.pending > 0 {
-            true => None,
-            false => self
+        let idle = self.state.active_run.is_none() && self.state.pending == 0;
+        let next = match idle {
+            true => self
                 .state
                 .todos
                 .iter()
@@ -4979,7 +5012,25 @@ impl App {
                 })
                 .map(|todo| todo.content.trim().to_string())
                 .filter(|content| !content.is_empty()),
+            false => None,
         };
+        // The checklist names the next step when it can; a model prediction only
+        // fills the gap. It is advisory, so it is asked for once per idle
+        // stretch and never while the operator is already typing something.
+        let wants_prediction = self.predict_next
+            && idle
+            && next.is_none()
+            && self.prediction_pending.is_none()
+            && self.shell.composer.editor.is_empty();
+        if wants_prediction {
+            if let (Some(session_id), Some(engine)) = (
+                self.session.as_ref().map(|session| session.id.clone()),
+                self.engine.clone(),
+            ) {
+                self.prediction_pending = Some(session_id.clone());
+                engine.predict(&session_id, None);
+            }
+        }
         self.shell.composer.set_suggestion(next);
     }
 
@@ -5922,6 +5973,37 @@ mod tests {
                 "auto={auto} variant={variant:?} must not pin a model"
             );
         }
+    }
+
+    /// A prediction is ghost text for the idle composer of the Session that
+    /// asked for it, and a stale one from another Session is dropped.
+    #[test]
+    fn a_prediction_is_offered_for_the_open_idle_session_only() {
+        let mut app = app();
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_pred", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        app.handle(AppEvent::Predicted {
+            session_id: "ses_pred".into(),
+            text: Some("add the missing test".into()),
+        });
+        assert_eq!(
+            app.shell.composer.suggestion.as_deref(),
+            Some("add the missing test")
+        );
+
+        app.handle(AppEvent::Predicted {
+            session_id: "ses_other".into(),
+            text: Some("something else".into()),
+        });
+        assert_eq!(
+            app.shell.composer.suggestion.as_deref(),
+            Some("add the missing test"),
+            "another Session's suggestion must not replace this one"
+        );
+        assert_eq!(app.prediction_pending, None);
     }
 
     fn wheel(kind: MouseEventKind) -> AppEvent {
