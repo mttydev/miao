@@ -665,18 +665,27 @@ where
                     return Ok(false);
                 }
                 Segment::Slow => {
-                    reject(
-                        store,
-                        session,
-                        run,
-                        "summary timeout",
-                        context.saturating_add(pending_tokens),
-                        breaker,
-                    )
-                    .await;
+                    // A pass that summarized segments before this one failed has
+                    // done real work. Counting it against gate ⑤ would disable
+                    // automatic compaction for a Session that is merely slow at
+                    // the end, which is how a long history stopped compacting
+                    // itself after three unlucky segments.
+                    let partial = !parts.is_empty();
+                    if !partial {
+                        reject(
+                            store,
+                            session,
+                            run,
+                            "summary timeout",
+                            context.saturating_add(pending_tokens),
+                            breaker,
+                        )
+                        .await;
+                    }
                     notify(json!({
                         "session_id": session, "run_id": run,
                         "kind": "compaction.failed", "reason": "summary timeout",
+                        "partial": partial,
                     }));
                     return Ok(false);
                 }
@@ -704,18 +713,23 @@ where
                             (trimmed.len() < body.len()).then_some(trimmed)
                         });
                     let Some(trimmed) = retry else {
-                        reject(
-                            store,
-                            session,
-                            run,
-                            &reason,
-                            context.saturating_add(pending_tokens),
-                            breaker,
-                        )
-                        .await;
+                        // Same rule as a slow segment: work already summarized in
+                        // this pass is not a reason to disable the trigger.
+                        let partial = !parts.is_empty();
+                        if !partial {
+                            reject(
+                                store,
+                                session,
+                                run,
+                                &reason,
+                                context.saturating_add(pending_tokens),
+                                breaker,
+                            )
+                            .await;
+                        }
                         notify(json!({
                             "session_id": session, "run_id": run,
-                            "kind": "compaction.failed", "reason": reason,
+                            "kind": "compaction.failed", "reason": reason, "partial": partial,
                         }));
                         return Ok(false);
                     };
@@ -747,19 +761,22 @@ where
                             return Ok(false);
                         }
                         _ => {
-                            reject(
-                                store,
-                                session,
-                                run,
-                                &reason,
-                                context.saturating_add(pending_tokens),
-                                breaker,
-                            )
-                            .await;
+                            let partial = !parts.is_empty();
+                            if !partial {
+                                reject(
+                                    store,
+                                    session,
+                                    run,
+                                    &reason,
+                                    context.saturating_add(pending_tokens),
+                                    breaker,
+                                )
+                                .await;
+                            }
                             notify(json!({
                                 "session_id": session, "run_id": run,
                                 "kind": "compaction.failed", "reason": reason,
-                                "truncated": true,
+                                "truncated": true, "partial": partial,
                             }));
                             return Ok(false);
                         }
