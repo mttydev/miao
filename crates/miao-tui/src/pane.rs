@@ -1809,23 +1809,6 @@ fn fit_chords(menu: &str, width: usize) -> String {
     fit(leader, width)
 }
 
-fn relative_time_at(updated_at_ms: u64, now: u64) -> String {
-    let delta_ms = now.saturating_sub(updated_at_ms);
-    let minutes = delta_ms / 60_000;
-    match minutes {
-        0 => "just now".to_string(),
-        1..=59 => format!("{minutes}m ago"),
-        _ => {
-            let hours = minutes / 60;
-            if hours < 24 {
-                format!("{hours}h ago")
-            } else {
-                format!("{}d ago", hours / 24)
-            }
-        }
-    }
-}
-
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3236,19 +3219,25 @@ const MODEL_IN_CELLS: usize = 7;
 const MODEL_OUT_CELLS: usize = 7;
 const MODEL_CACHE_CELLS: usize = 5;
 
+/// The table starts two cells in, the same indent the Session usage rows above
+/// keep, so a scan down the column crosses both blocks on one line.
+const MODEL_INDENT: usize = 2;
+
 /// One row of the hourly model table: the name takes the cells the figures
 /// leave, and the three numeric columns sit right-aligned under their header
 /// so long model names truncate in one column instead of pushing `in`/`out`
 /// off the row.
 fn model_row(name: &str, input: u64, output: u64, hit: &str, width: usize) -> String {
     let numbers = MODEL_IN_CELLS + MODEL_OUT_CELLS + MODEL_CACHE_CELLS + 3;
-    let name_cells = width.saturating_sub(numbers).max(8);
+    let name_cells = width.saturating_sub(numbers + MODEL_INDENT).max(8);
     format!(
-        "{:<name_cells$} {:>in_cells$} {:>out_cells$} {:>hit_cells$}",
+        "{:indent$}{:<name_cells$} {:>in_cells$} {:>out_cells$} {:>hit_cells$}",
+        "",
         fit(name, name_cells),
         crate::status::compact_tokens(input),
         crate::status::compact_tokens(output),
         hit,
+        indent = MODEL_INDENT,
         name_cells = name_cells,
         in_cells = MODEL_IN_CELLS,
         out_cells = MODEL_OUT_CELLS,
@@ -3358,14 +3347,16 @@ fn hourly_lines(
     // stay findable as you scan down the rows.
     {
         let numbers = MODEL_IN_CELLS + MODEL_OUT_CELLS + MODEL_CACHE_CELLS + 3;
-        let name_cells = width.saturating_sub(numbers).max(8);
+        let name_cells = width.saturating_sub(numbers + MODEL_INDENT).max(8);
         lines.push(Line::from(Span::styled(
             format!(
-                "{:<name_cells$} {:>in_cells$} {:>out_cells$} {:>hit_cells$}",
+                "{:indent$}{:<name_cells$} {:>in_cells$} {:>out_cells$} {:>hit_cells$}",
+                "",
                 "model",
                 "in",
                 "out",
                 "cache",
+                indent = MODEL_INDENT,
                 name_cells = name_cells,
                 in_cells = MODEL_IN_CELLS,
                 out_cells = MODEL_OUT_CELLS,
@@ -3395,21 +3386,11 @@ fn hourly_lines(
                 lines.push(Line::from(Span::styled(name.to_string(), muted)));
             }
         }
-        let mark = match grouped && provider == open_provider && provider.is_some() {
-            true => "  - ",
-            false => "  ",
-        };
-        let row = model_row(
-            &format!("{mark}{}", model.model),
-            model.input,
-            model.output,
-            &hit,
-            width,
-        );
+        let row = model_row(&model.model, model.input, model.output, &hit, width);
         hover.push((
             lines.len(),
             format!(
-                "{mark}{} · in {} · out {} · cache {}",
+                "{} · in {} · out {} · cache {}",
                 model.model,
                 compact(model.input),
                 compact(model.output),
@@ -3567,38 +3548,15 @@ impl Pane for SidebarPane {
                 "no Session selected",
                 Style::new().fg(palette.text_muted),
             ))],
-            // Where the Session lives and when it last moved belong on one
-            // muted line: as two rows they read as two unrelated facts and
-            // spent a third of the header on something nobody scans for.
-            Some(session) => {
-                let origin = session.directory.clone().unwrap_or_default();
-                let updated = session
-                    .updated_at_ms
-                    .map(|updated| format!("updated {}", relative_time(updated)))
-                    .unwrap_or_default();
-                let detail = match (origin.is_empty(), updated.is_empty()) {
-                    (false, false) => format!("{origin} · {updated}"),
-                    (false, true) => origin,
-                    (true, false) => updated,
-                    (true, true) => String::new(),
-                };
-                vec![
-                    Line::from(Span::styled(
-                        fit(session.label(), text_width),
-                        Style::new().fg(palette.text).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(Span::styled(
-                        fit(&detail, text_width),
-                        Style::new().fg(palette.text_muted),
-                    )),
-                ]
-            }
+            // The Session's title, path and last-updated time belong to the
+            // window chrome that already carries them. The column starts with
+            // the usage only it can show.
+            Some(_) => Vec::new(),
         };
         if self.session.is_some() {
             // The workspace strip opens the billed-usage section: a "Context"
             // banner above it read as two stacked headers for one block of
             // numbers, and the strip already says what the rows below explain.
-            lines.push(Line::default());
             let (hourly, hourly_hover) =
                 hourly_lines(self.usage_hourly.as_ref(), text_width, &palette);
             let hourly_base = lines.len();
@@ -4976,9 +4934,6 @@ fn panel_lines(panel: &Panel, theme: &Theme) -> Vec<Line<'static>> {
     }
 }
 
-fn relative_time(updated_at_ms: u64) -> String {
-    relative_time_at(updated_at_ms, now_ms())
-}
 #[cfg(test)]
 mod tests {
     #[test]
@@ -8299,8 +8254,12 @@ mod tests {
             "the provider heads its group: {joined:?}"
         );
         assert!(
-            joined.contains("  - glm-5.3-flash"),
-            "models indent under the provider: {joined:?}"
+            joined.contains("  glm-5.3-flash"),
+            "models keep the row indent under the provider: {joined:?}"
+        );
+        assert!(
+            !joined.contains("- glm-5.3-flash"),
+            "no dash distinguishes a model row: {joined:?}"
         );
         // The unattributed model stays a flat row: no route, no group to head.
         assert!(
@@ -8980,14 +8939,11 @@ mod tests {
             "the todo is truncated: {:?}",
             below[0]
         );
-        let title = rows
-            .iter()
-            .position(|row| row.contains('很'))
-            .expect("title row");
+        // The Session title and path belong to the window chrome now; the
+        // column must not paint them (or wrap a long CJK title here).
         assert!(
-            rows[title].contains('…'),
-            "the title is truncated: {:?}",
-            rows[title]
+            !rows.iter().any(|row| row.contains("很长的会话标题")),
+            "the title belongs to the chrome, not the column: {rows:#?}"
         );
     }
     /// Every section opens after one blank row, wherever it sits in the
@@ -9054,7 +9010,7 @@ mod tests {
                 .position(|row| row.contains(header))
                 .unwrap_or_else(|| panic!("{header} header missing: {rows:?}"));
             assert!(
-                at > 0 && blank(&rows[at - 1]),
+                at == 0 || blank(&rows[at - 1]),
                 "{header} must open after a blank row: {rows:?}"
             );
         }
