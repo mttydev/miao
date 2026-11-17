@@ -53,6 +53,11 @@ const PENDING_INPUT_PAGE: usize = 100;
 /// sidebar's strip stayed empty no matter what the UI asked for.
 const USAGE_HOURLY_METHOD: &str = "usage_hourly";
 
+/// Plan quotas for the stored credentials the engine can meter. It is its own
+/// method because a provider endpoint is a network round trip: the billed
+/// usage ledger must not wait behind it.
+const QUOTA_METHOD: &str = "quota";
+
 pub enum Request {
     VcsChanges {
         generation: u64,
@@ -233,6 +238,8 @@ pub enum Request {
     UsageHourly {
         hours: u64,
     },
+    /// Plan windows (5h / weekly / monthly) for every metered credential.
+    Quota,
     /// Pin the account every turn of this Session runs on; `None` restores the
     /// engine default.
     SelectAccount {
@@ -575,6 +582,12 @@ impl Handle {
     /// scoped: the ledger answers for every Session in this workspace.
     pub fn usage_hourly(&self, hours: u64) {
         let _ = self.tx.send(Request::UsageHourly { hours });
+    }
+
+    /// Ask for the plan windows behind the stored credentials. A provider that
+    /// publishes no meter simply contributes no rows.
+    pub fn quota(&self) {
+        let _ = self.tx.send(Request::Quota);
     }
 
     pub fn select_account(&self, session_id: &str, credential_id: Option<&str>) {
@@ -1762,6 +1775,17 @@ async fn run(
                         bus.send(AppEvent::UsageHourly(
                             crate::status::HourlyUsage::from_value(&value),
                         ));
+                    }
+                }
+                Request::Quota => {
+                    // A provider without a meter, an unreachable endpoint, or an
+                    // engine that predates this read all answer the same way:
+                    // nothing to draw. The billed-usage strip already shows
+                    // what the Session actually spent.
+                    if let Ok(value) = client.request(QUOTA_METHOD, json!({})).await {
+                        bus.send(AppEvent::Quota(crate::status::PlanQuota::from_value(
+                            &value,
+                        )));
                     }
                 }
                 Request::SelectAccount {

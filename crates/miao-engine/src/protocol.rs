@@ -528,6 +528,11 @@ pub enum Command {
     UsageHourly {
         hours: u64,
     },
+    /// Subscription plan windows for every stored credential the engine can
+    /// meter (智谱/Z.ai coding plan, opencode-go). The answer is a list because
+    /// one operator can hold several accounts, and a missing entry means that
+    /// account has no plan endpoint rather than an empty plan.
+    Quota,
     /// Devices the host's remote-control administration knows about. The
     /// engine serves the host's list read-only; pairing and revocation stay
     /// with the host that owns that authority.

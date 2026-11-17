@@ -90,6 +90,8 @@ pub enum AppEvent {
     /// The open Session's billed usage, for the status dialog.
     Usage(UsageSummary),
     UsageHourly(crate::status::HourlyUsage),
+    /// Plan windows behind the stored credentials, for the sidebar.
+    Quota(crate::status::PlanQuota),
     /// The host's workspace list, served by the engine.
     Workspaces(Vec<(String, String, String)>),
     /// The host answered a call the engine does not own.

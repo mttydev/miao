@@ -279,6 +279,10 @@ struct Inner {
     /// needs it to tell "this provider has an account but no route" from "this
     /// provider has no account at all", which are different next steps.
     credential_db: std::sync::OnceLock<Option<std::path::PathBuf>>,
+    /// The last plan-quota answer and when it was fetched. The sidebar polls
+    /// this on its own cadence; a provider's meter does not move between two
+    /// frames, so a minute of reuse keeps the network off the frame path.
+    quota: Mutex<Option<(std::time::Instant, Value)>>,
     timers: Mutex<HashMap<String, Background>>,
     crons: Mutex<HashMap<String, Background>>,
     job_pool: FairPool,
@@ -1020,6 +1024,7 @@ impl Runtime {
                 job_output: Mutex::new(HashMap::new()),
                 terminals: crate::terminal::Registry::default(),
                 credential_db: std::sync::OnceLock::new(),
+                quota: Mutex::new(None),
                 timers: Mutex::new(HashMap::new()),
                 crons: Mutex::new(HashMap::new()),
                 job_pool: FairPool::new(JOB_SLOTS, JOBS_PER_SESSION),
@@ -1843,6 +1848,63 @@ impl Runtime {
         };
         crate::config_derive::normalized_from_sources(&sources)
             .map_err(|error| Error::Invalid(format!("config normalization failed: {error}")))
+    }
+
+    /// Plan quota for every stored credential this build can meter. A provider
+    /// whose account has no coding plan, whose endpoint is unreachable, or
+    /// whose answer this build does not parse contributes no row: the sidebar
+    /// must not turn a missing meter into a failed turn.
+    pub async fn quota(&self) -> Result<Value, Error> {
+        const REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut cache = self.inner.quota.lock().await;
+        if let Some((at, value)) = cache.as_ref() {
+            if at.elapsed() < REFRESH {
+                return Ok(value.clone());
+            }
+        }
+        let path = self
+            .inner
+            .credential_db
+            .get()
+            .cloned()
+            .flatten()
+            .or_else(crate::credential::default_database);
+        let Some(path) = path else {
+            return Ok(json!({ "providers": [] }));
+        };
+        let Ok(stored) = crate::credential::list_database(&path) else {
+            return Ok(json!({ "providers": [] }));
+        };
+        let client = reqwest::Client::new();
+        let mut providers: Vec<Value> = Vec::new();
+        for metadata in stored {
+            // One row per integration: several labeled keys for the same plan
+            // share its meter, so a second fetch would only repeat it.
+            if metadata.expired
+                || !crate::quota::metered(&metadata.integration)
+                || providers
+                    .iter()
+                    .any(|row| row["provider"].as_str() == Some(metadata.integration.as_str()))
+            {
+                continue;
+            }
+            let source = crate::credential::Source::Database {
+                path: path.clone(),
+                id: metadata.id.clone(),
+                integration: metadata.integration.clone(),
+            };
+            let Ok(credential) = source.load().await else {
+                continue;
+            };
+            if let Some(report) =
+                crate::quota::fetch(&client, &metadata.integration, &credential).await
+            {
+                providers.push(report);
+            }
+        }
+        let value = json!({ "providers": providers });
+        *cache = Some((std::time::Instant::now(), value.clone()));
+        Ok(value)
     }
 
     /// `/sandbox`: flip the operator's sandbox switch for this process. `None`

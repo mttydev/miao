@@ -151,6 +151,112 @@ impl HourlyUsage {
     }
 }
 
+/// One plan window behind a stored credential: the 5-hour, weekly or monthly
+/// meter a coding plan counts against. `percent` is what the sidebar paints,
+/// while the absolute figures stay because "1438 / 12000 credits" answers a
+/// question a percentage cannot.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlanWindow {
+    pub id: String,
+    pub label: String,
+    pub unit: String,
+    pub used: Option<f64>,
+    pub limit: Option<f64>,
+    pub percent: f64,
+    pub status: String,
+    /// When the window next resets, in epoch milliseconds. `None` means the
+    /// provider did not say, which is not the same as "never".
+    pub resets_at_ms: Option<u64>,
+}
+
+impl PlanWindow {
+    fn from_value(value: &Value) -> Option<Self> {
+        let percent = value.get("percent").and_then(Value::as_f64)?;
+        Some(Self {
+            id: value.get("id").and_then(Value::as_str)?.to_owned(),
+            label: value
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            unit: value
+                .get("unit")
+                .and_then(Value::as_str)
+                .unwrap_or("percent")
+                .to_owned(),
+            used: value.get("used").and_then(Value::as_f64),
+            limit: value.get("limit").and_then(Value::as_f64),
+            percent,
+            status: value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("ok")
+                .to_owned(),
+            resets_at_ms: value.get("resets_at_ms").and_then(Value::as_u64),
+        })
+    }
+}
+
+/// One account's plan: `plan` is the tier the provider names (lite/pro/max),
+/// empty when the endpoint does not publish one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlanProvider {
+    pub provider: String,
+    pub plan: String,
+    pub windows: Vec<PlanWindow>,
+}
+
+/// Every metered account the engine answered for. An empty list is a normal
+/// answer: no stored credential has a plan endpoint this build can read.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlanQuota {
+    pub providers: Vec<PlanProvider>,
+}
+
+impl PlanQuota {
+    pub fn from_value(value: &Value) -> Self {
+        Self {
+            providers: value
+                .get("providers")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| {
+                            let windows: Vec<PlanWindow> = row
+                                .get("windows")
+                                .and_then(Value::as_array)
+                                .map(|windows| {
+                                    windows.iter().filter_map(PlanWindow::from_value).collect()
+                                })
+                                .unwrap_or_default();
+                            if windows.is_empty() {
+                                return None;
+                            }
+                            Some(PlanProvider {
+                                provider: row
+                                    .get("provider")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                plan: row
+                                    .get("plan")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                windows,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageSummary {
     pub turns: u64,
@@ -532,5 +638,24 @@ mod tests {
         assert_eq!(usage.ttft_avg_ms, None);
         assert_eq!(usage.input_tokens, 0);
         assert!(usage.lineage.is_empty());
+    }
+
+    #[test]
+    fn plan_quota_reads_windows_and_drops_a_provider_without_one() {
+        let quota = PlanQuota::from_value(&json!({
+            "providers": [
+                {"provider":"zhipuai-coding-plan","plan":"lite","windows":[
+                    {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"warning","resets_at_ms":1760000000000u64},
+                    {"id":"1w","label":"credits · Weekly","unit":"credits","used":0.0,"limit":60000.0,"percent":0.0,"status":"ok"}
+                ]},
+                {"provider":"empty","plan":"","windows":[]}
+            ]
+        }));
+        assert_eq!(quota.providers.len(), 1);
+        assert_eq!(quota.providers[0].plan, "lite");
+        assert_eq!(quota.providers[0].windows.len(), 2);
+        assert_eq!(quota.providers[0].windows[0].percent, 11.9);
+        assert_eq!(quota.providers[0].windows[1].resets_at_ms, None);
+        assert!(PlanQuota::from_value(&json!({})).is_empty());
     }
 }
