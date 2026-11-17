@@ -117,6 +117,7 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
     app.configure_leader_timeout(config.leader_timeout_ms);
     app.configure_animations(config.animations);
     app.configure_auto_effort(config.auto_effort);
+    app.configure_predict_next(config.predict_next);
     let preferences = terminal::Preferences {
         mouse: config.mouse,
         cursor: config.cursor,

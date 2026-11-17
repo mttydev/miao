@@ -52,6 +52,12 @@ pub enum AppEvent {
     /// A tag the engine refused; shown as a notice so the operator does not
     /// believe the label was stored.
     TagFailed(String),
+    /// The suggested next prompt for a Session; `None` when the model had
+    /// nothing to suggest. Advisory: nothing was admitted for it.
+    Predicted {
+        session_id: String,
+        text: Option<String>,
+    },
     /// The external editor exited; `Ok(None)` means it saved an empty file.
     EditorFinished(Result<Option<String>, String>),
     Resize {

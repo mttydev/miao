@@ -293,6 +293,17 @@ pub enum Command {
         #[serde(default)]
         attachments: Vec<Attachment>,
     },
+    /// One suggested next prompt for this Session, without admitting anything.
+    ///
+    /// A suggestion is advisory: it costs one one-shot call on the Session's own
+    /// route and never enters the transcript, so a client may ask for it as
+    /// often as its own debounce allows.
+    Predict {
+        session_id: String,
+        /// What the operator has typed so far, when they have typed anything.
+        #[serde(default)]
+        draft: Option<String>,
+    },
     Shell {
         session_id: String,
         #[serde(default)]

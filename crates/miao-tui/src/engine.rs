@@ -86,6 +86,12 @@ pub enum Request {
         session_id: String,
         tag: String,
     },
+    /// Ask for a suggested next prompt. Advisory: nothing is admitted for it,
+    /// and it costs one one-shot call on the Session's own route.
+    Predict {
+        session_id: String,
+        draft: Option<String>,
+    },
     Open(String),
     /// Ask for the page of messages older than `before_seq`, so a long Session
     /// is read backwards one screenful at a time.
@@ -339,6 +345,15 @@ impl Handle {
         let _ = self.tx.send(Request::Tag {
             session_id: session_id.to_string(),
             tag: tag.to_string(),
+        });
+    }
+
+    /// Ask for a suggested next prompt; the answer arrives as
+    /// [`AppEvent::Predicted`]. Advisory, and nothing is admitted for it.
+    pub fn predict(&self, session_id: &str, draft: Option<String>) {
+        let _ = self.tx.send(Request::Predict {
+            session_id: session_id.to_string(),
+            draft,
         });
     }
 
@@ -1220,6 +1235,18 @@ async fn run(
                     session_id,
                     handle,
                 } => recall_archived(client, &bus, &session_id, &handle).await,
+                Request::Predict { session_id, draft } => {
+                    let answer = client
+                        .request("predict", json!({ "session_id": session_id, "draft": draft }))
+                        .await;
+                    let text = answer.ok().and_then(|value| {
+                        value
+                            .get("prediction")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                    bus.send(AppEvent::Predicted { session_id, text });
+                }
                 Request::Tag { session_id, tag } => {
                     match client
                         .request("tag", json!({ "session_id": session_id, "tag": tag }))
