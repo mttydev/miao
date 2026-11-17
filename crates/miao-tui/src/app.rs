@@ -355,10 +355,7 @@ impl Draft {
                 Some(DraftPart::Text(open)) => open.push_str(text),
                 _ => self.parts.push(DraftPart::Text(text.to_string())),
             },
-            Some("reasoning.delta") => match self.parts.last_mut() {
-                Some(DraftPart::Reasoning(open)) => open.push_str(text),
-                _ => self.parts.push(DraftPart::Reasoning(text.to_string())),
-            },
+            Some("reasoning.delta") => self.think(text),
             Some("tool.start") => self.parts.push(DraftPart::Call(DraftCall {
                 name: delta
                     .get("name")
@@ -385,6 +382,37 @@ impl Draft {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Fold one reasoning fragment into the draft.
+    ///
+    /// A gateway that interleaves thinking with the answer delivers it in the
+    /// middle of a sentence. Pushing a new part there ended the paragraph, so
+    /// the sentence resumed on a fresh bullet and the characters before the
+    /// thought were left stranded on a line of their own above a `Thinking`
+    /// header. Thinking that arrives while a paragraph is still open belongs
+    /// before that paragraph: the prose then keeps filling the same part and
+    /// the reader sees one sentence under one bullet.
+    fn think(&mut self, text: &str) {
+        // A paragraph the answer already ended with a blank line is a real
+        // step boundary: the thought after it stays after it.
+        let mid_paragraph = matches!(
+            self.parts.last(),
+            Some(DraftPart::Text(open)) if !open.ends_with('\n')
+        );
+        if mid_paragraph {
+            let prose = self.parts.pop();
+            match self.parts.last_mut() {
+                Some(DraftPart::Reasoning(open)) => open.push_str(text),
+                _ => self.parts.push(DraftPart::Reasoning(text.to_string())),
+            }
+            self.parts.extend(prose);
+            return;
+        }
+        match self.parts.last_mut() {
+            Some(DraftPart::Reasoning(open)) => open.push_str(text),
+            _ => self.parts.push(DraftPart::Reasoning(text.to_string())),
         }
     }
 
@@ -5777,6 +5805,65 @@ mod tests {
         assert!(
             painted.contains("Thinking"),
             "the reasoning shows as its one header line: {painted:?}"
+        );
+    }
+
+    /// A gateway that interleaves thinking with the answer delivers a couple of
+    /// characters of prose, then the thought, then the rest of the sentence.
+    /// Each switch used to open a new part, so the transcript painted `● 两` on
+    /// a bullet of its own and continued the sentence below a `Thinking`
+    /// header: text cut after one or two characters, several times a turn.
+    #[test]
+    fn thinking_inside_a_sentence_does_not_start_a_new_paragraph() {
+        let mut app = session_app();
+        for (kind, text) in [
+            ("text.delta", "两"),
+            ("reasoning.delta", "先确认板子还在。"),
+            ("text.delta", "件都要回答：先看底图。"),
+        ] {
+            app.handle(AppEvent::Provider(serde_json::json!({
+                "kind": "provider.delta",
+                "session_id": "ses_1",
+                "run_id": "run-1",
+                "data": { "kind": kind, "text": text },
+            })));
+        }
+        let painted = drafted(&mut app);
+        assert!(
+            painted.contains("● 两件都要回答：先看底图。"),
+            "one sentence stays under one bullet: {painted:?}"
+        );
+        assert!(
+            !painted.contains("● 两\n"),
+            "the opening characters are not stranded on their own row: {painted:?}"
+        );
+    }
+
+    /// A paragraph the answer ended with a blank line is a real step boundary:
+    /// the thought after it stays after it, and the next paragraph opens its
+    /// own bullet instead of being folded into the previous one.
+    #[test]
+    fn a_finished_paragraph_keeps_the_thought_that_follows_it() {
+        let mut app = session_app();
+        for (kind, text) in [
+            ("text.delta", "第一段。\n\n"),
+            ("reasoning.delta", "再看第二段。"),
+            ("text.delta", "第二段。"),
+        ] {
+            app.handle(AppEvent::Provider(serde_json::json!({
+                "kind": "provider.delta",
+                "session_id": "ses_1",
+                "run_id": "run-1",
+                "data": { "kind": kind, "text": text },
+            })));
+        }
+        let painted = drafted(&mut app);
+        let first = painted.find("● 第一段。").expect(&painted);
+        let thought = painted.find("Thinking").expect(&painted);
+        let second = painted.find("● 第二段。").expect(&painted);
+        assert!(
+            first < thought && thought < second,
+            "the thought stays between the two paragraphs: {painted:?}"
         );
     }
 
