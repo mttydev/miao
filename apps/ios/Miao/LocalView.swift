@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UIKit
 
 /// The phone-only mode: no account, no computer, no relay.
 struct LocalView: View {
@@ -306,8 +307,19 @@ struct LocalView: View {
     private var composer: some View {
         VStack(spacing: 6) {
             if let error = speech.error {
-                Text(error).font(.caption).foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if error.contains("系统设置") {
+                        Button("打开设置") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        .font(.caption)
+                        .accessibilityIdentifier("localSpeechSettings")
+                    }
+                }
             }
             if !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
