@@ -47,7 +47,7 @@ if (process.argv.includes("--native-cli")) {
     const notary = notaryCredentials()
     if (notary) {
       for (const archive of archives.filter((item) => item.includes("darwin"))) {
-        await $`xcrun notarytool submit ${archive} --key ${notary.key} --key-id ${notary.keyId} --issuer ${notary.issuer} --wait`
+        await notarize(archive, notary)
       }
     }
     for (const archive of archives) {
@@ -235,6 +235,27 @@ async function codesign(args: string[]) {
     console.warn(`codesign attempt ${attempt}/${attempts} failed: ${lastError}`)
   }
   throw new Error(`codesign failed after ${attempts} attempts: ${lastError}`)
+}
+
+// `notarytool submit --wait` uploads the archive and then polls Apple's service
+// for minutes. A runner that loses its network during that poll answers
+// "The Internet connection appears to be offline" (NSURLErrorDomain -1009),
+// which is not a notarization verdict: it failed a release whose build had
+// already succeeded. Each submission is a new notary request, so repeating one
+// is safe, and the attempt is retried before the release gives up.
+async function notarize(archive: string, notary: { key: string; keyId: string; issuer: string }) {
+  const attempts = 3
+  let lastError = ""
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    console.log(`notarytool submit ${path.basename(archive)} (attempt ${attempt}/${attempts})`)
+    const result =
+      await $`xcrun notarytool submit ${archive} --key ${notary.key} --key-id ${notary.keyId} --issuer ${notary.issuer} --wait`.nothrow()
+    if (result.exitCode === 0) return
+    lastError = result.stderr.toString().trim() || `exit ${result.exitCode}`
+    console.warn(`notarize attempt ${attempt}/${attempts} failed: ${lastError}`)
+    if (attempt < attempts) await Bun.sleep(30_000 * attempt)
+  }
+  throw new Error(`notarization failed after ${attempts} attempts: ${lastError}`)
 }
 
 async function developerIdIdentity() {
