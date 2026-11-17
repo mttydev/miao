@@ -11,6 +11,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.83] - 2026-11-17
+
+### Fixed
+- **tui**: hold background projections while the reader is in history (#3132) (`07a1b5d240`)
+
 ## [0.3.82] - 2026-11-17
 
 ### Added
