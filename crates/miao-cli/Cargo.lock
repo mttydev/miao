@@ -2461,6 +2461,7 @@ version = "0.0.1"
 dependencies = [
  "miao-engine",
  "miao-tui",
+ "reqwest 0.12.28",
  "rhai",
  "rusqlite",
  "serde_json",
