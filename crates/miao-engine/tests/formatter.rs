@@ -58,6 +58,17 @@ fn config() -> Config {
     }
 }
 
+/// How long a fixture-driven turn may take to finish.
+///
+/// This has to outlast the formatter's own budget rather than race it: a
+/// hosted Windows runner needed 31.4s of the 60s a PowerShell fixture is
+/// allowed, so a flat 30s wait failed the test as "did not settle" while the
+/// formatter it was waiting on was still starting.
+#[cfg(windows)]
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(90);
+#[cfg(unix)]
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
+
 struct Mutation {
     name: String,
     input: Value,
@@ -122,7 +133,7 @@ async fn drive(tools: Tools, name: &str, input: Value) -> Value {
         )
         .await
         .unwrap();
-    let settled = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let settled = tokio::time::timeout(SETTLE, async {
         loop {
             if store
                 .events("s", 0, 200)
