@@ -326,7 +326,10 @@ impl Shell {
                         .join("\n\n");
                     (!text.trim().is_empty()).then_some(text)
                 }
-                Entry::User { .. } | Entry::Error { .. } | Entry::Context { .. } => None,
+                Entry::User { .. }
+                | Entry::Error { .. }
+                | Entry::Context { .. }
+                | Entry::Compacted { .. } => None,
             })?;
         Some(reply)
     }
@@ -2122,6 +2125,23 @@ fn transcript_lines(
                         Style::new().fg(palette.text_muted),
                     ))));
                 }
+            }
+            Entry::Compacted { summary_chars } => {
+                // The turns above are still the conversation the operator read;
+                // what changed is which of them the provider now sees. A rule
+                // across the transcript is the only thing that says so at a
+                // glance, and it names the summary that replaced them.
+                inline_run = false;
+                rows.push(Row::plain(Line::default()));
+                rows.push(Row::plain(Line::from(vec![
+                    Span::styled("── ", Style::new().fg(palette.border)),
+                    Span::styled(
+                        format!("conversation compacted · earlier turns summarized ({summary_chars} chars)"),
+                        Style::new().fg(palette.text_muted),
+                    ),
+                    Span::styled(" ──", Style::new().fg(palette.border)),
+                ])));
+                rows.push(Row::plain(Line::default()));
             }
             Entry::Assistant {
                 agent,

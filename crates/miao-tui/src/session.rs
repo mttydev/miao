@@ -641,6 +641,14 @@ pub enum Entry {
         source: String,
         text: String,
     },
+    /// A summarizing compaction replaced the turns above with a summary. The
+    /// old turns stay on screen (they are what the operator read), and this
+    /// marks where the provider prefix now starts, so a shrunken context reads
+    /// as a fact rather than as a conversation that lost its history.
+    Compacted {
+        /// Characters of summary the model now works from.
+        summary_chars: usize,
+    },
     /// A drain that ended in failure. A failed turn commits no assistant
     /// message, so the snapshot cannot project this: it comes from the
     /// `stop_failure` event and is carried across refreshes like `displays`.
@@ -737,9 +745,30 @@ impl Transcript {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         transcript.tail_seq = cut;
+        // A summarizing compaction keeps every turn on screen, so the transcript
+        // has to say where the provider prefix now starts: without the marker a
+        // compacted Session simply looked as though it had lost its history.
+        let summarized = snapshot
+            .get("selection")
+            .filter(|selection| {
+                selection
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .is_some_and(|summary| !summary.is_empty())
+            })
+            .and_then(|selection| {
+                let through = selection.get("through_seq").and_then(Value::as_u64)?;
+                let chars = selection
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .map(|summary| summary.chars().count())
+                    .unwrap_or(0);
+                Some((through, chars))
+            });
         let Some(messages) = snapshot.get("messages").and_then(Value::as_array) else {
             return transcript;
         };
+        let mut marked = summarized.is_none();
         for message in messages {
             // Only a message that carries a sequence can be on the cleared side
             // of the cut; a projection without one is never dropped.
@@ -750,7 +779,25 @@ impl Transcript {
             {
                 continue;
             }
+            if !marked
+                && summarized.is_some_and(|(through, _)| {
+                    message
+                        .get("seq")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|seq| seq > through)
+                })
+            {
+                transcript.entries.push(Entry::Compacted {
+                    summary_chars: summarized.map(|(_, chars)| chars).unwrap_or(0),
+                });
+                marked = true;
+            }
             transcript.push_message(message);
+        }
+        if !marked {
+            transcript.entries.push(Entry::Compacted {
+                summary_chars: summarized.map(|(_, chars)| chars).unwrap_or(0),
+            });
         }
         transcript
     }
@@ -1430,6 +1477,75 @@ mod tests {
     }
 
     #[test]
+    fn a_summarizing_compaction_marks_where_the_provider_prefix_starts() {
+        let transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "selection": { "through_seq": 2, "summary": "words" },
+            "messages": [
+                { "seq": 1, "role": "user", "content": "first" },
+                { "seq": 2, "role": "assistant", "content": [{ "type": "text", "text": "answer" }] },
+                { "seq": 3, "role": "user", "content": "third" }
+            ]
+        }));
+        assert_eq!(
+            transcript.entries,
+            vec![
+                Entry::User {
+                    text: "first".into(),
+                    seq: 1
+                },
+                Entry::Assistant {
+                    agent: None,
+                    model: None,
+                    parts: vec![Part::Text("answer".into())]
+                },
+                Entry::Compacted { summary_chars: 5 },
+                Entry::User {
+                    text: "third".into(),
+                    seq: 3
+                },
+            ],
+            "the rule sits exactly where the summarized turns end"
+        );
+    }
+
+    #[test]
+    fn a_cleared_history_is_not_marked_as_compacted() {
+        let transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "selection": { "through_seq": 2, "summary": "" },
+            "messages": [
+                { "seq": 1, "role": "user", "content": "gone" },
+                { "seq": 2, "role": "assistant", "content": [{ "type": "text", "text": "gone too" }] },
+                { "seq": 3, "role": "user", "content": "kept" }
+            ]
+        }));
+        assert_eq!(
+            transcript.entries,
+            vec![Entry::User {
+                text: "kept".into(),
+                seq: 3
+            }],
+            "an explicit clear drops the turns and has no summary to mark"
+        );
+    }
+
+    #[test]
+    fn a_session_that_was_never_compacted_has_no_rule() {
+        let transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "messages": [{ "seq": 1, "role": "user", "content": "hello" }]
+        }));
+        assert!(
+            !transcript
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Compacted { .. })),
+            "nothing was summarized, so nothing is marked"
+        );
+    }
+
+    #[test]
     fn a_failed_tool_result_is_marked() {
         let snapshot = json!({
             "session_id": "ses_a",
@@ -1616,7 +1732,15 @@ mod tests {
                 { "seq": 6, "role": "user", "content": "after it" }
             ]
         }));
-        assert_eq!(transcript.entries.len(), 2);
+        // Both turns stay, and the rule says which side of the cut the provider
+        // now starts from — the transcript used to shrink silently instead.
+        assert_eq!(transcript.entries.len(), 3);
+        assert_eq!(
+            transcript.entries[1],
+            Entry::Compacted {
+                summary_chars: "earlier work".chars().count()
+            }
+        );
     }
 
     #[test]
