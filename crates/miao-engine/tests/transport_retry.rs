@@ -511,3 +511,152 @@ async fn a_refused_retry_is_journalled_before_the_turn_fails() {
     );
     runtime.shutdown().await;
 }
+
+/// Refuses the first request and answers the second: a safety classifier that
+/// declines one sample is not a defect in the request, so the replay boundary
+/// is visible. `text_before_refusal` covers the other half — a refusal after
+/// output must not be replayed, or the operator sees the text twice.
+struct RefusingModel {
+    calls: AtomicUsize,
+    text_before_refusal: bool,
+}
+
+#[async_trait]
+impl Provider for RefusingModel {
+    async fn stream(
+        &self,
+        _: ModelRequest,
+        progress: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            if self.text_before_refusal {
+                let _ = progress
+                    .send(json!({"kind":"text_delta","raw":{"choices":[{"index":0,"delta":{"content":"partial"}}]}}))
+                    .await;
+            }
+            return Err(ProviderError::Stream("model refused the request".into()));
+        }
+        Ok(Reply {
+            content: json!([{"type":"text","text":"recovered"}]),
+            usage: json!({}),
+            needs_tools: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_before_any_output_is_replayed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(RefusingModel {
+        calls: AtomicUsize::new(0),
+        text_before_refusal: false,
+    });
+    let runtime = Runtime::new(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "s".into(),
+                input_id: "one".into(),
+                prompt: "go".into(),
+                delivery: Delivery::Steer,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let events = store.events("s", 0, 1000).await.unwrap();
+            if events
+                .iter()
+                .any(|event| event.kind == "stop" || event.kind == "stop_failure")
+            {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the refused turn settled");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "the pre-output refusal spent one replay"
+    );
+    let history = store.history("s").await.unwrap();
+    assert_eq!(history.last().unwrap().content[0]["text"], "recovered");
+    assert!(!events.iter().any(|event| event.kind == "provider.failed"));
+    let replay = events
+        .iter()
+        .find(|event| event.kind == "provider.retry")
+        .expect("the refusal replay was not journalled");
+    assert_eq!(replay.data["cause"], "refusal");
+    assert_eq!(replay.data["scope"], "turn");
+    assert_eq!(replay.data["attempt"], 1);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_refusal_after_output_is_not_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(RefusingModel {
+        calls: AtomicUsize::new(0),
+        text_before_refusal: true,
+    });
+    let runtime = Runtime::new(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "s".into(),
+                input_id: "one".into(),
+                prompt: "go".into(),
+                delivery: Delivery::Steer,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let events = store.events("s", 0, 1000).await.unwrap();
+            if events
+                .iter()
+                .any(|event| event.kind == "stop" || event.kind == "stop_failure")
+            {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the refused turn settled");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "text the operator already saw is not streamed twice"
+    );
+    assert!(events.iter().any(|event| event.kind == "provider.failed"));
+    assert!(!events
+        .iter()
+        .any(|event| event.kind == "provider.retry" && event.data["cause"] == "refusal"));
+    runtime.shutdown().await;
+}

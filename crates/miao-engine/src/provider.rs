@@ -27,6 +27,11 @@ pub(crate) fn transport_for_package(package: &str) -> Option<&'static str> {
     }
 }
 
+/// The sentence a provider's safety classifier produces when it refuses a
+/// request outright. One value so the adapter that raises it and the runner
+/// that replays it cannot drift apart.
+pub(crate) const REFUSAL: &str = "model refused the request";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("interrupted")]
@@ -73,6 +78,15 @@ impl ProviderError {
     pub(crate) fn can_fallback(&self) -> bool {
         matches!(self, Self::Transport(_))
             || matches!(self, Self::Http(status, _) if retryable_status(*status))
+    }
+    /// A safety refusal is not a defect in the request: the classifier that
+    /// declined this sample can accept the same request on a replay.
+    pub(crate) fn refusal(&self) -> bool {
+        match self {
+            Self::Stream(text) => text == REFUSAL,
+            Self::Routed { source, .. } => source.refusal(),
+            _ => false,
+        }
     }
     pub(crate) fn continuation(&self) -> Option<(&Reply, usize)> {
         match self {

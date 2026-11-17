@@ -1,7 +1,9 @@
 use crate::{
     credential::{Credential, Kind, Source},
     protocol::{Message, ModelRequest},
-    provider::{read_stream, request_with_retry, Frame, Parser, Provider, ProviderError, Reply},
+    provider::{
+        read_stream, request_with_retry, Frame, Parser, Provider, ProviderError, Reply, REFUSAL,
+    },
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -534,7 +536,7 @@ impl Parser for ChatState {
         };
         let delta = &choice["delta"];
         if delta.get("refusal").is_some_and(|v| !v.is_null()) {
-            return Err(ProviderError::Stream("model refused the request".into()));
+            return Err(ProviderError::Stream(REFUSAL.into()));
         }
         if delta.get("function_call").is_some()
             || delta.get("audio").is_some()
