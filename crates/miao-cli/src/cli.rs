@@ -7206,6 +7206,7 @@ mod tests {
             "db",
             "doctor",
             "remote",
+            "runtime",
             "upgrade",
             "uninstall",
             "session",
@@ -7222,7 +7223,7 @@ mod tests {
         // The deferrals must stay visible rather than silently absent: the
         // inventory's ts-only and rust-todo rows are the contract for what is
         // NOT here.
-        for deferred in ["config", "mcp", "skill", "runtime"] {
+        for deferred in ["config", "mcp", "skill"] {
             assert!(
                 !usage.iter().any(|line| line.contains(&format!("miao {deferred} "))),
                 "`{deferred}` is deferred in the inventory and must not appear as a Rust command yet"
