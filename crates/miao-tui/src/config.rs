@@ -70,6 +70,11 @@ pub struct Config {
     /// Only the landing prompt is capped; the Session's prompt fills its
     /// column, which is what the TS session route does.
     pub prompt_max_width: PromptWidth,
+    /// `auto_effort`: pick a reasoning-effort variant from the model's own
+    /// variants for each prompt, so a short question does not spend the budget a
+    /// refactor needs. Off by default; a Session the operator pinned a variant
+    /// on keeps that pin, because an explicit choice is never guessed over.
+    pub auto_effort: bool,
 }
 
 /// `prompt.max_width` from `tui.json`.
@@ -112,6 +117,7 @@ impl Default for Config {
             cursor: None,
             keybinds: BTreeMap::new(),
             prompt_max_width: PromptWidth::default(),
+            auto_effort: false,
         }
     }
 }
@@ -330,6 +336,15 @@ fn merge(text: &str, path: &Path, config: &mut Config, warnings: &mut Vec<String
             )),
         }
     }
+    if let Some(auto) = field("auto_effort") {
+        match auto.as_bool() {
+            Some(auto) => config.auto_effort = auto,
+            None => warnings.push(format!(
+                "tui config {}: auto_effort must be a boolean, ignoring",
+                path.display()
+            )),
+        }
+    }
     if let Some(keybinds) = field("keybinds") {
         merge_keybinds(keybinds, path, config, warnings);
     }
@@ -406,6 +421,7 @@ pub(crate) const KNOWN_FIELDS: &[&str] = &[
     "mouse",
     "animations",
     "focus_reporting",
+    "auto_effort",
 ];
 
 /// Names every top-level field neither loader reads, pointing at the known
