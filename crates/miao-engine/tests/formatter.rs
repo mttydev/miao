@@ -37,17 +37,24 @@ fn config() -> Config {
         // in the command text; single quotes keep backslashes literal. The
         // extra argument form (`$args[0]`) does not work here because
         // `-Command <string>` appends trailing arguments to the last command
-        // instead of binding them.
+        // instead of binding them. A `cmd /c echo …>` fixture was tried too: the
+        // sandbox's command-line quoting turns the redirect into an argument, so
+        // cmd exits non-zero and the file is never written.
         "Set-Content -LiteralPath '$FILE' -Value formatted".into(),
     ];
+    #[cfg(windows)]
+    let timeout_ms = 60_000;
+    #[cfg(unix)]
+    let timeout_ms = 20_000;
     Config {
         name: "fixture".into(),
         argv,
         extensions: vec![".txt".into()],
         env: BTreeMap::new(),
-        // PowerShell startup on a cold runner is seconds, so the fixture budget
-        // has to cover the spawn rather than only the write.
-        timeout_ms: 20_000,
+        // The budget covers the spawn, not the write: a loaded runner is slow to
+        // start any process at all, and failing here would say "timeout" about a
+        // fixture that never ran.
+        timeout_ms,
     }
 }
 
