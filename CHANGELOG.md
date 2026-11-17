@@ -11,6 +11,28 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.82] - 2026-11-17
+
+### Added
+- **remote-control**: host Remote Control from a TUI window (#3126) (`17546202e3`)
+- **remote-control**: expose a private administration surface (#3123) (`0ec6c1869f`)
+- **remote-control**: register a host with its Hub account (#3122) (`f496364e25`)
+- **cli**: serve Remote Control from a resident engine (#3120) (`34613d2c95`)
+- **tui**: check for releases at startup and while running (#3116) (`8f4d1ca211`)
+- **remote-control**: serve published sessions from a live host runner (#3115) (`3062d9384f`)
+- **remote-control**: adapt engine commands to host methods (#3114) (`a597fdcfa0`)
+- **remote-control**: translate committed engine events (#3113) (`fe8f744bd3`)
+- **remote-control**: project engine history into the remote timeline (#3112) (`84aa406572`)
+- **remote-control**: a host contract for capabilities and attachments (#3111) (`e31fa5ad99`)
+
+### Fixed
+- **ios**: make voice input start and explain failures (#3127) (`7df7fadb3f`)
+- **tui**: align the workspace usage table and drop the sidebar title (#3125) (`9ec946779f`)
+- **tui**: give the composer's facts their own row (#3124) (`6298de3295`)
+- **engine**: attribute self-admitted continuations to the engine (#3118) (`46dcc91be4`)
+- **tui**: keep the composer title readable once a run settles (#3117) (`8ffaa8cae2`)
+- **engine**: do not migrate storage under a live older process (#3110) (`0e7595a305`)
+
 ## [0.3.81] - 2026-11-16
 
 ### Added
