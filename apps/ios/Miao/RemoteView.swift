@@ -1079,7 +1079,12 @@ private struct SessionView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
-            if let error = speech.error { Text(error).font(.caption).foregroundStyle(.red) }
+            if speech.active {
+                VoiceInputPanel(speech: speech, tint: .accentColor,
+                                onCancel: cancelDictation, onFinish: finishDictation)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            VoiceInputNotice(speech: speech)
             if let notice {
                 Text(notice).font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1114,56 +1119,26 @@ private struct SessionView: View {
                 TextField("给 miao 的消息", text: Binding(get: { session.draft }, set: { session.edit($0) }), axis: .vertical)
                     .focused($composing)
                     .lineLimit(2...8).padding(10).background(.background, in: RoundedRectangle(cornerRadius: 12))
-                    .disabled(speech.recording).accessibilityIdentifier("messageDraft")
+                    .disabled(speech.active).accessibilityIdentifier("messageDraft")
                 HStack {
-                    if speech.recording {
-                        Button("停止", systemImage: "stop.circle.fill") {
-                            speech.stop()
-                            UIAccessibility.post(notification: .announcement, argument: "听写已停止，文字保留在输入框")
-                        }
-                        .accessibilityLabel("停止听写")
-                        Button("取消", role: .cancel) {
-                            speech.cancel { session.edit($0) }
-                            UIAccessibility.post(notification: .announcement, argument: "已取消听写，恢复原草稿")
-                        }
-                        Text(speech.durationText)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.red)
-                            .accessibilityLabel("已录音 \(speech.durationText)")
-                    } else {
-                        Button("语音输入", systemImage: "mic") {
-                            UIAccessibility.post(notification: .announcement, argument: "开始听写")
-                            Task { await speech.start(text: session.draft, locale: speech.localeIdentifier) { expected, value in
-                                guard session.draft == expected else { return false }
-                                session.edit(value); return true
-                            } }
-                        }
-                        .disabled(speech.requesting)
-                        .accessibilityLabel("语音输入")
+                    if !speech.active {
+                        SpeechMicButton(speech: speech, identifier: "remoteDictate", action: startDictation)
+                        SpeechLanguageMenu(speech: speech)
                     }
-                    Menu {
-                        Button("跟随系统（\(speech.systemLocaleIdentifier)）") { speech.localeIdentifier = "" }
-                        Button("普通话") { speech.localeIdentifier = "zh-CN" }
-                        Button("English") { speech.localeIdentifier = "en-US" }
-                    } label: {
-                        Image(systemName: "globe")
-                    }
-                    .accessibilityLabel("语音识别语言")
-                    .disabled(speech.recording || speech.requesting)
                     if client.record.grant.permissions.contains(.sessionSelection) {
                         Button { selectionPresented = true } label: {
                             Image(systemName: "cpu")
                         }
                         .accessibilityLabel("切换 Agent 或模型")
                     }
-                    if client.capabilities.supportsAttachments, !speech.recording {
+                    if client.capabilities.supportsAttachments, !speech.active {
                         PhotosPicker(selection: $pickedPhotos, maxSelectionCount: 4, matching: .images) {
                             Image(systemName: "photo.on.rectangle")
                         }
                         .accessibilityLabel("添加图片")
                         .accessibilityIdentifier("attachImage")
                     }
-                    if !client.capabilities.commands.isEmpty, !speech.recording {
+                    if !client.capabilities.commands.isEmpty, !speech.active {
                         Menu {
                             ForEach(client.capabilities.commands) { command in
                                 Button {
@@ -1210,10 +1185,32 @@ private struct SessionView: View {
                 }
             } else { Text("此设备拥有只读会话权限").font(.footnote).foregroundStyle(.secondary) }
         }.padding().background(.bar)
+            .animation(.snappy(duration: 0.22), value: speech.active)
             .onChange(of: pickedPhotos) { _, items in
                 guard !items.isEmpty else { return }
                 Task { await loadPhotos(items) }
             }
+    }
+
+    private func startDictation() {
+        composing = false
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        Task { await speech.start(text: session.draft, locale: speech.localeIdentifier) { expected, value in
+            guard session.draft == expected else { return false }
+            session.edit(value)
+            return true
+        } }
+    }
+
+    private func finishDictation() {
+        speech.stop()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        UIAccessibility.post(notification: .announcement, argument: "听写已结束，文字保留在输入框")
+    }
+
+    private func cancelDictation() {
+        speech.cancel { session.edit($0) }
+        UIAccessibility.post(notification: .announcement, argument: "已取消听写，恢复原草稿")
     }
 
     private func loadPhotos(_ items: [PhotosPickerItem]) async {
