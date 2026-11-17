@@ -3227,6 +3227,51 @@ impl Store {
             .await
     }
 
+    /// Whether a call already has a settled result. A turn that stops between
+    /// committing its assistant message and dispatching every call asks this
+    /// before synthesising the missing answer.
+    pub async fn tool_result_exists(&self, session: &str, call_id: &str) -> Result<bool, Error> {
+        let (session, call_id) = (session.to_owned(), call_id.to_owned());
+        self.call(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_message m, json_each(m.content) p \
+                 WHERE m.session_id=?1 AND json_extract(p.value,'$.type')='tool_result' \
+                   AND json_extract(p.value,'$.tool_use_id')=?2)",
+                params![session, call_id],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await
+    }
+
+    /// Record a result for a call the turn never dispatched. Unlike
+    /// `tool_result_fenced`, there is no `engine_tool` row to complete: the
+    /// call stopped before it was planned. The message is still written under
+    /// the claim so history pairs every `tool_use`.
+    pub async fn tool_result_unexecuted_fenced(
+        &self,
+        session: &str,
+        call_id: &str,
+        result: Value,
+        lease: &SessionLease,
+    ) -> Result<Event, Error> {
+        let (session, id, lease) = (session.to_owned(), call_id.to_owned(), lease.clone());
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            require_lease(&tx, &session, &lease)?;
+            let content = vec![json!({
+                "type":"tool_result",
+                "tool_use_id":id,
+                "content":serde_json::to_string(&result)?,
+                "is_error":true
+            })];
+            let event = project_message(&tx, &session, "user", json!(content), None, None)?;
+            tx.commit()?;
+            Ok(event)
+        })
+        .await
+    }
+
     /// `tool_result` under a Session claim.
     pub async fn tool_result_fenced(
         &self,
