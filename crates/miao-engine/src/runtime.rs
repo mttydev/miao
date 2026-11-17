@@ -4391,6 +4391,7 @@ async fn execute(
         let mut produced = false;
         let mut ttft_ms: Option<u64> = None;
         let mut attempts = 0;
+        let mut refusal_replays = 0;
         let transport_budget = crate::provider::Budget::new();
         let reply = loop {
             let (send, mut receive) = mpsc::channel(64);
@@ -4527,6 +4528,23 @@ async fn execute(
                         "run_id":run,"step":step,"scope":"turn","attempt":attempts,
                         "reason":error.to_string(),"status":null,
                         "cause":"transport","source":"immediate","delay_ms":0,
+                    });
+                    inner
+                        .store
+                        .record(session, "provider.retry", replay)
+                        .await?;
+                    continue;
+                }
+                // A safety classifier that declines one sample is not a defect
+                // in the request: the same request can pass on a replay. One
+                // replay per turn, and only before any output, so nothing the
+                // operator already saw is streamed twice.
+                Err(error) if error.refusal() && !produced && refusal_replays < 1 => {
+                    refusal_replays += 1;
+                    let replay = json!({
+                        "run_id":run,"step":step,"scope":"turn","attempt":attempts + refusal_replays,
+                        "reason":error.to_string(),"status":null,
+                        "cause":"refusal","source":"immediate","delay_ms":0,
                     });
                     inner
                         .store
