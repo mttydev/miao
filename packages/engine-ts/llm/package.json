@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "0.3.83",
+  "version": "0.3.84",
   "name": "@miao/llm",
   "type": "module",
   "license": "MIT",
