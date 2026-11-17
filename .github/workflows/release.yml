@@ -240,16 +240,17 @@ jobs:
       - name: Test
         # SQLite-backed event waits compete for disk on hosted Windows runners.
         # Serialize these tests rather than relax their event deadlines.
-        # The lib suite runs single-threaded (SQLite-backed event waits
-        # compete for disk on hosted Windows runners) minus the cancel-authority
-        # harness, whose host pipe-capacity deadlines hosted runners cannot meet.
+        # Nothing is skipped any more. `cancel_authority` passed on a hosted
+        # Windows runner in the 2026-11-16 nightly (cargo test --lib: 551
+        # passed / 0 failed, all eight cancel-authority cases named in the log),
+        # so its pipe-capacity skip was history rather than a limit.
         # `permission_source` is no longer skipped: its failure was a workspace
         # spelled with the Windows `\\?\` prefix while the Location used the
         # plain form, so the freeze never matched (#2903, fixed in #2915 and
         # verified 90 passed / 0 failed on a Windows host). The integration
         # tests stay off Windows entirely until the suite is fixed, and the TS
         # unit suite is non-blocking — both are tracked in specs/ci-windows.md.
-        run: cargo test --lib -- --test-threads=1 --skip cancel_authority_tests
+        run: cargo test --lib -- --test-threads=1
 
   publish:
     needs:
