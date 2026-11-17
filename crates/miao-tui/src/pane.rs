@@ -554,26 +554,22 @@ impl Shell {
     pub fn render(&mut self, frame: &mut Frame) {
         let panel_height = self.panel.as_ref().map_or(0, Panel::height);
         // No air bands around the composer. The box draws its own rules above
-        // and below, so a spare row on either side was a second gap for a
-        // boundary the border already marks — three rows of dead space between
-        // the transcript, the input, and the status strip on a short window.
+        // and below, and the facts row sits directly under it: a spare row on
+        // either side was a second gap for a boundary the border already marks.
         // Prompts the engine still holds un-promoted sit straight above the
         // input: the queue depth in the title says how many, these rows say
         // what they are, where the operator typed them.
         // The sidebar owns the right column for the window's whole height, so its
         // rule runs to the last row. The conversation is the other column, and
-        // the queue and the box are laid out inside it: they used to be laid
-        // out across the window and painted inside the column, which left the
-        // rule stopping where the footer band started. The status strip was
-        // that footer band until the box absorbed it: its model, usage and
-        // hints now ride the box's bottom border, and the conversation keeps
-        // the row the strip used to spend.
+        // the queue and the box are laid out inside it. The state keeps the
+        // box's own title; the facts row below it carries the model, so the
+        // conversation still ends where the sidebar's rule does.
         let (conversation_area, sidebar_area) = match self.sidebar_hidden {
             true => (frame.area(), None),
             false => body_columns(frame.area()),
         };
         let queued_height = queued_rows(&self.transcript.pending_prompts) as u16;
-        let [body_area, panel_area, queued_area, composer_area] = Layout::vertical([
+        let [body_area, panel_area, queued_area, composer_area, status_area] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(panel_height),
             Constraint::Length(queued_height),
@@ -582,6 +578,7 @@ impl Shell {
                 composer_column(conversation_area.width),
                 frame.area().height,
             )),
+            Constraint::Length(1),
         ])
         .areas(conversation_area);
         self.transcript.render(frame, body_area);
@@ -608,17 +605,17 @@ impl Shell {
             self.queued.snapshot(frame, queued_area);
             self.queued.paint(frame);
         }
-        // A leader that is still waiting takes the border row over: the chords
-        // are discoverable exactly where the facts they replace usually sit.
-        self.composer_text = render_composer(
+        self.composer_text =
+            render_composer(frame, composer_area, &self.composer, &self.transcript.theme);
+        // The facts get their own row under the box: the state is the box's
+        // title, while the model and any exception the run raised are read as
+        // one line the border no longer has to carry.
+        render_composer_status(
             frame,
-            composer_area,
-            &self.composer,
+            status_area,
+            &self.status,
+            self.leader_hint.as_deref(),
             &self.transcript.theme,
-            Some(&ComposerFooter {
-                status: &self.status,
-                leader: self.leader_hint.as_deref(),
-            }),
         );
     }
 }
@@ -1758,10 +1755,7 @@ impl Home {
             prompt_area,
             composer,
             &self.theme,
-            Some(&ComposerFooter {
-                status,
-                leader: None,
-            }),
+            Some(&ComposerFooter { status }),
         );
         for (offset, (notice, ink)) in notices.iter().enumerate() {
             frame.render_widget(
@@ -2273,13 +2267,11 @@ pub struct StatusHint {
     pub success: bool,
 }
 
-/// What the Session composer's bottom border carries: the facts the status
-/// strip used to spend the window's last row on — what the run waits on, what
-/// it runs on, what it has cost. A leader that is still waiting takes the row
-/// over with its chord menu, exactly as it took the strip over.
+/// What the landing prompt's bottom rule carries: the facts the status strip
+/// used to spend the window's last row on — what the run waits on, what it
+/// runs on, what it has cost.
 pub struct ComposerFooter<'a> {
     pub status: &'a StatusStrip,
-    pub leader: Option<&'a str>,
 }
 
 /// The run's hints, then the model, then what the session has cost: the order
@@ -2287,24 +2279,7 @@ pub struct ComposerFooter<'a> {
 fn footer_status_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
     let palette = theme.palette;
     let muted = Style::new().fg(palette.text_muted);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for hint in &status.hints {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", muted));
-        }
-        spans.push(Span::styled(
-            match hint.warning {
-                // A warning keeps its glyph, so it still reads on a monochrome
-                // terminal; facts about the run carry the tone alone.
-                true => format!("! {}", hint.text),
-                false => hint.text.clone(),
-            },
-            match hint.warning {
-                true => Style::new().fg(palette.warning),
-                false => muted,
-            },
-        ));
-    }
+    let mut spans = hint_spans(status, theme);
     if let Some(model) = &status.model {
         if !spans.is_empty() {
             spans.push(Span::styled(" · ", muted));
@@ -2327,41 +2302,114 @@ fn footer_status_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>
     spans
 }
 
-/// The border row the box sits on: the status facts at its left, the running
-/// build at its right, so an operator verifying an upgrade still reads the
-/// version without leaving the TUI for `miao --version`.
-fn composer_bottom_titles(
-    footer: &ComposerFooter,
+/// The exceptions a status line names, in the order the operator scans them.
+fn hint_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
+    let palette = theme.palette;
+    let muted = Style::new().fg(palette.text_muted);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for hint in &status.hints {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", muted));
+        }
+        spans.push(Span::styled(
+            match hint.warning {
+                // A warning keeps its glyph, so it still reads on a monochrome
+                // terminal; facts about the run carry the tone alone.
+                true => format!("! {}", hint.text),
+                false => hint.text.clone(),
+            },
+            match hint.warning {
+                true => Style::new().fg(palette.warning),
+                false => muted,
+            },
+        ));
+    }
+    spans
+}
+
+/// What the composer's own facts row carries: the exceptions the title cannot
+/// — an update waiting, a transcript scrolled away, a policy in effect — then
+/// the model answering. The state is the box title and the usage already rides
+/// the sidebar, so neither is repeated on this line.
+fn composer_status_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = hint_spans(status, theme);
+    if let Some(model) = &status.model {
+        if !spans.is_empty() {
+            spans.push(Span::styled(
+                " · ",
+                Style::new().fg(theme.palette.text_muted),
+            ));
+        }
+        spans.push(Span::styled(
+            model.clone(),
+            Style::new()
+                .fg(theme.palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
+}
+
+/// The facts row under the composer box: the model and any exception the run
+/// raised at its left, the running build at its right, so an operator verifying
+/// an upgrade still reads the version without leaving the TUI for
+/// `miao --version`. The row is its own line: painted on the border it crowded
+/// the state and the model into the box's frame.
+fn render_composer_status(
+    frame: &mut Frame,
+    area: Rect,
+    status: &StatusStrip,
+    leader: Option<&str>,
     theme: &Theme,
-    width: u16,
-) -> Vec<Line<'static>> {
+) {
     let palette = theme.palette;
     let muted = Style::new().fg(palette.text_muted);
     let version = format!(" miao {} ", crate::VERSION);
-    let inner = width.saturating_sub(2) as usize;
-    let left = match footer.leader {
+    let version_width = UnicodeWidthStr::width(version.as_str()) as u16;
+    let facts_width = area.width.saturating_sub(version_width + 1);
+    // The row sits on the page, not on the box's border: paint its whole
+    // width, or a cell the text does not reach falls back to the terminal's
+    // own background and reads as a hole in the layout.
+    frame.render_widget(
+        Block::new().style(Style::new().bg(palette.background)),
+        area,
+    );
+    // A leader that is still waiting takes the row over with its chords, the
+    // way it took the strip over: discoverable exactly where the facts it
+    // replaces usually sit.
+    let left = match leader {
         Some(menu) => Line::from(Span::styled(
             format!(
-                " {} ",
-                fit_chords(menu, inner.saturating_sub(version.width()))
+                "  {} ",
+                fit_chords(menu, facts_width.saturating_sub(3) as usize)
             ),
             Style::new().fg(palette.primary),
         )),
         None => {
-            let mut spans = footer_status_spans(footer.status, theme);
+            let mut spans = composer_status_spans(status, theme);
             match spans.is_empty() {
                 true => Line::from(String::new()),
                 false => {
-                    spans.insert(0, Span::raw(" "));
+                    // The TS status line starts two cells in from the edge; the
+                    // row keeps that offset now that it is a line of its own.
+                    spans.insert(0, Span::raw("  "));
                     Line::from(spans)
                 }
             }
         }
     };
-    vec![
-        left,
-        Line::from(Span::styled(version, muted)).alignment(Alignment::Right),
-    ]
+    frame.render_widget(
+        Paragraph::new(left),
+        Rect {
+            width: facts_width,
+            height: 1,
+            ..area
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(version, muted))).alignment(Alignment::Right),
+        area,
+    );
 }
 
 const COMPOSER_COMPLETION_ROWS: usize = 6;
@@ -2678,16 +2726,8 @@ fn render_composer(
     area: Rect,
     composer: &Composer,
     theme: &Theme,
-    footer: Option<&ComposerFooter>,
 ) -> Option<ComposerText> {
-    render_composer_in(
-        frame,
-        area,
-        composer,
-        theme,
-        composer_column(area.width),
-        footer,
-    )
+    render_composer_in(frame, area, composer, theme, composer_column(area.width))
 }
 
 fn render_composer_in(
@@ -2696,7 +2736,6 @@ fn render_composer_in(
     composer: &Composer,
     theme: &Theme,
     column: u16,
-    footer: Option<&ComposerFooter>,
 ) -> Option<ComposerText> {
     let palette = theme.palette;
     let column = column.min(area.width);
@@ -2734,6 +2773,10 @@ fn render_composer_in(
     // state instead of a band above the box.
     if composer.phase.is_some() {
         parts.extend(composer.phase_elapsed.iter().cloned());
+        // The chord travels with the state it acts on, so the box's top-left
+        // reads "Working · 2.1m · Esc interrupt" instead of leaving the way out
+        // in a crowded row under the box.
+        parts.extend(composer.phase_action.iter().cloned());
     } else if let Some(idle) = &composer.idle {
         parts.push(idle.clone());
     }
@@ -2786,16 +2829,6 @@ fn render_composer_in(
         .title(Line::from(title))
         .border_style(Style::new().fg(border))
         .style(Style::new().bg(palette.background));
-    // The bottom border carries what the status strip used to spend the
-    // window's last row on: the run's facts at the left, the running build at
-    // the right. An absent footer keeps the row bare, the way the landing
-    // prompt drew plain rules.
-    let block = match footer {
-        Some(footer) => composer_bottom_titles(footer, theme, area.width)
-            .into_iter()
-            .fold(block, Block::title_bottom),
-        None => block,
-    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -5466,7 +5499,7 @@ mod tests {
                 .expect("terminal");
             terminal
                 .draw(|frame| {
-                    let _ = render_composer(frame, frame.area(), &composer, &theme, None);
+                    let _ = render_composer(frame, frame.area(), &composer, &theme);
                 })
                 .expect("draw");
             let text = terminal
@@ -5745,16 +5778,11 @@ mod tests {
             model: Some("glm-5.3-flash".into()),
             ..Default::default()
         };
-        let composer = crate::editor::Composer::new(Path::new("."));
-        let footer = ComposerFooter {
-            status: &status,
-            leader: None,
-        };
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 5)).expect("terminal");
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 1)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme, Some(&footer));
+                super::render_composer_status(frame, frame.area(), &status, None, &theme);
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
@@ -5809,7 +5837,6 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
-                    None,
                 );
             })
             .expect("draw");
@@ -5827,7 +5854,6 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
-                    None,
                 );
             })
             .expect("draw");
@@ -5851,7 +5877,6 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
-                    None,
                 );
             })
             .expect("draw");
@@ -5873,7 +5898,6 @@ mod tests {
                     ratatui::layout::Rect::new(0, 0, 80, 6),
                     &composer,
                     &theme,
-                    None,
                 );
             })
             .expect("draw");
@@ -6578,7 +6602,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 3)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme, None);
+                let _ = render_composer(frame, frame.area(), &composer, &theme);
             })
             .expect("draw");
         let warning = theme.palette.warning;
@@ -6600,7 +6624,7 @@ mod tests {
         };
         let mut composer = crate::editor::Composer::new(Path::new("."));
         composer.editor.set_text(&"abcdefghij".repeat(8));
-        let rows = paint_composer(&composer, &theme, 40, 8, None);
+        let rows = paint_composer(&composer, &theme, 40, 8);
         assert!(rows[2].contains("abcdefghij"), "the head stays visible");
         assert!(
             rows[3].trim_end().chars().count() > 2,
@@ -6819,14 +6843,13 @@ mod tests {
         theme: &Theme,
         width: u16,
         height: u16,
-        footer: Option<&ComposerFooter>,
     ) -> Vec<String> {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
                 .expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), composer, theme, footer);
+                let _ = render_composer(frame, frame.area(), composer, theme);
             })
             .expect("draw");
         terminal
@@ -6838,19 +6861,30 @@ mod tests {
             .collect()
     }
 
-    /// Paint the Session composer with a footer and return its bottom border
-    /// row: the row the status strip used to spend.
+    /// Paint the Session composer with its facts row and return that row: the
+    /// line under the box, where the model and exceptions live.
     fn paint_composer_footer(status: &StatusStrip, leader: Option<&str>, width: u16) -> String {
         let theme = home_theme();
         let composer = crate::editor::Composer::new(Path::new("."));
-        let footer = ComposerFooter { status, leader };
-        let height = 5u16;
+        let height = 6u16;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
                 .expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme, Some(&footer));
+                let _ = render_composer(
+                    frame,
+                    ratatui::layout::Rect::new(0, 0, width, height - 1),
+                    &composer,
+                    &theme,
+                );
+                render_composer_status(
+                    frame,
+                    ratatui::layout::Rect::new(0, height - 1, width, 1),
+                    status,
+                    leader,
+                    &theme,
+                );
             })
             .expect("draw");
         let last = height - 1;
@@ -6871,7 +6905,7 @@ mod tests {
                 .expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), composer, theme, None);
+                let _ = render_composer(frame, frame.area(), composer, theme);
             })
             .expect("draw");
         (0..width)
@@ -6907,23 +6941,18 @@ mod tests {
         let version = format!("miao {}", crate::VERSION);
         assert!(
             painted.contains(&version),
-            "the border names the build: {painted}"
+            "the facts row names the build: {painted}"
         );
-        // The border's corner closes the row after the build's own cell.
         assert!(
-            painted
-                .trim_end()
-                .trim_end_matches('┘')
-                .trim_end()
-                .ends_with(version.trim()),
+            painted.trim_end().ends_with(version.trim()),
             "the build sits at the right edge: {painted}"
         );
     }
 
-    /// A leader that is still waiting takes the border row over with its
+    /// A leader that is still waiting takes the facts row over with its
     /// chords, the way it took the strip over.
     #[test]
-    fn an_armed_leader_takes_the_border_row_over() {
+    fn an_armed_leader_takes_the_facts_row_over() {
         let status = StatusStrip {
             model: Some("glm-5".into()),
             ..StatusStrip::default()
@@ -6939,10 +6968,11 @@ mod tests {
         );
     }
 
-    /// The fold itself: the box's bottom border is the window's last row, so
-    /// the strip no longer holds a row of its own above the box.
+    /// The state sits on the box's own title while the facts take the line
+    /// under it: the border keeps no model, and the model no longer shares the
+    /// row with the state and the interrupt chord.
     #[test]
-    fn the_session_screen_spends_no_row_on_the_strip() {
+    fn the_facts_row_sits_below_the_composer_frame() {
         let palette =
             crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
                 .expect("theme");
@@ -6961,6 +6991,9 @@ mod tests {
             ..Transcript::default()
         };
         shell.set_transcript(&transcript);
+        shell.composer.phase = Some("Working".into());
+        shell.composer.phase_elapsed = Some("2.1m".into());
+        shell.composer.phase_action = Some("Esc interrupt".into());
         shell.status.model = Some("glm-5".into());
         let height = 12u16;
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
@@ -6971,14 +7004,28 @@ mod tests {
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>()
         };
-        let last = row(height - 1);
+        let title = row(height - 4);
         assert!(
-            last.contains("glm-5"),
-            "the box's border carries the model on the last row: {last:?}"
+            title.contains("Working") && title.contains("Esc interrupt"),
+            "the box's top-left names the state and its chord: {title:?}"
+        );
+        let border = row(height - 2);
+        assert!(
+            border.contains('└'),
+            "the box's bottom border is the row above the facts: {border:?}"
         );
         assert!(
-            !last.contains('│'),
-            "the last row is the box's bottom border, not a strip band: {last:?}"
+            !border.contains("glm-5"),
+            "the border carries no facts: {border:?}"
+        );
+        let facts = row(height - 1);
+        assert!(
+            facts.contains("glm-5"),
+            "the facts row under the box names the model: {facts:?}"
+        );
+        assert!(
+            !facts.contains('│'),
+            "the facts row is a plain line, not the box: {facts:?}"
         );
     }
 
@@ -7330,21 +7377,14 @@ mod tests {
             .content
             .chunks(area.width as usize)
             .last()
-            .expect("the status row");
-        let border = status
-            .iter()
-            .position(|cell| cell.symbol() == "└")
-            .expect("the composer's bottom border closes the row");
-        let first = status[border + 1..]
+            .expect("the facts row under the box");
+        let first = status
             .iter()
             .position(|cell| !cell.symbol().trim().is_empty())
-            .expect("the model is painted")
-            + border
-            + 1;
+            .expect("the model is painted");
         assert_eq!(
-            first,
-            border + 2,
-            "the row starts two cells in from the box, as the TS one does"
+            first, 2,
+            "the facts row starts two cells in from the edge, as the TS one does"
         );
         assert!(
             status
@@ -7853,7 +7893,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 8)).expect("terminal");
         terminal
             .draw(|frame| {
-                let _ = render_composer(frame, frame.area(), &composer, &theme, None);
+                let _ = render_composer(frame, frame.area(), &composer, &theme);
             })
             .expect("draw");
         let visible = terminal
