@@ -28,6 +28,35 @@ final class SpeechInput {
         String(format: "%d:%02d", Int(duration) / 60, Int(duration) % 60)
     }
 
+    /// The language system dictation would use. `Locale.autoupdatingCurrent`
+    /// can follow the app's own (unlocalized) language, which made the
+    /// "automatic" choice recognize English on a Chinese phone. The preferred
+    /// language list is the user's system choice, independent of app resources.
+    static var systemLocale: Locale {
+        Locale(identifier: Locale.preferredLanguages.first ?? "en-US")
+    }
+
+    /// SFSpeechRecognizer names locales in BCP-47 form (`zh-CN`), while
+    /// `Locale` often carries `zh_CN` or a script (`zh-Hans-CN`). Normalize
+    /// before matching its supported list so a Chinese phone cannot silently
+    /// fall back to English.
+    static func normalizedIdentifier(_ locale: Locale) -> String {
+        let language = locale.language.languageCode?.identifier ?? "en"
+        let region = locale.region?.identifier
+        if language == "zh" {
+            let traditional = locale.language.script?.identifier == "Hant"
+                || region == "TW"
+                || region == "HK"
+                || region == "MO"
+            return traditional ? "zh-TW" : "zh-CN"
+        }
+        return region.map { "\(language)-\($0)" } ?? language
+    }
+
+    var systemLocaleIdentifier: String {
+        Self.normalizedIdentifier(Self.systemLocale)
+    }
+
     /// Recognition only edits the draft. It never submits a prompt or approval.
     func start(text: String, locale: String? = nil,
                accept: @escaping @MainActor (String, String) -> Bool) async {
@@ -44,10 +73,22 @@ final class SpeechInput {
         requesting = false
         guard speech == .authorized, microphone else { error = "请在系统设置中允许麦克风和语音识别"; return }
         let selected = locale ?? localeIdentifier
-        let recognizerLocale = selected.isEmpty ? Locale.autoupdatingCurrent : Locale(identifier: selected)
+        let requested = selected.isEmpty ? Self.systemLocale : Locale(identifier: selected)
+        let identifier = Self.normalizedIdentifier(requested)
+        let language = requested.language.languageCode?.identifier
+        let supported = SFSpeechRecognizer.supportedLocales()
+        let recognizerLocale = supported.first {
+            $0.language.languageCode?.identifier == language
+                && $0.region?.identifier == requested.region?.identifier
+        } ?? supported.first {
+            $0.language.languageCode?.identifier == language
+        }
+        guard let recognizerLocale else {
+            error = "当前语言（\(identifier)）不支持离线语音识别，也可以使用系统键盘的听写功能"; return
+        }
         guard let recognizer = SFSpeechRecognizer(locale: recognizerLocale), recognizer.isAvailable,
               recognizer.supportsOnDeviceRecognition else {
-            error = "当前语言无法使用离线语音识别，也可以使用系统键盘的听写功能"; return
+            error = "当前语言（\(identifier)）无法使用离线语音识别，也可以使用系统键盘的听写功能"; return
         }
         do {
             let audio = AVAudioSession.sharedInstance()

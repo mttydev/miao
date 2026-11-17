@@ -371,7 +371,7 @@ struct LocalView: View {
                     .disabled(speech.requesting)
                 }
                 Menu {
-                    Button("自动（设备语言）") { speech.localeIdentifier = "" }
+                    Button("跟随系统（\(speech.systemLocaleIdentifier)）") { speech.localeIdentifier = "" }
                     Button("普通话") { speech.localeIdentifier = "zh-CN" }
                     Button("English") { speech.localeIdentifier = "en-US" }
                 } label: {
