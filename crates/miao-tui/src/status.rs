@@ -328,6 +328,9 @@ pub struct TurnTiming {
     pub model: Option<String>,
     pub turn_ms: Option<u64>,
     pub ttft_ms: Option<u64>,
+    /// How much of the step was spent running the tools it dispatched, so a
+    /// slow turn can be attributed to the model or to a tool.
+    pub tool_ms: Option<u64>,
 }
 
 /// How full the live context is, as one number for every surface that paints it.
@@ -382,6 +385,7 @@ impl UsageSummary {
                         .filter_map(|row| {
                             let turn_ms = row.get("turnMs").and_then(Value::as_u64);
                             let ttft_ms = row.get("ttftMs").and_then(Value::as_u64);
+                            let tool_ms = row.get("toolMs").and_then(Value::as_u64);
                             // A turn the engine never timed teaches nothing.
                             if turn_ms.is_none() && ttft_ms.is_none() {
                                 return None;
@@ -391,6 +395,7 @@ impl UsageSummary {
                                 model: row.get("model").and_then(Value::as_str).map(str::to_string),
                                 turn_ms,
                                 ttft_ms,
+                                tool_ms,
                             })
                         })
                         // The report lists oldest first; the view wants the most

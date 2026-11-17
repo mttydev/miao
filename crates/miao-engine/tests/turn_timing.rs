@@ -88,3 +88,92 @@ async fn a_settled_step_reports_a_duration_not_an_epoch_stamp() {
     );
     runtime.shutdown().await;
 }
+
+/// Answers the first request with a tool call and the second with text, so the
+/// step that dispatched tools has a tool time to report.
+struct OneTool;
+
+#[async_trait]
+impl Provider for OneTool {
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _: mpsc::Sender<Value>,
+        _: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        let has_result = request.messages.iter().any(|message| {
+            message
+                .content
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part["type"] == "tool_result"))
+        });
+        if has_result {
+            return Ok(Reply {
+                content: json!([{"type":"text","text":"done"}]),
+                usage: json!({}),
+                needs_tools: false,
+            });
+        }
+        Ok(Reply {
+            content: json!([{"type":"tool_use","id":"r1","name":"read_file","input":{"path":"file"}}]),
+            usage: json!({}),
+            needs_tools: true,
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_step_that_dispatched_tools_reports_their_time() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("file"), "contents").unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let runtime = Runtime::new(
+        store.clone(),
+        Arc::new(OneTool),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "s".into(),
+                input_id: "one".into(),
+                prompt: "go".into(),
+                delivery: Delivery::Steer,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if store
+                .events("s", 0, 500)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "run.finished")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the turn settled");
+    let report = store.usage_report("s").await.unwrap();
+    let row = report["providerDetail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["step"] == json!(0))
+        .expect("the tool-calling step");
+    let tool_ms = row["toolMs"]
+        .as_u64()
+        .expect("a step that dispatched tools reports their time");
+    assert!(tool_ms < 60_000, "a duration: {tool_ms}");
+    runtime.shutdown().await;
+}

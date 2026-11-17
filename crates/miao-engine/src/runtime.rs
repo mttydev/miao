@@ -5010,7 +5010,9 @@ command: None,
         if invalid_input {
             input_corrections += 1;
         }
+        let mut tools_started: Option<std::time::Instant> = None;
         if reply.needs_tools && !text_only {
+            tools_started = Some(std::time::Instant::now());
             let mut reads = execute_read_batch(
                 inner,
                 session,
@@ -5638,6 +5640,17 @@ command: None,
                     }
                 }
             }
+        }
+        if let Some(started) = tools_started {
+            let _ = inner
+                .store
+                .record_tool_time(
+                    session,
+                    run,
+                    step as u64,
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
         }
         // A moved product-tool reply (the worktree bridge) means the Session's
         // identity now belongs to another owner process: settle this run
