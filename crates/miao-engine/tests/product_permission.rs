@@ -16,6 +16,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// How long the first product frame may take. A local run answers in
+/// milliseconds; a hosted Windows runner competes for disk with the SQLite
+/// event waits this suite provokes, and five seconds measured too short there.
+fn first_frame_deadline() -> std::time::Duration {
+    #[cfg(windows)]
+    {
+        std::time::Duration::from_secs(60)
+    }
+    #[cfg(not(windows))]
+    {
+        std::time::Duration::from_secs(5)
+    }
+}
+
 struct Caller;
 #[async_trait]
 impl Provider for Caller {
@@ -127,7 +141,7 @@ async fn running_with_mode(
         .await
         .unwrap();
     runtime.resume("s").await.unwrap();
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), receive.recv())
+    let frame = tokio::time::timeout(first_frame_deadline(), receive.recv())
         .await
         .unwrap()
         .unwrap();
@@ -1364,7 +1378,7 @@ async fn always_releases_matching_pending_assertions_across_live_session_sources
         {"action":"read","resource":"blocked","effect":"deny"}
     ]}})).unwrap()).await.unwrap();
     runtime.resume("other-session").await.unwrap();
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), receive.recv())
+    let frame = tokio::time::timeout(first_frame_deadline(), receive.recv())
         .await
         .unwrap()
         .unwrap();

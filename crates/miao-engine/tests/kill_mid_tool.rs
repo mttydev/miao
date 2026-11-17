@@ -122,22 +122,18 @@ async fn wait_events(store: &Store, kind: &str, minimum: usize, seconds: u64) ->
 /// settled, so the dispatched tool row carries no result — the state the
 /// guard consumes on the resumed run's first identical re-issue.
 fn seed_crash_residue(db: &Path, fingerprint: &str) {
-    let sql = format!(
-        "INSERT INTO engine_run(id,session_id,state,lease_epoch,shared_permission)
-           VALUES('crashed-run','s','interrupted',0,0);
-         INSERT INTO engine_tool(id,run_id,name,input,state,fingerprint)
-           VALUES('crashed-run/call','crashed-run','bash','{{}}','unknown','{fingerprint}');"
-    );
-    let output = std::process::Command::new("sqlite3")
-        .arg(db)
-        .arg(&sql)
-        .output()
+    // The rows are written through rusqlite rather than the `sqlite3` CLI: the
+    // hosted Windows runner does not install that tool, and a fixture that
+    // needs it fails with `program not found` instead of exercising the guard.
+    let connection = rusqlite::Connection::open(db).unwrap();
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO engine_run(id,session_id,state,lease_epoch,shared_permission)
+               VALUES('crashed-run','s','interrupted',0,0);
+             INSERT INTO engine_tool(id,run_id,name,input,state,fingerprint)
+               VALUES('crashed-run/call','crashed-run','bash','{{}}','unknown','{fingerprint}');"
+        ))
         .unwrap();
-    assert!(
-        output.status.success(),
-        "seed failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[tokio::test]
