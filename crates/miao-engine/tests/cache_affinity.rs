@@ -298,3 +298,63 @@ async fn fork_lineage_preserves_cache_hints_after_restart_without_joining_unrela
     );
     server.abort();
 }
+
+/// A provider's prompt cache keys on bytes, not on JSON equivalence: the
+/// earlier turn's prefix has to arrive exactly as it did the first time. Two
+/// adjacent requests in one drain (tool call, then the answer after its result)
+/// must therefore share a byte-identical prefix, and the fields above the
+/// message list must be byte-identical too.
+#[tokio::test]
+async fn adjacent_requests_share_a_byte_identical_prefix() {
+    let tool = completed(
+        json!([{"type":"function_call","call_id":"call","name":"read_file","arguments":"{\"path\":\"file\"}"}]),
+    );
+    let (url, mut requests, server) = peer(vec![(200, tool), (200, answer())]).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("file"), "contents").unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider = Arc::new(
+        OpenAIResponses::with_source(
+            url,
+            Source::Static(Credential::token("fixture".into(), None)),
+            "model".into(),
+            Profile::Subscription,
+        )
+        .unwrap(),
+    );
+    let runtime = Runtime::new(
+        store.clone(),
+        provider,
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    admit(&runtime, "session", "first").await;
+    runtime.shutdown().await;
+    let first = requests.recv().await.unwrap().0;
+    let second = requests.recv().await.unwrap().0;
+    let prefix = first["input"].as_array().unwrap().len();
+    let shared = second["input"].as_array().unwrap()[..prefix].to_vec();
+    assert_eq!(
+        serde_json::to_vec(&shared).unwrap(),
+        serde_json::to_vec(first["input"].as_array().unwrap()).unwrap(),
+        "the shared prefix was re-serialized differently"
+    );
+    assert_eq!(
+        serde_json::to_vec(&first["instructions"]).unwrap(),
+        serde_json::to_vec(&second["instructions"]).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&first["tools"]).unwrap(),
+        serde_json::to_vec(&second["tools"]).unwrap()
+    );
+    assert!(
+        second["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call_output"),
+        "the second request continues the history instead of replacing it"
+    );
+    server.abort();
+}
