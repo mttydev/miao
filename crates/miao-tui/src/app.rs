@@ -5892,6 +5892,53 @@ mod tests {
         );
     }
 
+    /// The engine re-projects the newest window only, which is shorter than the
+    /// pages an operator paged in. Applying that projection under a detached
+    /// reader clamped the viewport to the window's end — the newest rows.
+    #[test]
+    fn a_shorter_projection_waits_while_the_reader_is_in_history() {
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_a", 1)),
+            transcript: Box::new(forty_messages()),
+            state: Box::new(SessionState::default()),
+        });
+        draw(&mut app);
+        app.handle(wheel(MouseEventKind::ScrollUp));
+        draw(&mut app);
+        assert!(!app.shell.following(), "the wheel detaches");
+        let detached = app.shell.transcript_scroll();
+
+        let all = forty_messages();
+        let window = Transcript {
+            entries: all.entries[all.entries.len() - 5..].to_vec(),
+            ..Transcript::default()
+        };
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_a", 1)),
+            transcript: Box::new(window),
+            state: Box::new(SessionState::default()),
+        });
+        draw(&mut app);
+        assert!(!app.shell.following());
+        assert_eq!(
+            app.shell.transcript_scroll(),
+            detached,
+            "a shorter window must not clamp the reader to its end"
+        );
+
+        // Returning to the tail applies the held projection.
+        app.handle(key(KeyCode::End, KeyModifiers::NONE));
+        draw(&mut app);
+        assert!(app.shell.following());
+        assert_eq!(
+            app.shell
+                .transcript()
+                .map(|transcript| transcript.entries.len()),
+            Some(5)
+        );
+    }
+
     #[test]
     fn a_page_key_moves_a_viewport_and_home_and_end_name_the_ends() {
         // A fixed five rows is unreadable on a tall window and no page at all
