@@ -3089,6 +3089,13 @@ impl App {
                 .ttft_ms
                 .map(|ms| format!(" · ttft {:.1}s", ms as f64 / 1000.0))
                 .unwrap_or_default();
+            // The step's own tools are part of what the model waited on: a
+            // slow turn that spent most of its time in a tool reads differently
+            // from one the model took long to answer.
+            let tools = timing
+                .tool_ms
+                .map(|ms| format!(" · tools {:.1}s", ms as f64 / 1000.0))
+                .unwrap_or_default();
             let model = timing
                 .model
                 .as_deref()
@@ -3096,7 +3103,7 @@ impl App {
                 .unwrap_or_default();
             rows.push(row(
                 &format!("turn {}", timing.step),
-                &format!("{turn}{ttft}{model}"),
+                &format!("{turn}{ttft}{tools}{model}"),
             ));
         }
         if !usage.lineage.is_empty() {

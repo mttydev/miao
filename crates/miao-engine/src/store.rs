@@ -411,7 +411,7 @@ impl Store {
                     CREATE TABLE IF NOT EXISTS engine_message(session_id TEXT NOT NULL REFERENCES engine_session(id), seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, checkpoint TEXT, kind TEXT, PRIMARY KEY(session_id,seq));
                     CREATE TABLE IF NOT EXISTS engine_run(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES engine_session(id), state TEXT NOT NULL);
                     CREATE UNIQUE INDEX IF NOT EXISTS engine_active_run ON engine_run(session_id) WHERE state='running';
-                    CREATE TABLE IF NOT EXISTS engine_timing(session_id TEXT NOT NULL REFERENCES engine_session(id), run_id TEXT NOT NULL, step INTEGER NOT NULL, ttft_ms INTEGER NOT NULL, PRIMARY KEY(session_id,run_id,step));
+                    CREATE TABLE IF NOT EXISTS engine_timing(session_id TEXT NOT NULL REFERENCES engine_session(id), run_id TEXT NOT NULL, step INTEGER NOT NULL, ttft_ms INTEGER NOT NULL, tool_ms INTEGER, PRIMARY KEY(session_id,run_id,step));
                     CREATE TABLE IF NOT EXISTS engine_cache_prefix(session_id TEXT PRIMARY KEY REFERENCES engine_session(id), affinity_session TEXT NOT NULL, route_hash TEXT NOT NULL, parameters_hash TEXT NOT NULL, history_hash TEXT NOT NULL, message_count INTEGER NOT NULL, session_seq INTEGER NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_tool(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES engine_run(id), name TEXT NOT NULL, input TEXT NOT NULL, state TEXT NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_location(session_id TEXT PRIMARY KEY REFERENCES engine_session(id),root TEXT NOT NULL);
@@ -494,6 +494,12 @@ impl Store {
                     [],|r|r.get(0))?;
                 if !has_turn_ms {
                     conn.execute("ALTER TABLE engine_timing ADD COLUMN turn_ms INTEGER", [])?;
+                }
+                let has_tool_ms:bool=conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_timing') WHERE name='tool_ms')",
+                    [],|r|r.get(0))?;
+                if !has_tool_ms {
+                    conn.execute("ALTER TABLE engine_timing ADD COLUMN tool_ms INTEGER", [])?;
                 }
                 let has_checkpoint:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_message') WHERE name='checkpoint')",[],|r|r.get(0))?;
                 if !has_checkpoint {
@@ -4641,6 +4647,27 @@ impl Store {
         .await
     }
 
+    /// How long the tools this step dispatched took, recorded beside the step's
+    /// own duration so a report can split model time from tool time.
+    pub async fn record_tool_time(
+        &self,
+        session: &str,
+        run: &str,
+        step: u64,
+        tool_ms: u64,
+    ) -> Result<(), Error> {
+        let (session, run) = (session.to_owned(), run.to_owned());
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO engine_timing(session_id,run_id,step,ttft_ms,tool_ms) VALUES(?1,?2,?3,0,?4)
+                 ON CONFLICT(session_id,run_id,step) DO UPDATE SET tool_ms=excluded.tool_ms",
+                params![session, run, step, tool_ms],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Cache lineage and latency evidence for one session: billed token
     /// totals across every recorded turn, time-to-first-token stats, and the
     /// provider/model that served each turn (roadmap A5). Tokens and lineage
@@ -4957,6 +4984,20 @@ impl Store {
                 }
                 values
             };
+            let tool_ms: std::collections::HashMap<(String, String), u64> = {
+                let mut stmt = conn.prepare(
+                    "SELECT run_id,step,tool_ms FROM engine_timing WHERE session_id=?1 AND tool_ms IS NOT NULL",
+                )?;
+                let mut rows = stmt.query(params![session])?;
+                let mut values = std::collections::HashMap::new();
+                while let Some(row) = rows.next()? {
+                    values.insert(
+                        (row.get::<_, String>(0)?, row.get::<_, u64>(1)?.to_string()),
+                        row.get::<_, u64>(2)?,
+                    );
+                }
+                values
+            };
             let ttft: Vec<u64> = {
                 let mut stmt = conn.prepare(
                     "SELECT ttft_ms FROM engine_timing WHERE session_id=?1 ORDER BY run_id,step",
@@ -5230,6 +5271,9 @@ impl Store {
                             }
                             if let Some(value) = turn_ms.get(&key) {
                                 detail["turnMs"] = json!(value);
+                            }
+                            if let Some(value) = tool_ms.get(&key) {
+                                detail["toolMs"] = json!(value);
                             }
                             if let Some(value) = ttft_by_turn.get(&key) {
                                 detail["ttftMs"] = json!(value);
