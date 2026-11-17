@@ -83,6 +83,21 @@ fn usage_due(force: bool, last_requested: Option<Instant>) -> bool {
     }
 }
 
+/// How long the plan meter waits before it is asked again. It moves at
+/// subscription cadence, and every answer costs a provider round trip, so this
+/// is deliberately slower than the ledger read.
+const QUOTA_REFRESH: Duration = Duration::from_secs(60);
+
+fn quota_due(force: bool, last_requested: Option<Instant>) -> bool {
+    if force {
+        return true;
+    }
+    match last_requested {
+        Some(at) => at.elapsed() >= QUOTA_REFRESH,
+        None => true,
+    }
+}
+
 /// Where the engine last said an active run was. Ephemeral: a client that
 /// attaches mid-turn learns the run from the snapshot and the rest from the next
 /// frame, so nothing here is persisted.
@@ -509,6 +524,12 @@ pub struct App {
     usage: Option<UsageSummary>,
     /// The trailing 24 hours the sidebar paints, workspace-wide.
     usage_hourly: Option<crate::status::HourlyUsage>,
+    /// The subscription meters behind the stored credentials. Unlike the
+    /// ledger above, this is not Session scoped: it answers for the accounts.
+    quota: Option<crate::status::PlanQuota>,
+    /// When the plan meter was last asked for. A provider endpoint is a
+    /// network round trip, so it runs on its own slower cadence.
+    quota_requested_at: Option<Instant>,
     /// When the usage report was last asked for, so a run that keeps settling
     /// steps cannot turn into a stream of ledger scans.
     usage_requested_at: Option<Instant>,
@@ -741,6 +762,8 @@ impl App {
             accounts: Vec::new(),
             usage: None,
             usage_hourly: None,
+            quota: None,
+            quota_requested_at: None,
             usage_requested_at: None,
             stash: Vec::new(),
             prompt_history: Vec::new(),
@@ -1240,6 +1263,7 @@ impl App {
                 if let Some(engine) = self.engine.as_ref() {
                     engine.usage_hourly(24);
                 }
+                self.request_quota(false);
                 if matches!(self.dialog, Some(Dialog::Status(_))) {
                     let rows = self.status_rows();
                     self.open_dialog(Dialog::status(rows));
@@ -1248,6 +1272,10 @@ impl App {
             AppEvent::UsageHourly(hourly) => {
                 self.usage_hourly = Some(hourly);
                 self.shell.set_usage_hourly(self.usage_hourly.as_ref());
+            }
+            AppEvent::Quota(quota) => {
+                self.quota = Some(quota);
+                self.shell.set_quota(self.quota.as_ref());
             }
             AppEvent::HistoryWindow {
                 next_before,
@@ -1514,6 +1542,7 @@ impl App {
                 // reports zero for a cleared Session, so ask again instead of
                 // leaving a full bar over an empty history.
                 self.request_usage(true);
+                self.request_quota(true);
                 self.notice("context cleared · the next prompt starts fresh");
             }
             AppEvent::Notice(message) => self.notice(&message),
@@ -2957,7 +2986,10 @@ impl App {
         self.shell.set_usage(None);
         self.usage_hourly = None;
         self.shell.set_usage_hourly(None);
+        self.quota = None;
+        self.shell.set_quota(None);
         self.request_usage(true);
+        self.request_quota(true);
         if let Some(engine) = self.engine.as_ref() {
             engine.usage_hourly(24);
         }
@@ -2984,6 +3016,19 @@ impl App {
         };
         self.usage_requested_at = Some(Instant::now());
         engine.usage(&session_id);
+    }
+
+    /// Ask for the plan meter on its own slower cadence. A provider endpoint is
+    /// a network round trip, so this never rides the per-step usage refresh.
+    fn request_quota(&mut self, force: bool) {
+        if !quota_due(force, self.quota_requested_at) {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        self.quota_requested_at = Some(Instant::now());
+        engine.quota();
     }
 
     fn status_rows(&self) -> Vec<Row> {

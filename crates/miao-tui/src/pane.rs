@@ -117,6 +117,7 @@ impl Shell {
                 session: None,
                 usage: None,
                 usage_hourly: None,
+                quota: None,
                 goal: None,
                 plan: None,
                 todos: Vec::new(),
@@ -530,6 +531,12 @@ impl Shell {
     pub fn set_usage_hourly(&mut self, usage: Option<&crate::status::HourlyUsage>) {
         if let Some(sidebar) = self.sidebar.as_mut() {
             sidebar.usage_hourly = usage.cloned();
+        }
+    }
+
+    pub fn set_quota(&mut self, quota: Option<&crate::status::PlanQuota>) {
+        if let Some(sidebar) = self.sidebar.as_mut() {
+            sidebar.quota = quota.cloned();
         }
     }
 
@@ -3275,6 +3282,68 @@ fn model_row(name: &str, input: u64, output: u64, hit: &str, width: usize) -> St
     )
 }
 
+/// Plan quota: the subscription the next request draws from, not this
+/// Session's spend. One row per window; a provider without a meter contributes
+/// nothing, so an empty answer leaves the sidebar as it was.
+fn quota_lines(
+    quota: Option<&crate::status::PlanQuota>,
+    palette: &crate::theme::Palette,
+) -> Vec<Line<'static>> {
+    let Some(quota) = quota.filter(|quota| !quota.is_empty()) else {
+        return Vec::new();
+    };
+    let muted = Style::new().fg(palette.text_muted);
+    let mut lines = vec![section_header("PLAN · QUOTA", palette)];
+    for provider in &quota.providers {
+        let name = match provider.plan.is_empty() {
+            true => provider.provider.clone(),
+            false => format!("{} {}", provider.provider, provider.plan),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {name}"),
+            Style::new().fg(palette.text),
+        )));
+        for window in &provider.windows {
+            let ink = match window.status.as_str() {
+                "exhausted" => palette.error,
+                "warning" => palette.warning,
+                _ => palette.secondary,
+            };
+            let reset = window
+                .resets_at_ms
+                .map(|at| format!(" · {}", until_reset(at)))
+                .unwrap_or_default();
+            let label = match window.label.is_empty() {
+                true => window.id.clone(),
+                false => window.label.clone(),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<6}", window.id), muted),
+                Span::styled(format!("{:>3.0}%", window.percent), Style::new().fg(ink)),
+                Span::styled(format!("  {label}{reset}"), muted),
+            ]));
+        }
+    }
+    lines
+}
+
+/// How long a window has left, in the unit a reader would say it in. A reset
+/// that already passed reads "now" rather than a negative countdown.
+fn until_reset(at_ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let left = at_ms.saturating_sub(now) / 1_000;
+    match left {
+        0 => "now".to_owned(),
+        1..=59 => format!("{left}s"),
+        60..=3_599 => format!("{}m", left / 60),
+        3_600..=86_399 => format!("{}h{}m", left / 3_600, (left % 3_600) / 60),
+        _ => format!("{}d", left / 86_400),
+    }
+}
+
 fn hourly_lines(
     usage: Option<&crate::status::HourlyUsage>,
     width: usize,
@@ -3526,6 +3595,9 @@ pub struct SidebarPane {
     session: Option<SessionSummary>,
     usage: Option<crate::status::UsageSummary>,
     usage_hourly: Option<crate::status::HourlyUsage>,
+    /// The subscription meters behind the stored credentials: what is left of
+    /// the plan, as opposed to what this Session already spent.
+    quota: Option<crate::status::PlanQuota>,
     /// The durable Goal, painted above the checklist and never mixed into it.
     goal: Option<crate::session::GoalView>,
     /// The pending plan: how the Session means to get there. Its own section,
@@ -3597,6 +3669,14 @@ impl Pane for SidebarPane {
                     span: (inner.x, inner.x + inner.width.saturating_sub(1)),
                     text,
                 });
+            }
+            // Plan quota answers a different question from the ledger below:
+            // how much of the subscription is left, not what this workspace
+            // already spent. It only appears when a provider published a meter.
+            let quota = quota_lines(self.quota.as_ref(), &palette);
+            if !quota.is_empty() {
+                lines.push(Line::default());
+                lines.extend(quota);
             }
             // The rows below are a different scope from the workspace strip
             // above: they are what this Session was billed, not what the
@@ -4966,6 +5046,33 @@ fn panel_lines(panel: &Panel, theme: &Theme) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_plan_block_paints_windows_and_skips_an_empty_answer() {
+        let palette = home_theme().palette;
+        assert!(
+            super::quota_lines(Some(&crate::status::PlanQuota::default()), &palette).is_empty()
+        );
+        let quota = crate::status::PlanQuota::from_value(&serde_json::json!({
+            "providers": [{"provider":"zhipuai-coding-plan","plan":"lite","windows":[
+                {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null}
+            ]}]
+        }));
+        let text = super::quota_lines(Some(&quota), &palette)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("PLAN · QUOTA"), "{text}");
+        assert!(text.contains("zhipuai-coding-plan lite"), "{text}");
+        assert!(text.contains("12%"), "{text}");
+        assert!(text.contains("credits · 5 Hours"), "{text}");
+    }
+
     #[test]
     fn animations_off_keep_the_landing_screen_still() {
         let theme = crate::theme::Theme {
@@ -8054,6 +8161,7 @@ mod tests {
             session: Some(home_row("ses_t", "todos", None)),
             usage: None,
             usage_hourly: None,
+            quota: None,
             goal: None,
             plan: None,
             todos: vec![crate::session::TodoView {
@@ -8135,6 +8243,7 @@ mod tests {
             session: Some(home_row("ses_u", "usage", None)),
             usage: None,
             usage_hourly: Some(usage.clone()),
+            quota: None,
             goal: None,
             plan: None,
             todos: Vec::new(),
@@ -8261,6 +8370,7 @@ mod tests {
             session: Some(home_row("ses_p", "providers", None)),
             usage: None,
             usage_hourly: Some(usage),
+            quota: None,
             goal: None,
             plan: None,
             todos: Vec::new(),
@@ -8336,6 +8446,7 @@ mod tests {
             session: Some(home_row("ses_k", "keys", None)),
             usage: None,
             usage_hourly: None,
+            quota: None,
             goal: None,
             plan: None,
             todos: (0..40)
@@ -8664,6 +8775,7 @@ mod tests {
                 session: Some(home_row("ses_c", "occupancy", None)),
                 usage: Some(usage),
                 usage_hourly: None,
+                quota: None,
                 goal: None,
                 plan: None,
                 todos: Vec::new(),
@@ -8768,6 +8880,7 @@ mod tests {
             session: Some(home_row("ses_z", "zero", None)),
             usage: Some(usage),
             usage_hourly: None,
+            quota: None,
             goal: None,
             plan: None,
             todos: Vec::new(),
@@ -8817,6 +8930,7 @@ mod tests {
             session: Some(home_row("ses_u", "usage", None)),
             usage: Some(usage),
             usage_hourly: None,
+            quota: None,
             goal: None,
             plan: None,
             todos: Vec::new(),
@@ -8882,6 +8996,7 @@ mod tests {
             session: Some(home_row("ses_l", "lineage", None)),
             usage: Some(usage),
             usage_hourly: None,
+            quota: None,
             goal: None,
             plan: None,
             todos: Vec::new(),
@@ -8923,6 +9038,7 @@ mod tests {
             session: None,
             usage: None,
             usage_hourly: None,
+            quota: None,
             goal: None,
             plan: None,
             todos: Vec::new(),
@@ -8993,6 +9109,7 @@ mod tests {
                 }),
             )),
             usage_hourly: None,
+            quota: None,
             goal: Some(crate::session::GoalView {
                 status: "active".into(),
                 objective: "ship the release".into(),
