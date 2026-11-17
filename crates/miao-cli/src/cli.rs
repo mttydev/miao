@@ -518,7 +518,7 @@ fn latest_host_registration(storage: &Path) -> Option<PathBuf> {
         let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
             continue;
         };
-        if latest.as_ref().map_or(true, |(time, _)| modified > *time) {
+        if latest.as_ref().is_none_or(|(time, _)| modified > *time) {
             latest = Some((modified, path));
         }
     }
