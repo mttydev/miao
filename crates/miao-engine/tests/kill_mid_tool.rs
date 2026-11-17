@@ -142,6 +142,12 @@ async fn kill_mid_tool_then_resume_consumes_one_unknown_guard() {
     let db = dir.path().join("engine.db");
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
+    // The Session's root is compared by spelling against the location the
+    // engine admits with, which is the canonical one. On Windows `tempdir`'s
+    // spelling differs from `canonicalize`'s (verbatim prefix, folder case),
+    // so the raw path recorded here made every later admission conflict
+    // against a root naming the very same directory.
+    let workspace = miao_engine::placement::canonical(&workspace);
     let marker = workspace.join("probe");
     let command = format!("echo ran >> {}", marker.display());
 
