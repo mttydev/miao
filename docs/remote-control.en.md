@@ -116,11 +116,20 @@ be in the latest release; check the release notes before using preview features.
 
 ## Serving from `miao serve`
 
-A resident engine can host Remote Control too: `miao serve --remote-host <control.json>`
-keeps the loopback bind and passes this serve process's URL, token and a fresh runtime
-identity to a sibling `miao-remote` through the environment, then stops it when serve
-exits. `/remote-control` remains the TUI entry point; the two do not share a runtime
-identity.
+A resident engine and a TUI window can both host Remote Control.
+`miao serve --remote-host <control.json>` passes this serve process's URL, token and a
+fresh runtime identity to a sibling `miao-remote` through the environment and stops it
+when serve exits. `miao --remote-host <control.json>` opens a loopback HTTP endpoint on
+the window's own engine and starts the same sidecar against it. Both bind loopback only,
+stop the host with the process that published it, and use independent runtime identities.
+
+The TUI window must run the in-process engine (the default; do not set
+`MIAO_TUI_EMBEDDED=0` or name `MIAO_ENGINE_BIN`). Otherwise the window says Remote
+Control needs the in-process engine instead of pretending the host started.
+
+Inside an mtty pane the window also reports the Runtime's `runtimeID` and `storage` as
+its `runtime_context`; it clears that context when the window or host stops, so the pane
+never attests a registration that no longer has a process behind it.
 
 1. Register the host once:
 
@@ -147,7 +156,9 @@ identity.
    `grantFile` resolves beside the configuration. `sessionIDs` is the publication gate:
    only those Sessions appear in the device list, and every other Session method is
    refused. `accountID` and `allowLoopbackHTTP` are optional.
-4. Run `miao serve --remote-host ~/.config/miao/remote-control/control.json`.
+4. Run `miao serve --remote-host ~/.config/miao/remote-control/control.json`; or run
+   `miao --remote-host ~/.config/miao/remote-control/control.json` inside a TUI window to
+   publish that window's engine to approved devices.
 
 ## Organising Sessions from the phone
 

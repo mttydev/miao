@@ -2538,6 +2538,7 @@ dependencies = [
  "two-face",
  "unicode-segmentation",
  "unicode-width",
+ "uuid",
  "vt100",
 ]
 

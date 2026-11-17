@@ -102,10 +102,18 @@ Remote Control 让你从另一台设备操作正在运行的 miao 窗口。任�
 
 ## 从 `miao serve` 启动宿主
 
-常驻引擎也可以承载 Remote Control：`miao serve --remote-host <control.json>` 仍只绑定
-loopback，并把本次 serve 的 URL、token 和一次性 runtimeID 通过环境变量交给同目录的
-`miao-remote`；serve 退出时一并回收宿主进程。`/remote-control` 仍然是 TUI 的入口，
-两者不共享 runtime 身份。
+常驻引擎和 TUI 窗口都可以承载 Remote Control。`miao serve --remote-host <control.json>`
+把本次 serve 的 URL、token 和一次性 runtimeID 通过环境变量交给同目录的 `miao-remote`；
+`miao --remote-host <control.json>` 则在当前窗口的引擎上开一个 loopback HTTP 端点，再启动
+同一个 sidecar。两者都只绑定 loopback，宿主随承载进程退出而停止，并各自使用独立的
+runtime 身份。
+
+TUI 窗口必须运行内嵌引擎（默认；不要设置 `MIAO_TUI_EMBEDDED=0`，也不要指定
+`MIAO_ENGINE_BIN`），否则窗口会明确提示 Remote Control 需要内嵌引擎，而不是假装已启动。
+
+在 mtty 窗格内启动时，窗口还会把该 Runtime 的 `runtimeID` 与 `storage` 作为
+`runtime_context` 报告给 mtty；窗口退出或宿主停止时显式清空，pane 不会继续引用已经
+失效的注册。
 
 1. 注册主机（只需一次）：
 
@@ -128,7 +136,9 @@ loopback，并把本次 serve 的 URL、token 和一次性 runtimeID 通过环�
 
    `grantFile` 相对配置文件解析。`sessionIDs` 是发布门：只有列出的会话会出现在设备列表里，
    其余会话的方法一律拒绝。`accountID` 与 `allowLoopbackHTTP` 可选。
-4. 运行 `miao serve --remote-host ~/.config/miao/remote-control/control.json`。
+4. 运行 `miao serve --remote-host ~/.config/miao/remote-control/control.json`；或者在一个
+   TUI 窗口里运行 `miao --remote-host ~/.config/miao/remote-control/control.json`，把该窗口
+   的引擎直接发布给已批准设备。
 
 ## 在手机上整理会话
 

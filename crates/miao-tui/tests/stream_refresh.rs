@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use miao_tui::engine::{attach, Settings};
@@ -18,6 +19,8 @@ async fn continuous_committed_activity_keeps_refreshing_the_open_session() {
                     ("MIAO_TUI_FAKE_STREAM".into(), "1".into()),
                 ],
             },
+            db: PathBuf::from("/tmp/miao-tui-test.db"),
+            remote_host: None,
             embedded: false,
             named_engine: true,
             model: "fixture".into(),

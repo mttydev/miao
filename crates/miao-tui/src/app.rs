@@ -1507,6 +1507,7 @@ impl App {
                 self.notice("context cleared · the next prompt starts fresh");
             }
             AppEvent::Notice(message) => self.notice(&message),
+            AppEvent::RuntimeContext(context) => self.mtty_state.set_runtime_context(context),
             AppEvent::PromptFailed {
                 text,
                 attachments,
@@ -7264,6 +7265,8 @@ mod tests {
                 env: Vec::new(),
             },
             model: engine::UNROUTED_MODEL.to_string(),
+            db: PathBuf::from("/tmp/miao-tui-test.db"),
+            remote_host: None,
             embedded: true,
             named_engine: false,
         });
@@ -7355,6 +7358,8 @@ mod tests {
                 env: Vec::new(),
             },
             model: engine::UNROUTED_MODEL.to_string(),
+            db: PathBuf::from("/tmp/miao-tui-test.db"),
+            remote_host: None,
             embedded: true,
             named_engine: false,
         });
@@ -7436,6 +7441,8 @@ mod tests {
                 env: Vec::new(),
             },
             model: engine::UNROUTED_MODEL.to_string(),
+            db: PathBuf::from("/tmp/miao-tui-test.db"),
+            remote_host: None,
             embedded: true,
             named_engine: false,
         });
@@ -7532,6 +7539,8 @@ mod tests {
                 env: Vec::new(),
             },
             model: engine::UNROUTED_MODEL.to_string(),
+            db: PathBuf::from("/tmp/miao-tui-test.db"),
+            remote_host: None,
             embedded: true,
             named_engine: false,
         });

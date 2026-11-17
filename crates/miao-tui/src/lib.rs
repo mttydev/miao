@@ -66,6 +66,9 @@ pub struct Launch {
     /// engine as `--auto-approve`, where asks the policy raises settle through
     /// the deterministic classifier instead of a host approval.
     pub auto: bool,
+    /// `--remote-host <control.json>`: serve this window's engine to approved
+    /// devices. The sidecar stops with the window.
+    pub remote_host: Option<PathBuf>,
 }
 
 /// 8 MiB: the engine's turn chain needs about 4 MiB on Windows, where the
@@ -172,6 +175,7 @@ async fn drive(
         launch.config_dir,
         launch.auto,
         launch.agent.as_deref(),
+        launch.remote_host.clone(),
     ) {
         Ok(settings) => {
             app.set_settings(settings.clone());

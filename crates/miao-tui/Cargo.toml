@@ -30,8 +30,9 @@ serde_json = "1"
 # on any of the build targets. `two-face` adds bat's extra definitions.
 syntect = { version = "5.3", default-features = false, features = ["default-fancy", "parsing"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
-tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 unicode-segmentation = "1"
+uuid = { version = "1", features = ["v4"] }
 unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies]
