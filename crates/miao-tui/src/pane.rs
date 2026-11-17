@@ -75,6 +75,11 @@ pub struct Shell {
     /// The projection behind `transcript.lines`, kept so a theme change can
     /// repaint the same content instead of waiting for the next snapshot.
     last: Option<Transcript>,
+    /// A projection that arrived while the reader was scrolled into history.
+    /// The engine projects the newest window only, so applying it under a
+    /// reader would drop the pages they loaded and clamp the viewport to the
+    /// window's end. It is applied when they return to the tail.
+    pending_transcript: Option<Transcript>,
     /// The chord that unfolds a tool result, resolved from the live keymap so
     /// the elision line names a key the operator has. `None` means the action
     /// is unbound, and then the line promises no chord at all.
@@ -118,6 +123,7 @@ impl Shell {
                 chord: None,
             }),
             last: None,
+            pending_transcript: None,
             toggle_chord: None,
             sidebar_chord: None,
             sidebar_hidden: false,
@@ -178,6 +184,20 @@ impl Shell {
     }
 
     pub fn set_transcript(&mut self, transcript: &Transcript) {
+        // A reader who scrolled into history keeps the rows they are reading.
+        // The engine's projection carries only the newest window, so replacing
+        // a longer loaded history here shortened the transcript and clamped the
+        // viewport to the window's end — the newest rows. Hold the projection
+        // until the reader returns to the tail.
+        if !self.transcript.follow {
+            self.pending_transcript = Some(transcript.clone());
+            return;
+        }
+        self.apply_transcript(transcript);
+    }
+
+    /// Paint one projection into the pane and remember it for a theme change.
+    fn apply_transcript(&mut self, transcript: &Transcript) {
         let projected = transcript_lines(
             transcript,
             &self.transcript.theme,
@@ -234,6 +254,7 @@ impl Shell {
         self.transcript.user_anchors = Vec::new();
         self.transcript.scroll = 0;
         self.transcript.follow = true;
+        self.pending_transcript = None;
         self.last = None;
     }
 
@@ -348,6 +369,7 @@ impl Shell {
         self.transcript.user_anchors = Vec::new();
         self.transcript.scroll = 0;
         self.transcript.follow = false;
+        self.pending_transcript = None;
         self.last = None;
     }
 
@@ -456,6 +478,11 @@ impl Shell {
         let next = (self.transcript.scroll as i32 + delta).clamp(0, max as i32) as u16;
         self.transcript.scroll = next;
         self.transcript.follow = next >= max;
+        if self.transcript.follow {
+            if let Some(pending) = self.pending_transcript.take() {
+                self.apply_transcript(&pending);
+            }
+        }
     }
 
     /// How far one page of transcript moves: the painted height less two rows
@@ -476,6 +503,9 @@ impl Shell {
     /// previous Session used to leave the next one parked at its oldest rows.
     pub fn follow_transcript(&mut self) {
         self.transcript.follow = true;
+        if let Some(pending) = self.pending_transcript.take() {
+            self.apply_transcript(&pending);
+        }
     }
 
     /// Whether the transcript is showing its newest rows.
