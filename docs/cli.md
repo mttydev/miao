@@ -71,7 +71,7 @@ inventory is updated when a command lands or retires.
 | `plugin` | `plugin <module>` | — | ts-only | npm plugin install |
 | `marketplace` | `marketplace <source>` | — | ts-only | marketplace browse/install |
 | `generate` | `generate` | — | ts-only | config scaffolding |
-| `runtime` / `runtime-access` | `runtime <action>` | — | ts-only | hidden; host-side plumbing |
+| `runtime` / `runtime-access` | `runtime <action>` | `runtime access` | rust | hidden; answers one private-pipe Remote Control request |
 
 ## Management commands (CLI-06)
 
@@ -86,7 +86,7 @@ inventory is updated when a command lands or retires.
 | `db` | `db ...` | `db path/stats/vacuum/retention` | rust; see the table below |
 | `doctor` | `doctor` | `doctor` | rust; engine-side WAL/FK/transfer matrix included |
 | `remote` | `remote` | `remote` | rust |
-| `runtime` | `runtime <action>` | — | ts-only; host-side plumbing |
+| `runtime` | `runtime <action>` | `runtime access` | rust | host-side plumbing |
 | `install` | — | — | n/a; the curl installer, not a CLI command |
 | `upgrade` | `upgrade [target]` | `upgrade` | rust |
 

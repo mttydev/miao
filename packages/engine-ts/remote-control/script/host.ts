@@ -21,6 +21,7 @@ const client = new EngineHttpClient({ url, token })
 const runner = await ControlHostRunner.start({
   ...configuration,
   runtimeID,
+  ...(process.env.MIAO_REMOTE_STORAGE ? { storage: process.env.MIAO_REMOTE_STORAGE } : {}),
   engine: {
     request: (method, params) => client.request(method, params),
     command: (method) => client.request(method),
