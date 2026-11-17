@@ -188,6 +188,10 @@ final class SpeechInput {
                     if let raw, !raw.isEmpty {
                         let words = DictationText.punctuate(raw, chinese: chinese)
                         self.transcript = words
+                        // Recognition is authoritative even when the level
+                        // meter stayed under its threshold on a quiet input.
+                        self.heardSpeech = true
+                        self.lastVoiceAt = Date()
                         let value = DictationText.merge(text, words)
                         guard accept(self.expectedDraft, value) else {
                             self.stop()
@@ -262,7 +266,7 @@ final class SpeechInput {
                     self.error = "已达到最长录音时间，文字已保留"
                     return
                 }
-                if !self.heardSpeech, self.duration > Self.noSpeechLimit {
+                if !self.heardSpeech, self.expectedDraft == self.origin, self.duration > Self.noSpeechLimit {
                     self.stop()
                     self.error = "没有检测到语音，请靠近麦克风重试"
                     return
