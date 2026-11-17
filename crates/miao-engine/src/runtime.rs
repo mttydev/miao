@@ -4452,6 +4452,9 @@ async fn execute(
         let permissions = permission_profile(inner, &policy).await?;
         let mut produced = false;
         let mut ttft_ms: Option<u64> = None;
+        // When this provider step began, so the settle row carries how long it
+        // took rather than when it happened.
+        let step_started = std::time::Instant::now();
         let mut attempts = 0;
         let mut refusal_replays = 0;
         let transport_budget = crate::provider::Budget::new();
@@ -4931,12 +4934,17 @@ command: None,
                 .record(session, "budget.state", budgets.state())
                 .await?;
         }
-        // The billed turn's settle wall-clock rides the timing side table, so
-        // usage reports can order turns in time without timestamps in replayed
-        // payloads.
+        // The billed step's wall time rides the timing side table. It is a
+        // duration, not a wall-clock stamp: the status dialog renders it as
+        // seconds, and an epoch value read as a duration is off by decades.
         let _ = inner
             .store
-            .record_turn_time(session, run, step as u64, crate::approval::now_ms())
+            .record_turn_time(
+                session,
+                run,
+                step as u64,
+                step_started.elapsed().as_millis() as u64,
+            )
             .await;
         if let Some(ttft_ms) = ttft_ms {
             let _ = inner
