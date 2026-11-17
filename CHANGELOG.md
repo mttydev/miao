@@ -26,6 +26,7 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 - **remote-control**: a host contract for capabilities and attachments (#3111) (`e31fa5ad99`)
 
 ### Fixed
+- **tui**: stop a clipboard probe from appending its text to the draft (#3129) (`95e1ee31ae`)
 - **ios**: make voice input start and explain failures (#3127) (`7df7fadb3f`)
 - **tui**: align the workspace usage table and drop the sidebar title (#3125) (`9ec946779f`)
 - **tui**: give the composer's facts their own row (#3124) (`6298de3295`)

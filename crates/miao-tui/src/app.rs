@@ -611,6 +611,9 @@ pub struct App {
     /// fixture instead of the operator's live Zed database.
     zed_probe: fn(&Path) -> Option<zed::Selection>,
     clipboard_busy: bool,
+    /// The in-flight read is a paste, not a probe for a held prompt's missing
+    /// picture: only a paste's text may join the draft when it lands.
+    clipboard_paste: bool,
     /// A submit held because the draft's `[Image N]` markers outnumber the
     /// attached pictures: the async clipboard read is still catching up, and
     /// the held prompt resends once it lands.
@@ -773,6 +776,7 @@ impl App {
             zed_polled: None,
             zed_probe: zed::selection,
             clipboard_busy: false,
+            clipboard_paste: false,
             held_prompt: None,
             startup,
             themes,
@@ -995,7 +999,7 @@ impl App {
                 // empty bracketed paste; reading the clipboard is the only way
                 // to find out what it held.
                 if text.is_empty() {
-                    self.read_clipboard();
+                    self.read_clipboard(true);
                 } else {
                     self.shell.composer.paste(&text);
                 }
@@ -1033,6 +1037,7 @@ impl App {
             AppEvent::TagFailed(message) => self.notice(&format!("tag failed: {message}")),
             AppEvent::Clipboard(content) => {
                 self.clipboard_busy = false;
+                let pasted = std::mem::take(&mut self.clipboard_paste);
                 match content {
                     Some(clipboard::Content::Image { mime, data }) => {
                         let count = self.shell.composer.attach_image(&mime, &data);
@@ -1059,15 +1064,20 @@ impl App {
                             .as_mut()
                             .is_some_and(|dialog| dialog.paste(&text));
                         // Text is not the picture a held prompt wanted, so the
-                        // draft goes back unsent. Whatever this read brought
-                        // joins it: dropping the paste is how a held prompt
-                        // used to come back shorter than what the operator had
-                        // on screen before they pressed Enter.
+                        // draft goes back unsent. A read that began as a paste
+                        // joins it — dropping it is how a held prompt used to
+                        // come back shorter than what the operator had on
+                        // screen. A read started by the submit itself was only
+                        // a probe for the marker's picture: appending its text
+                        // grew the prompt by one copy on every Enter while the
+                        // picture stayed missing.
                         if let Some((held, attachments)) = self.held_prompt.take() {
                             let wanted_picture = Self::image_markers(&held) > attachments.len();
-                            self.shell
-                                .composer
-                                .restore_with(&format!("{held}{text}"), attachments);
+                            let draft = match pasted {
+                                true => format!("{held}{text}"),
+                                false => held,
+                            };
+                            self.shell.composer.restore_with(&draft, attachments);
                             self.notice(if wanted_picture {
                                 "the clipboard holds no picture: paste it again or remove the image marker"
                             } else {
@@ -1620,7 +1630,7 @@ impl App {
             && (key.modifiers.contains(KeyModifiers::CONTROL)
                 || key.modifiers.contains(KeyModifiers::ALT))
         {
-            self.read_clipboard();
+            self.read_clipboard(true);
             return;
         }
         match self.screen {
@@ -1963,7 +1973,7 @@ impl App {
             Builtin::Context => self.show_context(),
             Builtin::Init => self.write_agents_md(),
             Builtin::Mcp => self.open_mcp(),
-            Builtin::Paste => self.read_clipboard(),
+            Builtin::Paste => self.read_clipboard(true),
             Builtin::Quit => self.quit = true,
         }
     }
@@ -3588,7 +3598,7 @@ impl App {
 
     /// Read the clipboard off the UI thread. Text goes into the composer; an
     /// image becomes a numbered attachment.
-    fn read_clipboard(&mut self) {
+    fn read_clipboard(&mut self, paste: bool) {
         if self.clipboard_busy {
             self.notice("still reading the clipboard…");
             return;
@@ -3597,6 +3607,7 @@ impl App {
             return;
         };
         self.clipboard_busy = true;
+        self.clipboard_paste = paste;
         let host_file = std::env::var_os("MTTY_CLIPBOARD_FILE").map(PathBuf::from);
         std::thread::spawn(move || {
             let content = clipboard::read(host_file.as_deref());
@@ -5121,7 +5132,7 @@ impl App {
                     self.notice(
                         "the draft references an image that is not attached; reading the clipboard…",
                     );
-                    self.read_clipboard();
+                    self.read_clipboard(false);
                     return;
                 }
                 self.held_prompt = None;
@@ -7048,6 +7059,67 @@ mod tests {
             .notice
             .as_deref()
             .is_some_and(|notice| notice.contains("paste it again")));
+    }
+
+    /// The read a submit starts is a probe for the marker's missing picture,
+    /// not a paste. Its text must not join the draft: every Enter used to
+    /// append the clipboard's text again, so one paragraph multiplied inside
+    /// the composer while the picture stayed missing.
+    #[test]
+    fn a_probe_read_of_the_clipboard_does_not_grow_the_held_draft() {
+        let mut app = session_app();
+        let (handle, _requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_probe", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        app.submit("[Image 1] describe this".into(), Vec::new());
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Text(
+            "describe this".into(),
+        ))));
+        assert_eq!(
+            app.shell.composer.editor.text(),
+            "[Image 1] describe this",
+            "a probe's text must not be appended to the draft"
+        );
+        // A second Enter repeats the probe; the draft must not grow.
+        let text = app.shell.composer.editor.text().to_string();
+        app.submit(text, Vec::new());
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Text(
+            "describe this".into(),
+        ))));
+        assert_eq!(
+            app.shell.composer.editor.text(),
+            "[Image 1] describe this",
+            "each Enter must leave the draft exactly as it was"
+        );
+    }
+
+    /// A read that began as a paste still joins the draft it lands on: that is
+    /// the operator's text, not a probe for a missing picture.
+    #[test]
+    fn a_paste_read_that_lands_during_a_hold_still_joins_the_draft() {
+        let mut app = session_app();
+        let (handle, _requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_paste", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        app.clipboard_busy = true;
+        app.clipboard_paste = true;
+        app.submit("[Image 1] describe".into(), Vec::new());
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Text(
+            " pasted".into(),
+        ))));
+        assert_eq!(
+            app.shell.composer.editor.text(),
+            "[Image 1] describe pasted",
+            "a paste that started before the hold still lands"
+        );
     }
 
     fn approval_state() -> SessionState {
