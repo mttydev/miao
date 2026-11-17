@@ -150,6 +150,10 @@ pub enum AppEvent {
     /// Something the user should know that is not a failure, such as the engine
     /// reloading its configuration. Shown as a composer notice.
     Notice(String),
+    /// The owned Runtime this pane publishes to mtty, or `None` once the host
+    /// stops. mtty attests `miao runtime access` against exactly this identity
+    /// instead of guessing another local Runtime.
+    RuntimeContext(Option<crate::mtty_state::RuntimeContext>),
     /// A prompt the engine refused. The UI puts `text` and its attachments
     /// back in the composer so the draft is never lost.
     PromptFailed {

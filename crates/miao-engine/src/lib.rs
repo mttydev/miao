@@ -79,6 +79,7 @@ pub mod question;
 pub mod recall;
 pub mod recap;
 pub mod recovery;
+pub mod remote_host;
 pub mod request_options;
 pub mod responses_cache;
 pub mod responses_websocket;

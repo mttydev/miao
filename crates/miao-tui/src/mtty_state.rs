@@ -6,6 +6,7 @@
 //! replaced it without that report, so panes stayed blank. This is the same
 //! contract, fed from the phase the TUI already computes for its own title.
 
+use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// The states mtty understands (`agent.state.set`).
@@ -34,6 +35,15 @@ impl State {
             (false, false) => State::Idle,
         }
     }
+}
+
+/// The Runtime this pane owns, in the form mtty's private pipe expects:
+/// `miao runtime access` looks for the registration of exactly this identity
+/// beside this storage, and refuses to fall back to another local Runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeContext {
+    pub runtime_id: String,
+    pub storage: String,
 }
 
 /// The pane mtty spawned us in and the CLI that reaches it.
@@ -81,7 +91,23 @@ fn arguments(target: &Target, state: State, session: Option<&str>) -> Vec<String
         args.push("--session".to_string());
         args.push(session.to_string());
     }
+    // Every update carries the context, including a null one: mtty replaces
+    // the pane's entry, so omitting the field would drop the Runtime this
+    // client published on the previous state change.
+    args.push("--runtime-context".to_string());
+    args.push("-".to_string());
     args
+}
+
+fn context_json(context: Option<&RuntimeContext>) -> serde_json::Value {
+    match context {
+        Some(context) => serde_json::json!({
+            "kind": "owned",
+            "runtimeID": context.runtime_id,
+            "storage": context.storage,
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// Forwards state changes to mtty, once each.
@@ -89,6 +115,7 @@ fn arguments(target: &Target, state: State, session: Option<&str>) -> Vec<String
 pub struct Reporter {
     target: Option<Target>,
     session: Option<String>,
+    context: Option<RuntimeContext>,
     last: Option<State>,
 }
 
@@ -97,6 +124,7 @@ impl Reporter {
         Self {
             target: Target::from_env(),
             session: None,
+            context: None,
             last: None,
         }
     }
@@ -117,9 +145,20 @@ impl Reporter {
         self.send(state);
     }
 
+    /// Publish or clear the owned Runtime beside the run state. The report
+    /// goes out even when the state did not change, because mtty replaces the
+    /// pane's whole entry and a stale context would point at a dead host.
+    pub fn set_runtime_context(&mut self, context: Option<RuntimeContext>) {
+        self.context = context;
+        self.send(self.last.unwrap_or(State::Idle));
+    }
+
     /// The TUI is leaving: an idle report stops the tab claiming a run that
-    /// ended with this process.
+    /// ended with this process, and a cleared context stops the next client
+    /// from attesting a Runtime this one no longer hosts.
     pub fn clear(&mut self) {
+        self.context = None;
+        self.last = None;
         self.update(State::Idle);
     }
 
@@ -130,12 +169,15 @@ impl Reporter {
         let mut command = Command::new(&target.exe);
         command.args(arguments(target, state, self.session.as_deref()));
         command
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let Ok(mut child) = command.spawn() else {
             return;
         };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(context_json(self.context.as_ref()).to_string().as_bytes());
+        }
         // Reap off the UI thread: a long Session changes state many times and
         // must not leave a zombie per turn.
         std::thread::spawn(move || {
@@ -146,7 +188,7 @@ impl Reporter {
 
 #[cfg(test)]
 mod tests {
-    use super::{arguments, Reporter, State, Target};
+    use super::{arguments, context_json, Reporter, RuntimeContext, State, Target};
 
     #[test]
     fn state_follows_the_blocking_and_run_signals() {
@@ -212,13 +254,55 @@ mod tests {
                 "--pane",
                 "p1",
                 "--session",
-                "s1"
+                "s1",
+                "--runtime-context",
+                "-"
             ]
         );
         assert_eq!(
             arguments(&target, State::Idle, None),
-            vec!["state", "miao", "--state", "idle", "--pane", "p1"]
+            vec![
+                "state",
+                "miao",
+                "--state",
+                "idle",
+                "--pane",
+                "p1",
+                "--runtime-context",
+                "-"
+            ]
         );
+    }
+
+    #[test]
+    fn an_owned_runtime_context_is_reported_as_metadata() {
+        let context = RuntimeContext {
+            runtime_id: "runtime-1".into(),
+            storage: "/tmp/miao.db".into(),
+        };
+        assert_eq!(
+            context_json(Some(&context)),
+            serde_json::json!({
+                "kind": "owned",
+                "runtimeID": "runtime-1",
+                "storage": "/tmp/miao.db"
+            })
+        );
+        assert_eq!(context_json(None), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn stopping_the_host_forces_one_final_report_without_a_context() {
+        let mut reporter = Reporter {
+            context: Some(RuntimeContext {
+                runtime_id: "runtime-1".into(),
+                storage: "/tmp/miao.db".into(),
+            }),
+            ..Reporter::default()
+        };
+        reporter.clear();
+        assert_eq!(reporter.context, None);
+        assert_eq!(reporter.last, Some(State::Idle));
     }
 
     #[test]

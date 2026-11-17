@@ -657,6 +657,11 @@ impl Handle {
 pub struct Settings {
     pub spawn: EngineSpawn,
     pub model: String,
+    /// The engine ledger the window drives. The Remote Control sidecar
+    /// publishes its registration beside this file.
+    pub db: PathBuf,
+    /// `--remote-host <control.json>`; absent leaves Remote Control off.
+    pub remote_host: Option<PathBuf>,
     /// Run the engine inside this process instead of spawning `miao-engine`.
     /// The argv in `spawn` is reused verbatim, so the in-process engine is
     /// configured by exactly the flags the child would have received.
@@ -705,6 +710,7 @@ pub fn settings(
     config_dir: Option<PathBuf>,
     auto_approve: bool,
     agent: Option<&str>,
+    remote_host: Option<PathBuf>,
 ) -> Result<Settings, String> {
     let db = db
         .or_else(|| std::env::var_os("MIAO_ENGINE_DB").map(PathBuf::from))
@@ -742,6 +748,8 @@ pub fn settings(
     Ok(Settings {
         spawn,
         model,
+        db,
+        remote_host,
         // In-process is the default now: the engine is linked in, so a start
         // costs one process. `MIAO_TUI_EMBEDDED=0` restores the spawned engine.
         //
@@ -899,15 +907,39 @@ pub fn attach(settings: &Settings, bus: Bus) -> Result<Handle, String> {
         let argv = settings.spawn.args.clone();
         let spawn = settings.spawn.clone();
         let named = settings.named_engine;
+        let db = settings.db.clone();
+        let remote_config = settings.remote_host.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             match miao_engine::cli::configure(&argv).await {
                 Ok(configured) => {
+                    let remote = match remote_config.as_deref() {
+                        Some(config) => {
+                            start_remote_host(configured.runtime.clone(), config, &db, &bus).await
+                        }
+                        None => None,
+                    };
                     match Connection::start_embedded(configured.runtime, REQUEST_TIMEOUT) {
-                        Ok((connection, events)) => run(connection, events, rx, bus).await,
-                        Err(error) => bus.send(AppEvent::EngineFailure(format!(
-                            "cannot start the in-process engine: {error}"
-                        ))),
+                        Ok((connection, events)) => {
+                            // Hold the sidecar and its endpoint for as long as
+                            // this window drives the engine, and withdraw the
+                            // pane's Runtime context when that window ends.
+                            let announced = remote.is_some();
+                            let quit_bus = bus.clone();
+                            {
+                                let _remote = remote;
+                                run(connection, events, rx, bus).await;
+                            }
+                            if announced {
+                                quit_bus.send(AppEvent::RuntimeContext(None));
+                            }
+                        }
+                        Err(error) => {
+                            drop(remote);
+                            bus.send(AppEvent::EngineFailure(format!(
+                                "cannot start the in-process engine: {error}"
+                            )))
+                        }
                     }
                 }
                 // Nothing named an engine, so there is nothing to spawn: the
@@ -935,6 +967,11 @@ pub fn attach(settings: &Settings, bus: Bus) -> Result<Handle, String> {
     }
     match Connection::start(settings.spawn.clone(), REQUEST_TIMEOUT) {
         Ok((connection, events)) => {
+            if settings.remote_host.is_some() {
+                bus.send(AppEvent::ActionFailed(
+                    "Remote Control needs the in-process engine; unset MIAO_TUI_EMBEDDED and MIAO_ENGINE_BIN".into(),
+                ));
+            }
             let (tx, rx) = mpsc::unbounded_channel();
             tokio::spawn(run(connection, events, rx, bus));
             Ok(Handle { tx })
@@ -945,20 +982,40 @@ pub fn attach(settings: &Settings, bus: Bus) -> Result<Handle, String> {
             // POSIX wrapper exists, which reads as "program not found" while
             // the engine itself is linked in and perfectly able to run here.
             let argv = settings.spawn.args.clone();
+            let db = settings.db.clone();
+            let remote_config = settings.remote_host.clone();
             let (tx, rx) = mpsc::unbounded_channel();
             tokio::spawn(async move {
                 match miao_engine::cli::configure(&argv).await {
                     Ok(configured) => {
+                        let remote = match remote_config.as_deref() {
+                            Some(config) => {
+                                start_remote_host(configured.runtime.clone(), config, &db, &bus)
+                                    .await
+                            }
+                            None => None,
+                        };
                         match Connection::start_embedded(configured.runtime, REQUEST_TIMEOUT) {
                             Ok((connection, events)) => {
+                                let announced = remote.is_some();
+                                let quit_bus = bus.clone();
                                 bus.send(AppEvent::EngineFailure(format!(
                                     "the named engine could not start ({error}); using the in-process engine"
                                 )));
-                                run(connection, events, rx, bus).await
+                                {
+                                    let _remote = remote;
+                                    run(connection, events, rx, bus).await;
+                                }
+                                if announced {
+                                    quit_bus.send(AppEvent::RuntimeContext(None));
+                                }
                             }
-                            Err(error) => bus.send(AppEvent::EngineFailure(format!(
-                                "cannot start the engine: {error}"
-                            ))),
+                            Err(error) => {
+                                drop(remote);
+                                bus.send(AppEvent::EngineFailure(format!(
+                                    "cannot start the engine: {error}"
+                                )))
+                            }
                         }
                     }
                     Err(error) => bus.send(AppEvent::EngineFailure(format!(
@@ -967,6 +1024,106 @@ pub fn attach(settings: &Settings, bus: Bus) -> Result<Handle, String> {
                 }
             });
             Ok(Handle { tx })
+        }
+    }
+}
+
+/// The Remote Control sidecar and the loopback endpoint it drives.
+///
+/// The window owns both. Dropping the guard stops them, so a host never
+/// outlives the screen that published it and a later `miao runtime access`
+/// cannot resolve a registration with no process behind it.
+struct RemoteHost {
+    child: std::process::Child,
+    server: tokio::task::JoinHandle<()>,
+    registration: PathBuf,
+}
+
+impl Drop for RemoteHost {
+    fn drop(&mut self) {
+        self.server.abort();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.registration);
+    }
+}
+
+/// Publish this window's engine to the sidecar over loopback HTTP.
+///
+/// The endpoint serves the same `Runtime` the window drives, so the host sees
+/// exactly the Sessions and tools this window does. The database path also
+/// names the registration file `miao runtime access` looks for.
+async fn start_remote_host(
+    runtime: miao_engine::runtime::Runtime,
+    config: &Path,
+    db: &Path,
+    bus: &Bus,
+) -> Option<RemoteHost> {
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            bus.send(AppEvent::ActionFailed(format!(
+                "Remote Control could not open its loopback endpoint: {error}"
+            )));
+            return None;
+        }
+    };
+    let address = match listener.local_addr() {
+        Ok(address) => address,
+        Err(error) => {
+            bus.send(AppEvent::ActionFailed(format!(
+                "Remote Control could not read its loopback address: {error}"
+            )));
+            return None;
+        }
+    };
+    // The token is generated here and travels in the sidecar's environment; it
+    // never reaches argv, which other local users can read.
+    let token =
+        std::env::var("MIAO_SERVER_PASSWORD").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    let runtime_id = uuid::Uuid::new_v4().to_string();
+    let server_token = token.clone();
+    let server_bus = bus.clone();
+    let server = tokio::spawn(async move {
+        if let Err(error) = miao_engine::http::serve(runtime, listener, server_token).await {
+            server_bus.send(AppEvent::ActionFailed(format!(
+                "Remote Control endpoint stopped: {error}"
+            )));
+        }
+    });
+    let registration = PathBuf::from(format!("{}.remote-host-{runtime_id}.json", db.display()));
+    let log = PathBuf::from(format!("{}.remote-host-{runtime_id}.log", db.display()));
+    match miao_engine::remote_host::spawn(
+        config,
+        db,
+        &format!("http://{address}"),
+        &token,
+        &runtime_id,
+        Some(&log),
+    ) {
+        Ok(child) => {
+            // mtty accepts the pane's owned Runtime only from this context; it
+            // carries no credential, just the identity and storage the private
+            // pipe needs to find the host's registration.
+            bus.send(AppEvent::RuntimeContext(Some(
+                crate::mtty_state::RuntimeContext {
+                    runtime_id: runtime_id.clone(),
+                    storage: db.display().to_string(),
+                },
+            )));
+            bus.send(AppEvent::Notice(format!(
+                "Remote Control host started for this window (runtime {runtime_id})"
+            )));
+            Some(RemoteHost {
+                child,
+                server,
+                registration,
+            })
+        }
+        Err(error) => {
+            server.abort();
+            bus.send(AppEvent::ActionFailed(format!("Remote Control: {error}")));
+            None
         }
     }
 }

@@ -110,6 +110,7 @@ TUI options:
   -s, --session ID   resume a session
   --continue         resume the most recent session
   --prompt TEXT      send an initial prompt
+  --remote-host PATH serve this window to approved Remote Control devices
 ";
 
 /// Parse the arguments that follow `tui` into a launch request.
@@ -124,6 +125,7 @@ fn launch(args: impl Iterator<Item = String>) -> Result<miao_tui::Launch, String
     let mut fork = false;
     let mut agent: Option<String> = None;
     let mut auto = false;
+    let mut remote_host: Option<PathBuf> = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let (name, inline) = match arg.split_once('=') {
@@ -156,6 +158,7 @@ fn launch(args: impl Iterator<Item = String>) -> Result<miao_tui::Launch, String
             "--auto" | "--yolo" | "--dangerously-skip-permissions" => auto = true,
             // The TypeScript entry documented `--fork` as resume-time only.
             "--fork" => fork = true,
+            "--remote-host" => remote_host = Some(PathBuf::from(value("--remote-host")?)),
             // The legacy interface carried these; the Rust TUI does not
             // implement them yet. Refusing with the reason beats a different
             // Session than the one asked for, and names the still-available
@@ -189,6 +192,7 @@ fn launch(args: impl Iterator<Item = String>) -> Result<miao_tui::Launch, String
         fork,
         agent,
         auto,
+        remote_host,
     })
 }
 
@@ -4491,55 +4495,14 @@ fn spawn_remote_host(
     address: std::net::SocketAddr,
     token: &str,
 ) -> Result<std::process::Child, String> {
-    if !config.is_file() {
-        return Err(format!("--remote-host {} is not a file", config.display()));
-    }
-    let name = if cfg!(windows) {
-        "miao-remote.exe"
-    } else {
-        "miao-remote"
-    };
-    let explicit = std::env::var_os("MIAO_REMOTE_HOST_BIN").map(PathBuf::from);
-    let script = std::env::var_os("MIAO_REMOTE_HOST_SCRIPT").map(PathBuf::from);
-    let binary = explicit.or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|directory| directory.join(name)))
-    });
-    let (program, args) = match (&binary, &script) {
-        (Some(binary), _) if binary.is_file() => (binary.clone(), Vec::new()),
-        (_, Some(script)) if script.is_file() => (
-            PathBuf::from("bun"),
-            vec!["run".to_string(), script.display().to_string()],
-        ),
-        (Some(binary), _) => {
-            return Err(format!(
-                "Remote Control needs {} beside miao (or set MIAO_REMOTE_HOST_BIN)",
-                binary.display()
-            ))
-        }
-        (None, Some(script)) => {
-            return Err(format!(
-                "MIAO_REMOTE_HOST_SCRIPT {} is not a file",
-                script.display()
-            ))
-        }
-        (None, None) => return Err(
-            "cannot locate miao-remote beside miao; build it with `bun script/build-remote.ts` \
-                 or set MIAO_REMOTE_HOST_BIN"
-                .into(),
-        ),
-    };
-    std::process::Command::new(program)
-        .args(args)
-        .env("MIAO_ENGINE_HTTP_URL", format!("http://{address}"))
-        .env("MIAO_ENGINE_HTTP_TOKEN", token)
-        .env("MIAO_RUNTIME_ID", uuid::Uuid::new_v4().to_string())
-        .env("MIAO_REMOTE_CONTROL_CONFIG", config)
-        .env("MIAO_REMOTE_STORAGE", storage)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| format!("start remote host: {error}"))
+    miao_engine::remote_host::spawn(
+        config,
+        storage,
+        &format!("http://{address}"),
+        token,
+        &uuid::Uuid::new_v4().to_string(),
+        None,
+    )
 }
 
 /// Read the operator's standing instructions the way the product does: the

@@ -4,7 +4,7 @@ use std::process::ExitCode;
 const USAGE: &str =
     "usage: miao-tui [--workspace <dir>] [--db <engine.db>] [--model <provider/model>]
                   [--config-dir <dir>] [--session <id>] [--continue] [--prompt <text>]
-                  [--auto] [--fork]";
+                  [--auto] [--fork] [--remote-host <control.json>]";
 
 /// The release build injects the product version; a source build falls back to
 /// the crate's own version.
@@ -51,6 +51,9 @@ struct Options {
     auto: bool,
     fork: bool,
     agent: Option<String>,
+    /// Serve this window's engine to approved devices, using the account
+    /// registration `miao-remote register` wrote.
+    remote_host: Option<PathBuf>,
 }
 
 enum Invocation {
@@ -122,6 +125,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Invocation, String> {
     let mut auto = false;
     let mut fork = false;
     let mut agent: Option<String> = None;
+    let mut remote_host: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         // Both `--flag value` and `--flag=value` are accepted; the CLI passes
         // the former, a person typing the command often uses the latter.
@@ -164,6 +168,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Invocation, String> {
                 fork = true;
             }
             "--agent" => agent = Some(value("--agent")?),
+            "--remote-host" => remote_host = Some(PathBuf::from(value("--remote-host")?)),
             other => return Err(format!("unexpected argument \"{other}\"")),
         }
     }
@@ -179,6 +184,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Invocation, String> {
             auto,
             fork,
             agent,
+            remote_host,
         }),
         // A single binary is started in a directory, so the working directory is
         // the workspace unless one is named; `-h` still asks for help.
@@ -194,6 +200,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Invocation, String> {
             auto,
             fork,
             agent,
+            remote_host,
         }),
     })
 }
@@ -216,11 +223,33 @@ fn launch(options: Options) -> ExitCode {
         auto: options.auto,
         fork: options.fork,
         agent: options.agent,
+        remote_host: options.remote_host,
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("miao-tui: {err}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window publishes its engine only when asked; the flag must survive
+    /// the product CLI's forwarding and land on the launch request.
+    #[test]
+    fn a_window_can_publish_its_engine_to_remote_control() {
+        let parsed = parse(
+            ["--workspace", "/tmp", "--remote-host", "control.json"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("the flag parses");
+        let Invocation::Run(options) = parsed else {
+            panic!("expected a run");
+        };
+        assert_eq!(options.remote_host, Some(PathBuf::from("control.json")));
     }
 }
