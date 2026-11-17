@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config;
 pub mod dialogs;
 pub mod editor;
+pub mod effort;
 pub mod engine;
 pub mod event;
 pub mod highlight;
@@ -115,6 +116,7 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
     app.configure_prompt_width(config.prompt_max_width);
     app.configure_leader_timeout(config.leader_timeout_ms);
     app.configure_animations(config.animations);
+    app.configure_auto_effort(config.auto_effort);
     let preferences = terminal::Preferences {
         mouse: config.mouse,
         cursor: config.cursor,

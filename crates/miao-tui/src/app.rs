@@ -520,6 +520,9 @@ pub struct App {
     /// What the engine was started with, shown by the debug dialog.
     settings: Option<engine::Settings>,
     models: Vec<ModelInfo>,
+    /// `auto_effort` from `tui.json`: choose a reasoning-effort variant for each
+    /// prompt when the Session pinned none of its own.
+    auto_effort: bool,
     accounts: Vec<AccountInfo>,
     usage: Option<UsageSummary>,
     /// The trailing 24 hours the sidebar paints, workspace-wide.
@@ -753,6 +756,7 @@ impl App {
             workspace,
             settings: None,
             models: Vec::new(),
+            auto_effort: false,
             mcp: parse_pairs(std::env::var("MIAO_TUI_MCP_JSON").ok().as_deref()),
             providers: seed_providers(std::env::var("MIAO_TUI_PROVIDERS_JSON").ok().as_deref()),
             skills: parse_pairs(std::env::var("MIAO_TUI_SKILLS_JSON").ok().as_deref()),
@@ -877,6 +881,12 @@ impl App {
 
     pub fn configure_animations(&mut self, animated: bool) {
         self.home.set_animated(animated);
+    }
+
+    /// `auto_effort` from `tui.json`: choose the reasoning-effort variant a
+    /// prompt asks for when the Session pinned none.
+    pub fn configure_auto_effort(&mut self, auto_effort: bool) {
+        self.auto_effort = auto_effort;
     }
 
     /// How long the leader chord stays armed, from `tui.json`.
@@ -5072,6 +5082,49 @@ impl App {
         }
     }
 
+    /// The Session's pin as the engine's `select_model` binding.
+    fn pin_binding(&self, pin: &crate::session::ModelPin) -> Value {
+        let mut binding = serde_json::json!({
+            "protocol": pin.protocol.clone(),
+            "model": pin.model.clone(),
+        });
+        if let Some(route_id) = &pin.route_id {
+            binding["route_id"] = Value::String(route_id.clone());
+        }
+        if let Some(variant) = &pin.variant {
+            binding["variant"] = Value::String(variant.clone());
+        }
+        binding
+    }
+
+    /// `binding` plus the reasoning-effort variant this prompt asks for: on only
+    /// when `auto_effort` is set, the binding carries no variant, and the model
+    /// registers a ladder this client can rank. Anything else stays as it was,
+    /// so an unfamiliar variant name is never traded for a familiar one.
+    fn effort_binding(&self, mut binding: Value, prompt: &str) -> Value {
+        if !self.auto_effort || binding.get("variant").is_some() {
+            return binding;
+        }
+        let variants: Vec<String> = {
+            let protocol = binding["protocol"].as_str().unwrap_or_default();
+            let model = binding["model"].as_str().unwrap_or_default();
+            let route = binding.get("route_id").and_then(Value::as_str);
+            self.models
+                .iter()
+                .filter(|info| {
+                    info.protocol == protocol
+                        && info.model == model
+                        && info.route_id.as_deref() == route
+                })
+                .filter_map(|info| info.variant.clone())
+                .collect()
+        };
+        if let Some(variant) = crate::effort::pick(prompt, &variants) {
+            binding["variant"] = Value::String(variant);
+        }
+        binding
+    }
+
     fn submit(&mut self, text: String, attachments: Vec<Value>) {
         if self.accept_exit_word(&text) {
             return;
@@ -5157,15 +5210,29 @@ impl App {
         // Session has no model yet and the catalog still serves it; the engine
         // worker answers requests in order, so the pin lands before the prompt
         // is admitted.
-        let unpinned = self
+        let pin = self
             .session
             .as_ref()
-            .is_some_and(|session| session.model.is_none());
-        let binding = unpinned
-            .then_some(self.remembered_model.as_deref())
-            .flatten()
-            .and_then(|model| ModelInfo::resolve(&self.models, model))
-            .map(ModelInfo::binding);
+            .and_then(|session| session.model.clone());
+        let binding = match &pin {
+            None => self
+                .remembered_model
+                .as_deref()
+                .and_then(|model| ModelInfo::resolve(&self.models, model))
+                .map(ModelInfo::binding)
+                .map(|binding| self.effort_binding(binding, &text)),
+            // `auto_effort` writes only where the operator made no choice: a
+            // Session pinned to a variant keeps it, and one pinned to a model
+            // without a variant gets the variant this prompt asks for. The
+            // variant lives on the Session pin, so it is sent before the prompt
+            // that wants it.
+            Some(pin) if pin.variant.is_none() => {
+                let binding = self.pin_binding(pin);
+                let binding = self.effort_binding(binding, &text);
+                binding.get("variant").is_some().then_some(binding)
+            }
+            Some(_) => None,
+        };
         if let Some(binding) = binding {
             engine.select_model(&session_id, binding);
         }
@@ -5784,6 +5851,77 @@ mod tests {
                 .any(|request| matches!(request, engine::Request::SelectModel { .. })),
             "a pinned Session is not re-pinned from the remembered default"
         );
+    }
+
+    fn variant_models() -> Vec<ModelInfo> {
+        ["low", "high"]
+            .into_iter()
+            .map(|variant| ModelInfo {
+                protocol: "openai-chat".into(),
+                model: "glm-5.3-flash".into(),
+                route_id: Some("zhipuai-coding-plan/glm-5.3-flash".into()),
+                variant: Some(variant.into()),
+                provider: Some("zhipuai-coding-plan".into()),
+                account: None,
+                credential_id: None,
+            })
+            .collect()
+    }
+
+    fn pinned_session(variant: Option<&str>) -> App {
+        let mut pinned = summary("ses_effort", 1);
+        pinned.model = Some(crate::session::ModelPin {
+            protocol: "openai-chat".into(),
+            model: "glm-5.3-flash".into(),
+            route_id: Some("zhipuai-coding-plan/glm-5.3-flash".into()),
+            variant: variant.map(str::to_string),
+        });
+        let mut app = app();
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(pinned),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        app.models = variant_models();
+        app
+    }
+
+    /// `auto_effort` picks the variant the prompt asks for on a Session that
+    /// pinned a model but no variant, and the pin lands before the prompt.
+    #[test]
+    fn auto_effort_pins_the_variant_a_prompt_asks_for() {
+        let mut app = pinned_session(None);
+        app.configure_auto_effort(true);
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.submit("请重构 runtime.rs 的预算结算".into(), Vec::new());
+        let pin = control_requests(&mut requests)
+            .into_iter()
+            .find_map(|request| match request {
+                engine::Request::SelectModel { binding, .. } => Some(binding),
+                _ => None,
+            })
+            .expect("the variant is pinned before the prompt that asks for it");
+        assert_eq!(pin["variant"], "high");
+    }
+
+    /// The operator's own variant is never second-guessed, and a switch nobody
+    /// turned on pins nothing at all.
+    #[test]
+    fn auto_effort_leaves_a_pinned_variant_and_a_quiet_switch_alone() {
+        for (auto, variant) in [(true, Some("low")), (false, None)] {
+            let mut app = pinned_session(variant);
+            app.configure_auto_effort(auto);
+            let (handle, mut requests) = engine::Handle::recording();
+            app.attach_engine(handle);
+            app.submit("请重构 runtime.rs 的预算结算".into(), Vec::new());
+            assert!(
+                !control_requests(&mut requests)
+                    .into_iter()
+                    .any(|request| matches!(request, engine::Request::SelectModel { .. })),
+                "auto={auto} variant={variant:?} must not pin a model"
+            );
+        }
     }
 
     fn wheel(kind: MouseEventKind) -> AppEvent {
