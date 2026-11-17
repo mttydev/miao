@@ -11,6 +11,21 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.84] - 2026-11-17
+
+### Added
+- **script**: derive the next version, and never let a patch number reach 100 (#3149) (`a5ade67e30`)
+- **tui**: mark where a compaction cut the history (#3147) (`dfba47944a`)
+- suggest the next prompt from the Session's own route (#3144) (`7c0606e242`)
+- **tui**: pick the reasoning-effort variant a prompt asks for (#3143) (`6c562c362d`)
+- **ios**: rebuild voice input around a live recording panel (#3142) (`db68e28519`)
+
+### Fixed
+- **tui**: keep a streamed sentence in one paragraph across interleaved thinking (#3151) (`80a55cde3d`)
+- **engine**: keep automatic compaction on when a pass made progress (#3148) (`49d801938e`)
+- **ci**: drop the stale cancel-authority skip from the Windows release gate (#3145) (`5aa5f466a3`)
+- **engine**: settle tool calls a cancelled turn never ran (#3141) (`c551b5aee4`)
+
 ## [0.3.83] - 2026-11-17
 
 ### Fixed
