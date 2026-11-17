@@ -8135,72 +8135,155 @@ async fn delegate(
         .await
         .map_err(|_| ToolError::External("subagent could not be scheduled".into()))?;
 
-    if task.background {
+    // The parent turn is the scarce resource. A child can outlive it without
+    // harm — every result stays readable through task_list/task_result — so an
+    // explicit `background` returns at once and a foreground call waits only up
+    // to the threshold before the same settlement task carries on.
+    let wait = if task.background {
+        None
+    } else {
+        auto_background_after()
+    };
+    let handed_off = Arc::new(std::sync::atomic::AtomicBool::new(task.background));
+    let (settled_tx, mut settled_rx) = tokio::sync::oneshot::channel();
+    {
         let background = inner.clone();
-        let parent = parent.to_owned();
-        let run = run.to_owned();
-        let call = call.to_owned();
+        let task_parent = parent.to_owned();
+        let task_run = run.to_owned();
+        let task_call = call.to_owned();
         let watcher_child = child.clone();
+        let handed_off = handed_off.clone();
+        let settle = inner.stop.clone();
+        let admitted_seq = admission.admitted_seq;
+        let started_at_ms = start.recorded_at_ms;
         tokio::spawn(async move {
             let settled = finish_delegation(
                 &background,
-                &parent,
-                &run,
-                &call,
+                &task_parent,
+                &task_run,
+                &task_call,
                 &watcher_child,
-                admission.admitted_seq,
-                start.recorded_at_ms,
+                admitted_seq,
+                started_at_ms,
                 permit,
-                background.stop.clone(),
+                settle,
             )
             .await;
-            match settled {
-                // A child that failed will never produce the answer the parent
-                // would have read, so the parent is told the way a finished
-                // background job tells its owner. A completed child stays
-                // silent: AGT-06 pins that no input is admitted for it.
-                Ok(value) if value["report"]["status"] == json!("failed") => {
-                    let text = value["text"].as_str().unwrap_or_default().to_owned();
-                    notify_child_failure(&background, &parent, &watcher_child, &text).await;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    let text = error.to_string();
-                    let _ = background
-                        .store
-                        .record(
-                            &parent,
-                            crate::events::Lifecycle::SubagentStop.name(),
-                            json!({"run_id":run,"subagent_id":watcher_child,"call_id":call,"reason":"failed","text":text}),
-                        )
-                        .await;
-                    notify_child_failure(&background, &parent, &watcher_child, &text).await;
-                }
+            // Only a parent that already returned needs a notification; a
+            // foreground caller receives the same failure inline.
+            if handed_off.load(std::sync::atomic::Ordering::SeqCst) {
+                report_settlement(
+                    &background,
+                    &task_parent,
+                    &task_run,
+                    &task_call,
+                    &watcher_child,
+                    &settled,
+                )
+                .await;
             }
+            let _ = settled_tx.send(settled);
         });
+    }
+    if task.background {
         return Ok(
             json!({"session_id":child,"background":true,"status":"running",
                          "explore":task.explore,"forked_at":fork_at}),
         );
     }
-    let mut result = finish_delegation(
-        inner,
-        parent,
-        run,
-        call,
-        &child,
-        admission.admitted_seq,
-        start.recorded_at_ms,
-        permit,
-        cancel,
-    )
-    .await?;
+    let settled = match wait {
+        Some(limit) => match tokio::time::timeout(limit, &mut settled_rx).await {
+            Ok(settled) => settled,
+            Err(_) => {
+                handed_off.store(true, std::sync::atomic::Ordering::SeqCst);
+                // The child becomes background work here, so `task_list` and
+                // `task_result` must find it: a start row that said
+                // `background:false` is not a listing entry on its own.
+                inner
+                    .store
+                    .record(
+                        parent,
+                        "subagent_backgrounded",
+                        json!({"run_id":run,"subagent_id":child,"call_id":call,
+                               "background":true,"description":description}),
+                    )
+                    .await
+                    .map_err(|_| {
+                        ToolError::External("subagent handoff could not be recorded".into())
+                    })?;
+                // A child that settled between the timeout and this flag must
+                // not also lose its failure notice.
+                if let Ok(settled) = settled_rx.try_recv() {
+                    report_settlement(inner, parent, run, call, &child, &settled).await;
+                }
+                return Ok(
+                    json!({"session_id":child,"background":true,"auto_background":true,
+                                 "status":"running","explore":task.explore,"forked_at":fork_at}),
+                );
+            }
+        },
+        None => settled_rx.await,
+    };
+    let mut result = match settled {
+        Ok(settled) => settled?,
+        Err(_) => {
+            return Err(ToolError::External(
+                "subagent settlement channel closed".into(),
+            ))
+        }
+    };
     result["session_id"] = json!(child);
     // A side question's answer is the whole return, so the caller is told what
     // it is holding: a conclusion from a branch, not work done on its behalf.
     result["explore"] = json!(task.explore);
     result["forked_at"] = json!(fork_at);
     Ok(result)
+}
+
+/// How long a foreground `task` waits before its child becomes background
+/// work. A child that finished in that window still returns inline; one that
+/// has not keeps running and settles into its own notification.
+fn auto_background_after() -> Option<std::time::Duration> {
+    auto_background_after_ms(std::env::var("MIAO_TASK_BACKGROUND_MS").ok().as_deref())
+}
+
+fn auto_background_after_ms(raw: Option<&str>) -> Option<std::time::Duration> {
+    let ms = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(60_000);
+    (ms > 0).then(|| std::time::Duration::from_millis(ms))
+}
+
+/// Tell the parent about a child it is no longer waiting for. A completed
+/// child stays silent: AGT-06 pins that no input is admitted for it. A failed
+/// one is reported the way a finished background job reports to its owner.
+async fn report_settlement(
+    inner: &Arc<Inner>,
+    parent: &str,
+    run: &str,
+    call: &str,
+    child: &str,
+    settled: &Result<Value, ToolError>,
+) {
+    match settled {
+        Ok(value) if value["report"]["status"] == json!("failed") => {
+            let text = value["text"].as_str().unwrap_or_default().to_owned();
+            notify_child_failure(inner, parent, child, &text).await;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let text = error.to_string();
+            let _ = inner
+                .store
+                .record(
+                    parent,
+                    crate::events::Lifecycle::SubagentStop.name(),
+                    json!({"run_id":run,"subagent_id":child,"call_id":call,"reason":"failed","text":text}),
+                )
+                .await;
+            notify_child_failure(inner, parent, child, &text).await;
+        }
+    }
 }
 
 /// The boundary one delegation grants its child, resolved deterministically:
@@ -10408,5 +10491,27 @@ mod input_ceiling_tests {
     fn an_absurd_declaration_cannot_erase_the_budget() {
         assert_eq!(input_ceiling(1_000, Some(900)), 500);
         assert_eq!(input_ceiling(0, Some(10)), 0);
+    }
+}
+
+#[cfg(test)]
+mod auto_background_tests {
+    use super::*;
+
+    #[test]
+    fn a_foreground_task_hands_off_after_a_minute_and_zero_disables_it() {
+        assert_eq!(
+            auto_background_after_ms(None),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            auto_background_after_ms(Some("1500")),
+            Some(std::time::Duration::from_millis(1500))
+        );
+        assert_eq!(auto_background_after_ms(Some("0")), None);
+        assert_eq!(
+            auto_background_after_ms(Some("nonsense")),
+            Some(std::time::Duration::from_secs(60))
+        );
     }
 }
