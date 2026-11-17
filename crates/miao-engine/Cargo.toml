@@ -61,6 +61,7 @@ serde_json = "1"
 
 [dev-dependencies]
 crc32fast = "1"
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["test-util"] }
 chrono-tz = "0.10"
