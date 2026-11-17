@@ -75,11 +75,12 @@ release commit on 2026-11-03 (runs 41530268572, 41537726830) and exposed:
 
 | Test | Count | Root cause class | Evidence | Next step |
 | --- | --- | --- | --- | --- |
-| `runtime::cancel_authority_tests::*` | 8 | Host pipe-capacity / event-wait deadlines on hosted Windows (all eight share the harness) | run 41537726830, 84s single-threaded run | Debug on a Windows host (build machine `96`); give the harness explicit event deadlines |
+| `runtime::cancel_authority_tests::*` | 8 | Was read as host pipe-capacity / event-wait deadlines on hosted Windows; the harness has since met them | 2026-11-16 nightly `43872538708`: `cargo test --lib` on `windows-2025` reported **551 passed / 0 failed**, with all eight `cancel_authority_tests` named as `ok` in the log | Done — the `--skip cancel_authority_tests` came off the release gate |
 
-Only `runtime::cancel_authority_tests` is still skipped at the release gate
-(`--skip cancel_authority_tests`) so the rest of the suite still gates the
-release.
+Nothing is skipped at the release gate any more. The gate runs the whole lib
+suite single-threaded; only the integration binaries stay off Windows (the
+three rows in "tui on Windows" and the engine integration suite below are what
+that costs).
 
 `permission_source::tests::a_frozen_source_retains_durable_input_without_starting_a_provider`
 came off that list with #2903/#2915: the handoff row stored the Windows
@@ -94,8 +95,9 @@ host at 90 passed / 0 failed for `cargo test --lib permission`.
 The release-gate suite first ran against a release commit on 2026-11-03
 (runs 41530268572, 41537726830, 41541777831) and kept exposing new layers:
 
-- `runtime::cancel_authority_tests` (8) — host pipe-capacity deadlines; still
-  skipped at the gate.
+- `runtime::cancel_authority_tests` (8) — read as host pipe-capacity deadlines
+  and skipped for a while; the 2026-11-16 nightly passed them on a hosted
+  runner (551/0 for the whole lib suite), so the skip came off the gate.
 - `permission_source::a_frozen_source` — was a real product defect, not a
   timeout (#2903): the workspace was spelled with the Windows `\\?\` prefix
   while the Location used the plain form. Fixed in #2915, skip removed.
@@ -117,9 +119,10 @@ now fixed.
 
 ## tui on Windows
 
-`tui.yml` has no Windows leg (its matrix is ubuntu plus the self-hosted
-macOS host), so `crates/miao-tui` had never compiled or run on Windows when
-#2873 was filed. The two #2873 rows are fixed on `main` — #2892 made the
+`tui.yml` now carries a `tui (windows)` leg (nightly, manual dispatch and
+tags — not the pull-request path). When #2873 was filed it had none, so
+`crates/miao-tui` had never even compiled on Windows. The two #2873 rows are
+fixed on `main` — #2892 made the
 unbound-shortcut assertion platform-aware, #2902 taught the narrow-pane
 tests to read the rendered grid cell by cell — and on 2026-11-13 the whole
 crate ran on the Windows build host with the CI-parity invocation
@@ -132,7 +135,7 @@ off):
 | `client_matrix` | 3/3 — narrow-pane pair and tmux (#2902) |
 | `input_latency` / `interaction_*` ×5 / `smoke` / `startup_latency` | all green (5, 1, 1, 1, 1, 1, 27, 2) |
 | `embedded_stream` | overflow **fixed by #2947**: the trigger was a global `HTTP_PROXY` pushing the loopback fixture request through the proxy (the proxy connect loop overflowed the stack); the engine now reaches loopback directly — verified 3/3 with the proxy variables set |
-| `idle_resources` | **hangs** in `a_prolonged_stream_does_not_grow_the_process` (40+ minutes against a sub-60-second deadline); killed so the rest of the suite could run, its other tests unmeasured |
+| `idle_resources` | **fixed by #2983**: the fixture sampled the process with `ps` / `/proc/<pid>/fd` / `lsof` / `pgrep`, all POSIX-only, and hung 40+ minutes inside the ConPTY startup. The file is now gated to non-Windows and compiles to zero tests there; re-enable when a Windows sampler exists |
 
 Two compile notes from the same host: `rustc` 1.98.1 on Windows ICEs
 ("no resolution for an import", delayed at `rustc_ast_lowering`) when
@@ -141,10 +144,10 @@ target compiles clean with `CARGO_INCREMENTAL=0`. And the debug tree with
 the codegraph grammar set is large enough that a C:-drive target directory
 ran out of space mid-build twice — build it against a roomier volume.
 
-One failure remains (the `idle_resources` hang — an event wait that never
-fires on ConPTY), and it is why the crate still has no Windows CI leg:
-adding one today would add a red job, not a gate. Fix the hang first; then
-a Windows leg becomes worth its runner minutes.
+The hang that used to keep the crate off Windows is gone (#2983), and the
+`tui (windows)` leg has been green on the nightly since. The window-runtime
+and engine integration suites are what still keep the Windows jobs
+non-blocking.
 
 
 ### e2e (windows)
