@@ -5039,6 +5039,11 @@ command: None,
                     .ok_or_else(|| Error::Invalid("tool name".into()))?;
                 let effective_name = inner.tools.effective_name(name, &block["input"]);
                 if cancel.is_cancelled() && !reads.contains_key(id) {
+                    // The assistant message is already committed, so a call
+                    // this turn never dispatched would stay unpaired in history
+                    // and fail strict providers on the next request. Settle
+                    // what is missing with an answer the model can act on.
+                    settle_unexecuted(inner, session, run, &reply.content, lease).await?;
                     return Ok(());
                 }
                 if block["input_error"] == "invalid_json" {
@@ -8333,6 +8338,53 @@ async fn report_settlement(
 /// then the host default fills in at the child's run. Every explicit grant is
 /// capped by what the delegating turn still has left, so a child can never be
 /// granted more than its delegator may still spend.
+/// Settle every `tool_use` in a reply that has no result yet. A turn that stops
+/// between committing the assistant message and dispatching its calls would
+/// otherwise leave an unpaired call in history, which strict providers reject
+/// on the next request.
+async fn settle_unexecuted(
+    inner: &Arc<Inner>,
+    session: &str,
+    run: &str,
+    content: &Value,
+    lease: &crate::store::SessionLease,
+) -> Result<(), Error> {
+    for block in content.as_array().into_iter().flatten() {
+        if block["type"] != "tool_use" {
+            continue;
+        }
+        let Some(id) = block["id"].as_str() else {
+            continue;
+        };
+        if inner.store.tool_result_exists(session, id).await? {
+            continue;
+        }
+        let name = block["name"].as_str().unwrap_or("tool");
+        inner
+            .store
+            .tool_result_unexecuted_fenced(
+                session,
+                id,
+                json!({
+                    "error": format!(
+                        "Tool '{name}' was not executed: the turn stopped before it ran. Call it again if it is still needed."
+                    )
+                }),
+                lease,
+            )
+            .await?;
+        inner
+            .store
+            .record(
+                session,
+                "tool.unexecuted",
+                json!({"run_id":run,"call_id":id,"tool":name}),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 async fn delegation_boundary(
     inner: &Arc<Inner>,
     parent: &str,
@@ -10573,5 +10625,110 @@ mod auto_background_tests {
             auto_background_after_ms(Some("nonsense")),
             Some(std::time::Duration::from_secs(60))
         );
+    }
+}
+
+#[cfg(test)]
+mod unexecuted_tool_tests {
+    use super::*;
+    use crate::provider::{Provider, ProviderError, Reply};
+    use crate::tools::Tools;
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    struct NoProvider;
+
+    #[async_trait]
+    impl Provider for NoProvider {
+        async fn stream(
+            &self,
+            _: crate::protocol::ModelRequest,
+            _: mpsc::Sender<Value>,
+            _: CancellationToken,
+        ) -> Result<Reply, ProviderError> {
+            Err(ProviderError::Interrupted)
+        }
+    }
+
+    async fn harness() -> (
+        Runtime,
+        crate::store::Store,
+        crate::store::SessionLease,
+        std::path::PathBuf,
+    ) {
+        let dir = std::env::temp_dir().join(format!("miao-unexecuted-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::store::Store::open(dir.join("engine.db"))
+            .await
+            .unwrap();
+        store.ensure("s").await.unwrap();
+        let runtime = Runtime::new(
+            store.clone(),
+            Arc::new(NoProvider),
+            Tools::new(&dir).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        let lease = store.claim_session("s", 30_000).await.unwrap();
+        (runtime, store, lease, dir)
+    }
+
+    #[tokio::test]
+    async fn a_call_without_a_result_gets_an_actionable_one() {
+        let (runtime, store, lease, dir) = harness().await;
+        let content = json!([
+            {"type":"tool_use","id":"a","name":"bash","input":{}},
+            {"type":"tool_use","id":"b","name":"read_file","input":{}}
+        ]);
+        settle_unexecuted(&runtime.inner, "s", "run", &content, &lease)
+            .await
+            .unwrap();
+        assert!(store.tool_result_exists("s", "a").await.unwrap());
+        assert!(store.tool_result_exists("s", "b").await.unwrap());
+        let history = store.history("s").await.unwrap();
+        let results: Vec<&Value> = history
+            .iter()
+            .flat_map(|message| message.content.as_array().into_iter().flatten())
+            .filter(|part| part["type"] == "tool_result")
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|part| part["content"].to_string().contains("not executed")));
+        let events = store.events("s", 0, 500).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "tool.unexecuted")
+                .count(),
+            2
+        );
+        runtime.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_existing_result_is_not_settled_again() {
+        let (runtime, store, lease, dir) = harness().await;
+        let content = json!([{"type":"tool_use","id":"a","name":"bash","input":{}}]);
+        settle_unexecuted(&runtime.inner, "s", "run", &content, &lease)
+            .await
+            .unwrap();
+        let count = |events: &[crate::protocol::Event]| {
+            events
+                .iter()
+                .filter(|event| event.kind == "tool.unexecuted")
+                .count()
+        };
+        let first = count(&store.events("s", 0, 500).await.unwrap());
+        settle_unexecuted(&runtime.inner, "s", "run", &content, &lease)
+            .await
+            .unwrap();
+        let second = count(&store.events("s", 0, 500).await.unwrap());
+        assert_eq!(first, 1);
+        assert_eq!(second, 1, "an existing result is left alone");
+        runtime.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
