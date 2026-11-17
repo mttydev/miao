@@ -2608,6 +2608,7 @@ dependencies = [
  "two-face",
  "unicode-segmentation",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]
