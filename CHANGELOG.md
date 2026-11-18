@@ -11,6 +11,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.86] - 2026-11-18
+
+### Added
+- **tui**: name the busy subagents in the composer strip (#3159) (`5a7e7fe503`)
+- **tui**: list the Session's delegated children while they work (#3158) (`a9be11fac6`)
+
 ## [0.3.85] - 2026-11-18
 
 ### Added
