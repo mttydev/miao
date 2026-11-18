@@ -2913,6 +2913,63 @@ impl Runtime {
             .await
     }
 
+    /// Raise the turns a Goal's own budget allows (operator authority).
+    ///
+    /// The Goal is the model's promise, but its bound is the operator's to
+    /// lift: a spent Goal budget stops every drain before its first provider
+    /// turn, so the `goal` tool that could rewrite it is unreachable and the
+    /// stop's own advice ("raise the budget and send a message") had no
+    /// surface. A new Goal revision reopens its accounting window
+    /// (`Budgets::refresh` keys on the revision), so the inputs already waiting
+    /// in the durable inbox resume instead of stopping again.
+    pub async fn raise_goal_budget(&self, session: &str, turns: u64) -> Result<Value, Error> {
+        if self.inner.stop.is_cancelled() {
+            return Err(Error::Closed);
+        }
+        if turns == 0 || turns > crate::budget::TURN_CEILING {
+            return Err(Error::Invalid(format!(
+                "goal turns must be between 1 and {}",
+                crate::budget::TURN_CEILING
+            )));
+        }
+        if !same_location(
+            self.inner.store.location(session).await?.as_deref(),
+            self.inner.tools.location(),
+        ) {
+            return Err(Error::Conflict);
+        }
+        let state = self.inner.store.state(session).await?;
+        let goal = &state["goal"]["value"];
+        if goal.is_null() {
+            return Err(Error::Invalid(
+                "this Session records no Goal to budget".into(),
+            ));
+        }
+        // Everything except the turn bound is the model's record; the operator
+        // lifts one bound instead of restating the Goal.
+        let mut value = json!({"objective": goal["objective"], "status": goal["status"]});
+        for field in ["evidence", "stop_when", "autonomous"] {
+            if !goal[field].is_null() {
+                value[field] = goal[field].clone();
+            }
+        }
+        let mut budget = goal["budget"].as_object().cloned().unwrap_or_default();
+        budget.insert("iterations".into(), json!(turns));
+        value["budget"] = Value::Object(budget);
+        let written = self
+            .inner
+            .store
+            .update_state(
+                session,
+                &format!("operator:goal-budget:{}", crate::approval::now_ms()),
+                crate::state::Mutation::parse("goal", value)
+                    .map_err(|error| Error::Invalid(error.to_string()))?,
+            )
+            .await?;
+        self.wake_pending(session).await?;
+        Ok(written)
+    }
+
     pub async fn resolve_recovery(
         &self,
         session: &str,

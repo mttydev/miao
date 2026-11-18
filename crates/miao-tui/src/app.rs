@@ -2008,6 +2008,7 @@ impl App {
             Builtin::Recall => {
                 self.notice("/recall <tool_use_id> restores an archived tool output")
             }
+            Builtin::Goal => self.notice("/goal budget <turns> raises this Session's Goal budget"),
             Builtin::TurnTimings => self.open_turn_timings(),
             Builtin::Tag => match self.session.as_ref() {
                 Some(session) => self.open_dialog(Dialog::tag(&session.id, "")),
@@ -5333,6 +5334,20 @@ impl App {
         // template is rendered and admitted with its command reference; any
         // other slash text is a plain prompt, like the TS composer.
         if let Some((name, arguments)) = commands::split(&text) {
+            if Builtin::from_name(&name) == Some(Builtin::Goal) {
+                // A spent Goal budget stops every drain before its first
+                // provider turn, so the tool that could rewrite it is
+                // unreachable; this is the operator's way to lift the bound and
+                // let the inputs already in the durable inbox continue.
+                let Some(turns) = commands::goal_budget(&arguments) else {
+                    self.shell.composer.restore_with(&text, attachments);
+                    self.shell.composer.notice =
+                        Some("/goal budget <turns> raises this Session's Goal budget".to_string());
+                    return;
+                };
+                engine.goal_budget(&session_id, turns);
+                return;
+            }
             if Builtin::from_name(&name) == Some(Builtin::Tag) {
                 // An argument sets the label straight away; a bare /tag opens
                 // the dialog, which is also how an operator clears it.

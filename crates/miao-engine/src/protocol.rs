@@ -455,6 +455,18 @@ pub enum Command {
     Recap {
         session_id: String,
     },
+    /// Raise the turns a Goal's own budget allows (operator authority).
+    ///
+    /// A Goal is recorded by a tool, so its budget has one writer: a provider
+    /// turn. A spent Goal budget stops the drain before that turn exists, which
+    /// left the advice a budget stop carries ("raise the budget and send a
+    /// message") without a surface. Writing a new Goal revision reopens its
+    /// accounting window; the objective, status, evidence, stop-when list and
+    /// every other budget axis stay as the model recorded them.
+    GoalBudget {
+        session_id: String,
+        turns: u64,
+    },
     /// Apply a host-resolved agent manifest to this Session's subsequent
     /// provider turns (ADR-0017). Resolution stays with the host; the engine
     /// records the manifest and applies it at the turn boundary.
