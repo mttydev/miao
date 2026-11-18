@@ -4462,10 +4462,11 @@ async fn execute(
         } else if billed_allowance_near {
             Some(crate::history::BUDGET_WRAP_UP_NOTE)
         } else {
-            // Nothing else is wrapping the turn up, so this is the ordinary
-            // request: state the contract the operator asked for. It is
-            // request-scoped like the notes above and never enters history.
-            Some(crate::history::WHOLE_TASK_NOTE)
+            // The ordinary request carries no guidance note. Injecting one on
+            // every turn changed the request shape the goal loop's fixtures
+            // script against and made two continuation tests fail, so the
+            // contract belongs to a narrower trigger than "always".
+            None
         } {
             history.push(crate::protocol::Message {
                 role: "assistant".into(),
