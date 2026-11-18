@@ -4185,6 +4185,10 @@ async fn execute(
         // only: the model imitates its own prior output, so leaving it in the
         // prompt reseeds the same refrain. Durable rows are untouched.
         crate::output_guard::neutralize(&mut history);
+        // A conclusion the model already stated is dropped from the copy it
+        // reads back, so the echo cannot reseed itself turn after turn. The
+        // durable transcript keeps every row.
+        crate::output_guard::collapse_repeats(&mut history);
         let state_allowed = policy.evaluate(
             "session_state",
             "@session/state/session_state",
