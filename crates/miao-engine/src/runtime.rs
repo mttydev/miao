@@ -3829,6 +3829,10 @@ async fn execute(
     let mut empty_completions = 0;
     // Consecutive failed completion checks for the configured verification.
     let mut verification_failures = 0;
+    // One continuation, then a classified stop: an active goal forbids a
+    // text-only end, but a model that will not deliver must park visibly
+    // instead of being re-prompted forever.
+    let mut goal_open_continuations = 0;
     let mut repeats = HashMap::<String, u32>::new();
     // Per-run count of calls refused because their input already spent
     // MAX_IDENTICAL_TOOL_CALLS. Scoped to the run so a new prompt starts clean.
@@ -6476,6 +6480,15 @@ command: None,
         // budget turns a persistent failure into a classified closure.
         if !reply.needs_tools && !text_only && promoted.is_empty() && !goal_stopped_this_turn {
             let command = inner.verification.lock().await.clone();
+            // Read once, at the boundary that decides whether this turn may end:
+            // the goal's own record is the only authority on whether the
+            // operator's outcome is still open.
+            let goal_live = inner.store.state(session).await?;
+            let goal_active = goal_live["goal"]["status"] == "active";
+            let goal_objective = goal_live["goal"]["objective"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             if let Some(command) = command {
                 // The configured value is a command line, so the check runs
                 // through the platform shell inside the sandbox: cmd on
@@ -6591,6 +6604,48 @@ command: None,
                         )
                         .await?;
                 }
+            } else if goal_active && goal_open_continuations == 0 {
+                // The operator asked for an outcome and the goal is still
+                // active: a text-only turn is not the end of it. This is the
+                // reported "it listed the work, then stopped" case, and it is
+                // bounded exactly like the verification check above — one
+                // continuation, then a classified stop — so a model that will
+                // not deliver parks visibly instead of being re-prompted.
+                goal_open_continuations += 1;
+                let input_id = format!("goal-open:{run}:1");
+                let admission = inner
+                    .store
+                    .admit(Input {
+                        agent_references: Default::default(),
+                        command: None,
+                        session_id: session.into(),
+                        input_id: input_id.clone(),
+                        prompt: format!(
+                            "The goal is still active, so this turn is not the end. Deliver the remaining work with tools now, or mark the goal done with the evidence that proves it, or blocked with the external dependency that stops it. \"Too large to do at once\" is not a block. Goal: {goal_objective}"
+                        ),
+                        delivery: crate::protocol::Delivery::Steer,
+                    })
+                    .await?;
+                internal_inputs.insert(input_id);
+                inner
+                    .store
+                    .record(
+                        session,
+                        "loop.continuation",
+                        json!({"run_id":run,"admitted_seq":admission.admitted_seq,"reason":"goal-open"}),
+                    )
+                    .await?;
+                promoted = inner.store.promote_fenced(session, true, lease).await?;
+                record_promotions(inner, session, run, &promoted, lease).await?;
+            } else if goal_active {
+                inner
+                    .store
+                    .record(
+                        session,
+                        "loop.stopped",
+                        json!({"run_id":run,"reason":"goal-open"}),
+                    )
+                    .await?;
             }
         }
         // A text-only turn ends the drain even if the reply still names tools:
