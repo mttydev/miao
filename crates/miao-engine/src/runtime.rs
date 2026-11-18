@@ -4422,6 +4422,9 @@ async fn execute(
         // Window and occupancy: the usage events and the pause note read these, so
         // they stay even though nothing announces the level any more.
         let mut pressure = None;
+        // Set when a request had to be bounded and the operator configured no
+        // pruning: (payload chars, total chars, protected turns).
+        let mut prune = None;
         // The token count at which the compaction trigger would run. A pause that
         // spends a billing allowance prints it beside the window's own figures, so
         // that tally cannot be read as context occupancy (#2870).
@@ -4442,6 +4445,11 @@ async fn execute(
                 };
                 pressure = counted.map(|counted| (limits.window, counted));
                 compaction_threshold = Some(limits.budget().threshold()).filter(|at| *at > 0);
+                prune = limits.prune_chars.is_none().then_some((
+                    crate::context_trigger::DEFAULT_PRUNE_CHARS,
+                    crate::context_trigger::DEFAULT_PRUNE_TOTAL_CHARS,
+                    limits.protect_turns,
+                ));
                 // A trim is not a one-off. It bounds the request this step
                 // sends, but the durable history it hid is rebuilt for the next
                 // step, and the provider's count of that trimmed request then
@@ -4464,6 +4472,33 @@ async fn execute(
             None => None,
         };
         if let Some((window, target)) = bound {
+            // Elide old tool output first: it is the cheapest way back under the
+            // window, and a request that did not fit is the only place this
+            // runs, so a fitting Session keeps its cache prefix intact.
+            if let Some((chars, total, protect)) = prune {
+                let pruned = crate::context_trigger::prune_history_with_stats(
+                    &mut history,
+                    chars,
+                    protect,
+                    Some(total),
+                );
+                if pruned.payloads > 0 {
+                    inner
+                        .store
+                        .record_fenced(
+                            session,
+                            "context.pruned",
+                            json!({
+                                "run_id": run, "step": step, "context_epoch": context_epoch,
+                                "reason": "request_window", "payloads": pruned.payloads,
+                                "before_bytes": pruned.before_bytes,
+                                "after_bytes": pruned.after_bytes,
+                            }),
+                            lease,
+                        )
+                        .await?;
+                }
+            }
             let stats = crate::context_trigger::trim_history_to_fit(&mut history, target);
             if stats.messages > 0 {
                 let saved = stats.before_bytes.saturating_sub(stats.after_bytes);
