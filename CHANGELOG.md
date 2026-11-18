@@ -11,6 +11,20 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.89] - 2026-11-18
+
+### Added
+- **engine**: a blocked goal must name something the model cannot change (#3175) (`9a574f0905`)
+
+### Fixed
+- **tui**: say a long wait is still inside the provider window (#3173) (`4703056cc2`)
+- **engine**: stop feeding a repeated conclusion back to the model (#3172) (`5ef1e562ec`)
+- **tui**: say when the checklist is finished, not current (#3171) (`bf805773fb`)
+- **tui**: show why a drain stopped instead of looking idle (#3170) (`b9a3a896cf`)
+
+### Performance
+- **engine**: trim context to below the budget, not to its boundary (#3174) (`0a1ca0bcd9`)
+
 ## [0.3.88] - 2026-11-18
 
 ### Added
