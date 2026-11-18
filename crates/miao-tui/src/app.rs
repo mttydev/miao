@@ -71,6 +71,12 @@ const USAGE_REFRESH: Duration = Duration::from_secs(5);
 /// A Sessions dialog left open reads live state as the agent view; the
 /// catalog re-ask is throttled to this cadence while frames keep flowing.
 const AGENT_VIEW_REFRESH: Duration = Duration::from_secs(2);
+/// How often a busy delegated child is re-read. The child answers on its own
+/// Session, so this read is the only thing that moves its row.
+const SUBAGENT_POLL: Duration = Duration::from_secs(2);
+/// How often a running turn looks for a delegation it has not seen yet. A turn
+/// that never delegates must not cost a read every couple of seconds.
+const SUBAGENT_DISCOVER: Duration = Duration::from_secs(10);
 
 /// Whether the sidebar's usage report is worth asking for.
 fn usage_due(force: bool, last_requested: Option<Instant>) -> bool {
@@ -513,6 +519,13 @@ pub struct App {
     /// The installed build's version when it is newer than this one, so the
     /// strip can say an upgrade is waiting for a restart.
     pending_update: Option<String>,
+    /// The open Session's delegated children. A child works on a Session of its
+    /// own, so nothing the parent receives mentions its progress: these rows
+    /// are re-read while any child is busy.
+    subagents: Vec<crate::event::SubagentRow>,
+    /// When the next child read is due. `None` means nothing is delegated or
+    /// nothing is working, and the loop may wait for events alone.
+    subagent_poll: Option<Instant>,
     dialog: Option<Dialog>,
     permission_generation: u64,
     workspace_changes_generation: u64,
@@ -773,6 +786,8 @@ impl App {
             // walking the prompt's history. Tab hands the keys to the prompt.
             named_sessions: std::collections::HashSet::new(),
             pending_update: None,
+            subagents: Vec::new(),
+            subagent_poll: None,
             older: None,
             older_loading: false,
             dialog: None,
@@ -1302,6 +1317,14 @@ impl App {
             // than on a placeholder that never fills.
             AppEvent::Jobs(rows) => {
                 self.open_dialog(Dialog::jobs(&rows));
+            }
+            // The child list is read for the sidebar rather than for a dialog:
+            // it stays on screen while the delegation runs, and re-reads
+            // itself until every child has stopped.
+            AppEvent::Subagents(rows) => {
+                self.shell.set_subagents(&rows);
+                self.subagents = rows;
+                self.schedule_subagent_poll();
             }
             AppEvent::Worktrees(trees) => {
                 self.open_dialog(Dialog::worktrees(&trees));
@@ -4613,6 +4636,55 @@ impl App {
         self.screen == Screen::Session && self.state.active_run.is_some()
     }
 
+    /// One read of the Session's delegated children, when one is due.
+    ///
+    /// A child works on a Session of its own, so nothing the parent receives
+    /// mentions its progress: a sidebar left to the parent's events shows one
+    /// stale row set for the whole delegation. A working child is re-read every
+    /// couple of seconds; a running turn looks for a delegation it has not seen
+    /// yet far less often, and an idle Session with nothing delegated asks the
+    /// engine nothing at all.
+    pub fn tick(&mut self) {
+        if self.screen != Screen::Session {
+            return;
+        }
+        let working = self.subagents.iter().any(|row| row.busy);
+        let interval = match working {
+            true => SUBAGENT_POLL,
+            false => SUBAGENT_DISCOVER,
+        };
+        let due = self.subagent_poll.is_some_and(|at| Instant::now() >= at);
+        let wants = working || self.busy();
+        if !due || !wants {
+            return;
+        }
+        let Some(session_id) = self.session_id() else {
+            return;
+        };
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        engine.subagents(&session_id);
+        self.subagent_poll = Some(Instant::now() + interval);
+    }
+
+    /// The next read, decided by what the last answer showed: a working child
+    /// keeps the block on the fast interval, and a turn that delegated nothing
+    /// yet keeps looking at the slow one.
+    fn schedule_subagent_poll(&mut self) {
+        let working = self.subagents.iter().any(|row| row.busy);
+        self.subagent_poll = match working || self.busy() {
+            true => Some(
+                Instant::now()
+                    + match working {
+                        true => SUBAGENT_POLL,
+                        false => SUBAGENT_DISCOVER,
+                    },
+            ),
+            false => None,
+        };
+    }
+
     /// How long the painted relative timestamps stay true, so an idle TUI wakes
     /// when a label would actually change instead of once a minute. `None` means
     /// nothing on screen is time-relative, so the loop may wait for events alone.
@@ -4649,10 +4721,20 @@ impl App {
         let notice = self
             .notice_until
             .map(|until| until.saturating_duration_since(Instant::now()));
-        match (label, notice) {
+        let wait = match (label, notice) {
             (Some(label), Some(notice)) => Some(label.min(notice)),
             (label, notice) => label.or(notice),
-        }
+        };
+        // A delegated child that is still working keeps this clock: its elapsed
+        // row must tick, and the next read must happen even while the parent
+        // turn is over and nothing else on the screen changes.
+        let Some(due) = self.subagent_poll else {
+            return wait;
+        };
+        let poll = due
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(1));
+        Some(wait.map_or(poll, |wait| wait.min(poll)))
     }
 
     fn update_status(&mut self) {
@@ -5864,6 +5946,32 @@ mod tests {
         assert!(
             first < thought && thought < second,
             "the thought stays between the two paragraphs: {painted:?}"
+        );
+    }
+
+    /// A child works on a Session of its own, so the child read is the only
+    /// thing that moves a delegation's row. A busy child must keep the loop
+    /// waking for its elapsed row, and a finished list must let it rest.
+    #[test]
+    fn a_busy_child_keeps_the_clock_and_an_idle_list_lets_it_rest() {
+        let mut app = session_app();
+        assert_eq!(app.next_repaint(), None, "an idle screen waits on events");
+        app.handle(AppEvent::Subagents(vec![crate::event::SubagentRow {
+            id: "ses_18e8dcf8".into(),
+            title: "handbook".into(),
+            busy: true,
+            started_at_ms: Some(crate::pane::now_ms()),
+            messages: 1,
+        }]));
+        assert!(
+            app.next_repaint().is_some(),
+            "a working child keeps the loop waking for its elapsed row"
+        );
+        app.handle(AppEvent::Subagents(Vec::new()));
+        assert_eq!(
+            app.next_repaint(),
+            None,
+            "with nothing delegated the loop may wait for events again"
         );
     }
 

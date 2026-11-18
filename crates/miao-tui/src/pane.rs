@@ -111,6 +111,7 @@ impl Shell {
             leader_hint: None,
             sidebar: Some(SidebarPane {
                 hover_rows: Vec::new(),
+                subagents: Vec::new(),
                 changes: None,
                 mode: None,
                 theme,
@@ -534,6 +535,13 @@ impl Shell {
     pub fn set_usage_hourly(&mut self, usage: Option<&crate::status::HourlyUsage>) {
         if let Some(sidebar) = self.sidebar.as_mut() {
             sidebar.usage_hourly = usage.cloned();
+        }
+    }
+
+    /// The Session's delegated children, for the sidebar's subagent block.
+    pub fn set_subagents(&mut self, rows: &[crate::event::SubagentRow]) {
+        if let Some(sidebar) = self.sidebar.as_mut() {
+            sidebar.subagents = rows.to_vec();
         }
     }
 
@@ -3624,6 +3632,10 @@ pub struct SidebarPane {
     /// because the checklist is what changes every turn and a plan is not.
     plan: Option<crate::session::PlanView>,
     todos: Vec<crate::session::TodoView>,
+    /// The Session's delegated children, refreshed while any is working. The
+    /// usage totals only count a delegation after the fact; these rows are what
+    /// say which child is still running and for how long.
+    subagents: Vec<crate::event::SubagentRow>,
     /// The chord that hides this column, resolved from the live keymap. Pinned
     /// to the column's last row so a long checklist cannot scroll it away.
     chord: Option<String>,
@@ -3976,6 +3988,50 @@ impl Pane for SidebarPane {
                             Style::new().fg(palette.text_muted),
                             text_width,
                         );
+                    }
+                }
+            }
+            // Delegated children are Sessions of their own: the usage totals
+            // only count their spend after the fact, so this list is what says
+            // which child is still working and how long it has been at it.
+            if !self.subagents.is_empty() {
+                let running = self.subagents.iter().filter(|row| row.busy).count();
+                let width = inner.width.saturating_sub(2);
+                lines.push(Line::default());
+                lines.push(section_header(
+                    &match running {
+                        0 => format!("SUBAGENTS {}", self.subagents.len()),
+                        _ => format!("SUBAGENTS · {running} running"),
+                    },
+                    &palette,
+                ));
+                let now = crate::pane::now_ms();
+                for row in &self.subagents {
+                    let name: String = row.id.chars().take(12).collect();
+                    let mut facts = Vec::new();
+                    match row.busy {
+                        true => {
+                            if let Some(started) = row.started_at_ms {
+                                facts.push(duration_ms(now.saturating_sub(started)));
+                            }
+                        }
+                        false => facts.push("idle".to_string()),
+                    }
+                    if row.messages > 0 {
+                        facts.push(format!("{} msg{}", row.messages, plural(row.messages)));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        clip_cells(&format!("{name} · {}", facts.join(" · ")), 0, width),
+                        Style::new().fg(match row.busy {
+                            true => palette.text,
+                            false => palette.text_muted,
+                        }),
+                    )));
+                    if !row.title.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            clip_cells(&row.title, 0, width),
+                            Style::new().fg(palette.text_muted),
+                        )));
                     }
                 }
             }
@@ -8175,6 +8231,7 @@ mod tests {
     fn a_hover_tip_answers_only_inside_the_sidebar_column() {
         let mut sidebar = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -8257,6 +8314,7 @@ mod tests {
         };
         let mut sidebar = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -8384,6 +8442,7 @@ mod tests {
         };
         let mut sidebar = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -8460,6 +8519,7 @@ mod tests {
 
         let mut sidebar = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -8789,6 +8849,7 @@ mod tests {
         fn sidebar(usage: crate::status::UsageSummary) -> SidebarPane {
             SidebarPane {
                 hover_rows: Vec::new(),
+                subagents: Vec::new(),
                 changes: None,
                 mode: None,
                 theme: home_theme(),
@@ -8894,6 +8955,7 @@ mod tests {
         }));
         let mut pane = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -8920,6 +8982,75 @@ mod tests {
         assert!(!rework.contains("0 attempt"), "{rework:?}");
     }
 
+    /// A delegated child works on a Session of its own, so the usage totals say
+    /// only that a delegation exists. This block is what names each child, how
+    /// long it has been running, and what it has produced.
+    #[test]
+    fn a_delegated_child_is_listed_with_its_state_and_activity() {
+        let mut pane = SidebarPane {
+            hover_rows: Vec::new(),
+            subagents: vec![
+                crate::event::SubagentRow {
+                    id: "ses_18e8dcf8b719".into(),
+                    title: "handbook 11 个操作".into(),
+                    busy: true,
+                    started_at_ms: Some(crate::pane::now_ms().saturating_sub(252_000)),
+                    messages: 12,
+                },
+                crate::event::SubagentRow {
+                    id: "ses_f4e7c475".into(),
+                    title: "blackbox 4 个操作".into(),
+                    busy: false,
+                    started_at_ms: None,
+                    messages: 3,
+                },
+            ],
+            changes: None,
+            mode: None,
+            theme: home_theme(),
+            session: Some(home_row("ses_a", "delegation", None)),
+            usage: None,
+            usage_hourly: None,
+            quota: None,
+            goal: None,
+            plan: None,
+            todos: Vec::new(),
+            chord: None,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
+        terminal
+            .draw(|frame| pane.render(frame, frame.area()))
+            .expect("draw");
+        let painted: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(60)
+            .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect();
+        let header = painted
+            .iter()
+            .find(|row| row.contains("SUBAGENTS"))
+            .expect("the delegated children have their own block");
+        assert!(header.contains("1 running"), "{header:?}");
+        let running = painted
+            .iter()
+            .find(|row| row.contains("ses_18e8dcf8"))
+            .expect("the running child is named");
+        assert!(running.contains("4m"), "{running:?}");
+        assert!(running.contains("12 msgs"), "{running:?}");
+        assert!(
+            painted.iter().any(|row| row.contains("handbook")),
+            "{painted:#?}"
+        );
+        let idle = painted
+            .iter()
+            .find(|row| row.contains("ses_f4e7c475"))
+            .expect("the finished child stays listed");
+        assert!(idle.contains("idle"), "{idle:?}");
+    }
+
     /// #2737: the billed-usage column is two scopes, and the rows inside the
     /// session scope read abnormal-first. Both facts have to survive at the
     /// sidebar's own width without colour, so the test reads the painted rows
@@ -8944,6 +9075,7 @@ mod tests {
         }));
         let mut pane = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -9010,6 +9142,7 @@ mod tests {
         }));
         let mut sidebar = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -9052,6 +9185,7 @@ mod tests {
     fn a_long_cjk_sidebar_stays_on_one_row_per_line() {
         let mut sidebar = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: None,
             mode: None,
             theme: home_theme(),
@@ -9118,6 +9252,7 @@ mod tests {
     fn every_section_header_opens_after_a_blank_row() {
         let mut sidebar = SidebarPane {
             hover_rows: Vec::new(),
+            subagents: Vec::new(),
             changes: Some((2, 10, 4)),
             mode: Some("build".into()),
             theme: home_theme(),

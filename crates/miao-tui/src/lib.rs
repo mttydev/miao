@@ -298,7 +298,9 @@ async fn drive(
         };
         tokio::select! {
             _ = termination.next() => return Ok(()),
-            _ = repaint => {}
+            // The clock woke the loop: the app may owe the engine a read (a
+            // delegated child's progress, which arrives on no event of ours).
+            _ = repaint => app.tick(),
             _ = update_check.tick() => {
                 let bus = bus.clone();
                 tokio::task::spawn_blocking(move || {

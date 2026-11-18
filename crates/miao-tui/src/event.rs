@@ -22,6 +22,25 @@ pub struct JobRow {
     pub subagent: bool,
 }
 
+/// One delegated child Session, as the sidebar lists it.
+///
+/// A child answers on its own Session, so the parent's usage totals only say a
+/// delegation exists. These rows carry what makes it readable: whether the
+/// child is still working, when its run started, and how many messages it has
+/// produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentRow {
+    /// The child Session's id, the name the `task` tool answered with.
+    pub id: String,
+    /// The child's title: what it was asked to do.
+    pub title: String,
+    pub busy: bool,
+    /// When the child's current run started, so the row's elapsed time needs no
+    /// second read.
+    pub started_at_ms: Option<u64>,
+    pub messages: u64,
+}
+
 #[derive(Debug)]
 pub enum AppEvent {
     Key(KeyEvent),
@@ -110,6 +129,8 @@ pub enum AppEvent {
     /// Background jobs of the open Session, newest first, each row naming the
     /// Session that owns it; the Session's subagent runs follow the jobs.
     Jobs(Vec<JobRow>),
+    /// The open Session's delegated children, refreshed while any is busy.
+    Subagents(Vec<SubagentRow>),
     /// The git worktrees of the checkout the open Session works in, the
     /// checkout itself first.
     Worktrees(Vec<crate::worktrees::Worktree>),

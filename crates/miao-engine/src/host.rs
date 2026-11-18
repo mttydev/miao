@@ -814,6 +814,11 @@ impl Host {
 /// row each, named the way the jobs rows are so one list shape serves both. A
 /// child is another Session, so its row stays read-only in the dialog — the
 /// stop commands name jobs, never children.
+///
+/// The row carries the child's latest run and its activity, not only its name:
+/// a client that lists delegated work wants to say how long it has been going
+/// and how much it has produced, and reading that per child would cost one
+/// round trip each.
 fn subagent_rows(children: &Value) -> Vec<Value> {
     children
         .get("children")
@@ -827,6 +832,9 @@ fn subagent_rows(children: &Value) -> Vec<Value> {
                         "session_id": children.get("session_id"),
                         "status": row.get("status"),
                         "description": row.get("title"),
+                        "run": row.get("run"),
+                        "updated_at_ms": row.get("updated_at_ms"),
+                        "message_count": row.get("message_count"),
                     }))
                 })
                 .collect()
@@ -847,6 +855,33 @@ fn parse_export(raw: Option<&str>) -> Value {
 mod export_tests {
     use super::parse_export;
     use serde_json::json;
+
+    /// A `jobs` answer's subagent row carries the child's latest run and its
+    /// activity, not only its name: a client lists delegated work by elapsed
+    /// time and message count without one more read per child.
+    #[test]
+    fn a_subagent_row_carries_its_run_and_activity() {
+        let children = json!({
+            "session_id": "ses_parent",
+            "children": [{
+                "session_id": "ses_child",
+                "title": "handbook 11 个操作",
+                "status": "busy",
+                "updated_at_ms": 2000,
+                "message_count": 12,
+                "run": {"id": "run-1", "state": "running", "started_at_ms": 1000},
+            }],
+        });
+        let rows = super::subagent_rows(&children);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["id"], "ses_child");
+        assert_eq!(row["status"], "busy");
+        assert_eq!(row["description"], "handbook 11 个操作");
+        assert_eq!(row["run"]["started_at_ms"], 1000);
+        assert_eq!(row["updated_at_ms"], 2000);
+        assert_eq!(row["message_count"], 12);
+    }
 
     #[test]
     fn the_host_export_is_served_verbatim() {

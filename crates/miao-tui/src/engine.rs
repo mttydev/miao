@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::dialogs::{AccountInfo, ModelInfo};
-use crate::event::{AppEvent, Bus, JobRow};
+use crate::event::{AppEvent, Bus, JobRow, SubagentRow};
 
 use crate::platform::attention;
 use crate::session::{
@@ -183,6 +183,10 @@ pub enum Request {
     /// The host's remote-control devices, served by the engine (TUI-10).
     Devices,
     Jobs {
+        session_id: String,
+    },
+    /// The Session's delegated children, for the sidebar's subagent block.
+    Subagents {
         session_id: String,
     },
     CancelJob {
@@ -527,6 +531,13 @@ impl Handle {
     /// List the open Session's background jobs, newest first.
     pub fn jobs(&self, session_id: &str) {
         let _ = self.tx.send(Request::Jobs {
+            session_id: session_id.into(),
+        });
+    }
+
+    /// Refresh the sidebar's list of delegated children.
+    pub fn subagents(&self, session_id: &str) {
+        let _ = self.tx.send(Request::Subagents {
             session_id: session_id.into(),
         });
     }
@@ -1659,6 +1670,9 @@ async fn run(
                     }
                 }
                 Request::Jobs { session_id } => refresh_jobs(client, &bus, &session_id).await,
+                Request::Subagents { session_id } => {
+                    refresh_subagents(client, &bus, &session_id).await
+                }
                 Request::Schedule { session_id } => {
                     refresh_schedule(client, &bus, &session_id).await
                 }
@@ -2301,6 +2315,53 @@ async fn refresh_jobs(client: &EngineClient, bus: &Bus, session_id: &str) {
         }
         Err(error) => bus.send(AppEvent::ActionFailed(format!("jobs failed: {error}"))),
     }
+}
+
+/// Read the Session's delegated children for the sidebar's subagent block.
+///
+/// The jobs answer already carries them beside the jobs, so this shares that
+/// read instead of asking the engine for a second shape. A failed read leaves
+/// the block as it was: it is advisory, and an error line over the operator's
+/// conversation would cost more than a stale row.
+async fn refresh_subagents(client: &EngineClient, bus: &Bus, session_id: &str) {
+    if let Ok(value) = client
+        .request("jobs", json!({ "session_id": session_id }))
+        .await
+    {
+        bus.send(AppEvent::Subagents(parse_subagents(&value)));
+    }
+}
+
+/// The `subagents` side list of a `jobs` answer, as the sidebar reads it.
+fn parse_subagents(value: &Value) -> Vec<SubagentRow> {
+    value
+        .get("subagents")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let id = row.get("id")?.as_str()?.to_string();
+                    Some(SubagentRow {
+                        id,
+                        title: row
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        busy: row.get("status").and_then(Value::as_str) == Some("busy"),
+                        started_at_ms: row
+                            .get("run")
+                            .and_then(|run| run.get("started_at_ms"))
+                            .and_then(Value::as_u64),
+                        messages: row
+                            .get("message_count")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The engine answers a bare array of job rows. A stand-in that serves the
