@@ -265,6 +265,14 @@ impl Live {
             // A reasoning model can legitimately think for minutes before the
             // first token; past half a minute of waiting, say so instead of
             // leaving the operator to read the silence as a stall.
+            // Past ninety seconds it also says the wait is still inside the
+            // provider window and how to leave it: a large request can take
+            // minutes to start, and "is it stuck?" is the question the silence
+            // raises. The window is at least three minutes for the first byte
+            // before any size allowance, so this is true rather than a guess.
+            LivePhase::Waiting if elapsed >= Duration::from_secs(90) => {
+                "Waiting for model · still inside the provider window · Esc interrupts".to_string()
+            }
             LivePhase::Waiting if elapsed >= Duration::from_secs(30) => {
                 "Waiting for model · the model may reason before the first token".to_string()
             }
