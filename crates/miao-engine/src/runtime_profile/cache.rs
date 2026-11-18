@@ -39,12 +39,16 @@ pub(super) fn observe(
     let history_hash = messages
         .map(|items| fingerprint(&json!(items)))
         .transpose()?;
+    // Adjacent-message identity only needs enough bits to tell two prefixes
+    // apart, and this array is the bulk of every request's diagnostics: the
+    // full 64-character digest cost ~9 KB per request, 470 MB in one
+    // workspace's ledger. Sixteen hex characters keep 64 bits.
     let history_prefix = messages
         .map(|items| {
             items
                 .iter()
                 .take(PREFIX_SAMPLES)
-                .map(fingerprint)
+                .map(|item| fingerprint(item).map(|hash| hash[..16].to_owned()))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
@@ -172,6 +176,24 @@ mod tests {
             data: json!({"cache_diagnostics":cache}),
             recorded_at_ms: Some(1),
         }
+    }
+
+    /// The prefix array is the bulk of every request's diagnostics; 64 bits per
+    /// message still tells two prefixes apart.
+    #[test]
+    fn prefix_hashes_keep_64_bits_and_stay_small() {
+        let body = json!({"model":"m","instructions":"system","tools":[],"input":[{"role":"user","content":"one"}]});
+        let first = observation(body, None, 1, "https://example.test/v1/responses");
+        let hashes = first["snapshot"]["historyPrefixHashes"]
+            .as_array()
+            .expect("a history prefix is recorded");
+        assert!(!hashes.is_empty());
+        assert!(
+            hashes
+                .iter()
+                .all(|hash| hash.as_str().is_some_and(|hash| hash.len() == 16)),
+            "{hashes:?}"
+        );
     }
 
     #[test]
