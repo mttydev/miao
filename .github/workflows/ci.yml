@@ -61,6 +61,7 @@ jobs:
         run: |
           python3 .github/scripts/test_ci_gate.py
           python3 .github/scripts/test_release_ci.py
+          python3 .github/scripts/test_retry_infra.py
       - id: paths
         env:
           EVENT_NAME: ${{ github.event_name }}
