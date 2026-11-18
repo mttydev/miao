@@ -429,8 +429,17 @@ pub fn stop_note(
     declaration: &Declaration,
     observed: &Observed,
 ) -> String {
+    // A stop must name a move the product actually has. A Goal's turn bound is
+    // written by the `goal` tool, which needs the very turn this stop refuses,
+    // so the reachable continuation is the operator's own command.
+    let continue_with = match (scope, axis) {
+        ("Goal", Axis::Turns) => {
+            "Raise it with `/goal budget <turns>`, which resumes this Session with the input already waiting."
+        }
+        _ => "Raise the budget and send a message to continue.",
+    };
     format!(
-        "Stopped: the {scope} {name} budget of {limit} is used up ({spent} spent). Nothing is running now and this run will not resume on its own; no message was dropped, so anything not yet processed waits in this Session's durable inbox. Raise the budget and send a message to continue. The model was left unchanged.{disclosure}",
+        "Stopped: the {scope} {name} budget of {limit} is used up ({spent} spent). Nothing is running now and this run will not resume on its own; no message was dropped, so anything not yet processed waits in this Session's durable inbox. {continue_with} The model was left unchanged.{disclosure}",
         name = axis.name(),
         limit = axis.amount(declaration.limit_of(axis).unwrap_or_default()),
         spent = axis.amount(declaration.spent_of(axis, observed)),
@@ -623,6 +632,25 @@ mod tests {
         assert!(note.contains("Nothing is running now"), "{note}");
         assert!(note.contains("durable inbox"), "{note}");
         assert!(note.contains("The model was left unchanged"), "{note}");
+        assert!(note.contains("/goal budget <turns>"), "{note}");
+    }
+
+    /// A Session's budget is the operator's from the start, so its stop keeps
+    /// the plain advice. Only a Goal's bound needs the command: the tool that
+    /// writes it needs the very turn the stop refuses.
+    #[test]
+    fn a_session_stop_does_not_name_a_goal_command() {
+        let budget = declaration(json!({"turns": 2}));
+        let observed = Observed {
+            turns: 2,
+            ..Observed::default()
+        };
+        let note = stop_note("Session", Axis::Turns, &budget, &observed);
+        assert!(
+            note.contains("Raise the budget and send a message"),
+            "{note}"
+        );
+        assert!(!note.contains("/goal budget"), "{note}");
     }
 
     /// The gate's baseline is the ledger, not an in-memory counter: a Session

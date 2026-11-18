@@ -544,15 +544,57 @@ pub(crate) fn projection(conn: &Connection, session: &str, through: u64) -> Resu
 /// `packages/engine-ts/core/src/session/todo.ts` nudges a stale ledger through
 /// `turnsBehind`; the Rust Session had no counterpart, so a long turn could run
 /// dozens of tool calls without ever being asked to reconcile.
-pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {
-    const STALE_AFTER: u64 = 3;
+pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {    const STALE_AFTER: u64 = 3;
+    // `turnsBehind` assumes a reminder is enough. A long tool-driven stretch
+    // showed it is not: the list went 176 turns without a write while every
+    // turn carried the gentle note. Past this bound the note is an instruction
+    // with the consequence spelled out, so a model that reads it has no
+    // ambiguity left about what to do next.
+    const IGNORED_AFTER: u64 = 8;
     if turns_since_write < STALE_AFTER {
         return None;
+    }
+    if turns_since_write >= IGNORED_AFTER {
+        return Some(
+            "The persisted task list has not been rewritten for many turns and no longer describes \
+             this work. Call todowrite now, before any further tool call: mark finished and verified \
+             work completed, the item you are working on in_progress, and everything else pending, \
+             waiting or blocked. The operator reads this list as current progress, so a list that \
+             keeps drifting is worse than none.",
+        );
     }
     Some(
         "The persisted task list has not been reconciled for several turns. Update it with \
          todowrite before continuing: mark started work in_progress, finished and verified \
          work completed, and work whose prerequisites are still open pending.",
+    )
+}
+
+/// A persisted list that still has open items and has not been rewritten for
+/// this many provider turns stops the drain.
+///
+/// The text-only stall guard measures a repeated *reply*; a Session that keeps
+/// calling tools never reaches it. One such Session ran 176 turns with an
+/// untouched list while every turn carried `ledger_nudge`, so a reminder alone
+/// is not a bound: the operator reads the sidebar as current progress.
+pub const TODO_STALE_STOP: u64 = 12;
+
+pub fn todo_stale(turns_since_write: u64, state: &Value) -> bool {
+    turns_since_write >= TODO_STALE_STOP
+        && state["todos"]["value"]["todos"]
+            .as_array()
+            .is_some_and(|todos| {
+                todos.iter().any(|todo| {
+                    !matches!(todo["status"].as_str(), Some("completed") | Some("cancelled"))
+                })
+            })
+}
+
+/// What the operator reads when a stale list stops the drain: what happened,
+/// that nothing is running, and the one move that continues.
+pub fn todo_stale_note(turns: u64) -> String {
+    format!(
+        "Task paused: the persisted task list still has open items and has not been rewritten for {turns} provider turns, so it no longer describes this work. Nothing is running now and no message was dropped. Update it with todowrite — finished and verified work completed, the current item in_progress, everything else pending, waiting or blocked — then send a message or let the next event continue. The list is a reading of progress, not proof of it."
     )
 }
 
@@ -609,6 +651,38 @@ mod tests {
         let nudge = super::ledger_nudge(3).expect("three turns without a write");
         assert!(nudge.contains("todowrite"), "{nudge}");
         assert!(nudge.contains("in_progress"), "{nudge}");
+    }
+
+    /// The gentle note was ignored for 176 turns in one Session, so past a
+    /// bound the note has to be an instruction that names the consequence.
+    #[test]
+    fn a_list_ignored_for_many_turns_is_told_to_reconcile_before_working() {
+        let gentle = super::ledger_nudge(3).expect("gentle nudge");        assert!(!gentle.contains("before any further tool call"), "{gentle}");
+        let firm = super::ledger_nudge(8).expect("firm nudge");
+        assert!(firm.contains("before any further tool call"), "{firm}");
+        assert!(firm.contains("no longer describes"), "{firm}");
+        assert_eq!(super::ledger_nudge(64), super::ledger_nudge(8));
+    }
+
+    #[test]
+    fn a_list_with_open_items_that_is_never_rewritten_stops_the_drain() {
+        let open = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "doing", "status": "in_progress", "priority": "high"},
+        ]}}});
+        assert!(!super::todo_stale(11, &open));
+        assert!(super::todo_stale(12, &open));
+        let finished = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "done", "status": "completed", "priority": "high"},
+            {"id": "b", "content": "dropped", "status": "cancelled", "priority": "low"},
+        ]}}});
+        assert!(
+            !super::todo_stale(64, &finished),
+            "a finished list is not stale"
+        );
+        assert!(!super::todo_stale(64, &json!({"todos": null})));
+        let note = super::todo_stale_note(12);
+        assert!(note.contains("todowrite"), "{note}");
+        assert!(note.contains("12 provider turns"), "{note}");
     }
 
     /// Only Anthropic personas name `todowrite`, so every other model learns
