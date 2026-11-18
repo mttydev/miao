@@ -3061,6 +3061,45 @@ impl Store {
         .await
     }
 
+    /// Record the turn's context selection unless it repeats the last one.
+    ///
+    /// `instructions_loaded` is a lifecycle cursor, not a per-turn log: readers
+    /// take the newest row to learn which sources are in force at a location.
+    /// A turn that selected the same sources at the same location states an old
+    /// fact again, and a long Session otherwise writes one of these rows per
+    /// provider turn — tens of thousands of them in an observed workspace.
+    /// The comparison reads and writes in one transaction, so a concurrent
+    /// selection cannot slip between the check and the append.
+    pub async fn record_instructions_if_changed(
+        &self,
+        session: &str,
+        data: Value,
+    ) -> Result<(), Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            let previous: Option<String> = tx
+                .query_row(
+                    "SELECT data FROM engine_event WHERE session_id=?1 AND kind='instructions_loaded' ORDER BY seq DESC LIMIT 1",
+                    [&session],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(previous) = previous {
+                let previous = serde_json::from_str::<Value>(&previous)?;
+                let unchanged = previous.get("location") == data.get("location")
+                    && previous.get("sources") == data.get("sources");
+                if unchanged {
+                    return Ok(());
+                }
+            }
+            append(&tx, &session, "instructions_loaded", data)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Append with an explicit recorded time. The task rollup's wall clock and
     /// intervention waits read this column, so tests pin a timeline instead of
     /// racing the wall clock.

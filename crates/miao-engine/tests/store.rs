@@ -909,3 +909,43 @@ async fn the_selection_lookup_seeks_its_index_instead_of_walking_the_journal() {
         );
     }
 }
+
+/// `instructions_loaded` is a lifecycle cursor, not a per-turn log: a turn that
+/// selected the same sources at the same location states an old fact again.
+/// Recording it anyway wrote one row per provider turn — tens of thousands in an
+/// observed workspace — for nothing a reader could not already answer.
+#[tokio::test]
+async fn a_repeated_context_selection_is_not_recorded_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store.initialize("s", "fixture", "/w").await.unwrap();
+    let sources = json!([{ "label": "AGENTS.md", "path": "AGENTS.md", "status": "missing" }]);
+    for run in ["r1", "r2"] {
+        store
+            .record_instructions_if_changed(
+                "s",
+                json!({"run_id": run, "location": "/w", "sources": sources.clone()}),
+            )
+            .await
+            .unwrap();
+    }
+    let count = || async {
+        store
+            .events("s", 0, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "instructions_loaded")
+            .count()
+    };
+    assert_eq!(count().await, 1, "the same selection is one fact");
+
+    store
+        .record_instructions_if_changed(
+            "s",
+            json!({"run_id": "r3", "location": "/w", "sources": []}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(count().await, 2, "a changed selection is a new fact");
+}
