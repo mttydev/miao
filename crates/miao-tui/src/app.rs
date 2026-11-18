@@ -4932,6 +4932,15 @@ impl App {
             (None, 0) => phase.clone(),
             (None, queued) => format!("{phase} · {queued} queued"),
         };
+        // A delegated child works on a Session of its own, so without this the
+        // strip reads "Idle" while two subagents are still busy. The count goes
+        // last: what the turn is doing outranks what it delegated.
+        let working = self.subagents.iter().filter(|row| row.busy).count();
+        let status = match working {
+            0 => status,
+            1 => format!("{status} · 1 subagent"),
+            working => format!("{status} · {working} subagents"),
+        };
         self.shell
             .title
             .set_status_alert(phase_needs_operator || live.is_some_and(|live| live.silent(now)));
