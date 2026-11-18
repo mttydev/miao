@@ -544,7 +544,8 @@ pub(crate) fn projection(conn: &Connection, session: &str, through: u64) -> Resu
 /// `packages/engine-ts/core/src/session/todo.ts` nudges a stale ledger through
 /// `turnsBehind`; the Rust Session had no counterpart, so a long turn could run
 /// dozens of tool calls without ever being asked to reconcile.
-pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {    const STALE_AFTER: u64 = 3;
+pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {
+    const STALE_AFTER: u64 = 3;
     // `turnsBehind` assumes a reminder is enough. A long tool-driven stretch
     // showed it is not: the list went 176 turns without a write while every
     // turn carried the gentle note. Past this bound the note is an instruction
