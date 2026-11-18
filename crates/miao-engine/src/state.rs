@@ -585,7 +585,10 @@ pub fn todo_stale(turns_since_write: u64, state: &Value) -> bool {
             .as_array()
             .is_some_and(|todos| {
                 todos.iter().any(|todo| {
-                    !matches!(todo["status"].as_str(), Some("completed") | Some("cancelled"))
+                    !matches!(
+                        todo["status"].as_str(),
+                        Some("completed") | Some("cancelled")
+                    )
                 })
             })
 }
@@ -657,7 +660,8 @@ mod tests {
     /// bound the note has to be an instruction that names the consequence.
     #[test]
     fn a_list_ignored_for_many_turns_is_told_to_reconcile_before_working() {
-        let gentle = super::ledger_nudge(3).expect("gentle nudge");        assert!(!gentle.contains("before any further tool call"), "{gentle}");
+        let gentle = super::ledger_nudge(3).expect("gentle nudge");
+        assert!(!gentle.contains("before any further tool call"), "{gentle}");
         let firm = super::ledger_nudge(8).expect("firm nudge");
         assert!(firm.contains("before any further tool call"), "{firm}");
         assert!(firm.contains("no longer describes"), "{firm}");
