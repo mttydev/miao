@@ -11,6 +11,15 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.87] - 2026-11-18
+
+### Added
+- **engine**: ask for the whole task, once (#3162) (`b30d9821af`)
+- **engine**: name the work a blocked todo list is holding (#3161) (`6cc4710cd0`)
+
+### Fixed
+- **engine**: stop injecting the whole-task note on every request (#3164) (`d1449cc592`)
+
 ## [0.3.86] - 2026-11-18
 
 ### Added
