@@ -230,6 +230,62 @@ pub fn runnable_state(state: &Value) -> Result<Vec<String>, Error> {
 /// loop that treats all three the same parks an active goal with nothing moving
 /// it. A caller that finds nothing runnable reads this to say which step would
 /// unblock the rest, or that the Session genuinely has nothing left.
+/// Whether a block names something the model cannot change.
+///
+/// "Too large for one reply", "too complex", "needs many steps" are not
+/// blocks — they are a refusal to decompose, and honouring them is what parks a
+/// Session the operator already approved. Only an external dependency the model
+/// cannot satisfy — hardware down, power off, a credential or approval a human
+/// holds, a third party that is unavailable — justifies a stop.
+pub fn blocked_on_external_work(evidence: &str) -> bool {
+    const SCOPE: &[&str] = &[
+        "too large",
+        "too big",
+        "too complex",
+        "too many",
+        "at once",
+        "one reply",
+        "in one go",
+        "太大",
+        "太多",
+        "太复杂",
+        "一次性",
+        "无法一次",
+    ];
+    const EXTERNAL: &[&str] = &[
+        "hardware",
+        "device",
+        "power",
+        "offline",
+        "unreachable",
+        "credential",
+        "token",
+        "permission",
+        "approval",
+        "third-party",
+        "third party",
+        "service down",
+        "network",
+        "operator",
+        "硬件",
+        "设备",
+        "断电",
+        "离线",
+        "凭据",
+        "权限",
+        "授权",
+        "网络",
+        "第三方",
+        "现场",
+        "人工",
+    ];
+    let lower = evidence.to_lowercase();
+    if SCOPE.iter().any(|needle| lower.contains(needle)) {
+        return false;
+    }
+    EXTERNAL.iter().any(|needle| lower.contains(needle))
+}
+
 pub fn blocked_work(state: &Value) -> Vec<(String, Vec<String>)> {
     if state["todos"].is_null() {
         return Vec::new();
@@ -490,6 +546,22 @@ pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// "Too large" is not a block. Only an external dependency is.
+    #[test]
+    fn a_block_is_external_only_when_it_names_something_the_model_cannot_change() {
+        assert!(super::blocked_on_external_work(
+            "the LIO device is offline; it needs a power cycle on site"
+        ));
+        assert!(super::blocked_on_external_work("需要现场人工给设备通电"));
+        assert!(!super::blocked_on_external_work(
+            "too large to finish in one reply"
+        ));
+        assert!(!super::blocked_on_external_work("任务太大，一次做不完"));
+        assert!(!super::blocked_on_external_work(
+            "too complex, and it also needs network access"
+        ));
+        assert!(!super::blocked_on_external_work(""));
+    }
     /// A list with nothing runnable is not the same as a finished one. This
     /// names what is holding it, and the dependency that would release it.
     #[test]
