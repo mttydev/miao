@@ -165,6 +165,101 @@ async fn account_selection_retains_model_family_variant_and_is_session_local() {
     runtime.shutdown().await;
 }
 
+/// A model pick takes the account with it. Keeping a pin that no longer serves
+/// the picked model let `resolve` answer with a model that pin's account
+/// serves, so the picker looked like it kept the old account and ignored the
+/// pick.
+#[tokio::test]
+async fn a_model_pick_moves_a_pin_that_does_not_serve_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(Answer);
+    let catalog = Arc::new(
+        Catalog::new(
+            provider.clone(),
+            ["a", "b", "c"]
+                .into_iter()
+                .map(|id| (id.into(), provider.clone()))
+                .collect(),
+        )
+        .unwrap()
+        .with_accounts(
+            vec![
+                ("a".into(), account("credential-a", "host/first", true)),
+                ("b".into(), account("credential-b", "host/second", false)),
+                ("c".into(), account("credential-c", "host/first", false)),
+            ],
+            Some("a".into()),
+        )
+        .unwrap(),
+    );
+    let runtime = Runtime::new(
+        store.clone(),
+        catalog,
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    for id in ["s", "t"] {
+        store
+            .initialize(
+                id,
+                "fixture",
+                std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let plain = |route: &str| Binding {
+        protocol: "fixture".into(),
+        model: "wire-shared".into(),
+        route_id: Some(route.into()),
+        variant: None,
+    };
+    for id in ["s", "t"] {
+        runtime.select_model(id, Some(plain("a"))).await.unwrap();
+        // credential-b serves another family, so the switch lands on its route.
+        assert_eq!(
+            runtime
+                .select_account(id, Some("credential-b".into()))
+                .await
+                .unwrap()["binding"]["route_id"],
+            "b"
+        );
+    }
+    // The pick moves the pin to the account that serves the picked family.
+    runtime.select_model("s", Some(plain("c"))).await.unwrap();
+    assert_eq!(
+        store
+            .model_selection("s")
+            .await
+            .unwrap()
+            .unwrap()
+            .route_id
+            .as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        store.snapshot("s").await.unwrap()["account_selection"]["credential_id"],
+        "credential-c"
+    );
+    // A pick on the default route carries no pin: the stale pin is cleared, so
+    // turns run the picked model instead of the old account's route.
+    runtime.select_model("t", Some(plain("a"))).await.unwrap();
+    assert_eq!(
+        store
+            .model_selection("t")
+            .await
+            .unwrap()
+            .unwrap()
+            .route_id
+            .as_deref(),
+        Some("a")
+    );
+    assert!(store.snapshot("t").await.unwrap()["account_selection"].is_null());
+    runtime.shutdown().await;
+}
+
 #[tokio::test]
 async fn missing_accounts_or_variants_do_not_mutate_the_selection() {
     let dir = tempfile::tempdir().unwrap();
