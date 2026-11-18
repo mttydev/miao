@@ -673,7 +673,10 @@ mod request_bound_tests {
     #[test]
     fn a_drain_without_a_bound_still_needs_fresh_evidence() {
         assert_eq!(step_bound(None, 95_232, None), None);
-        assert_eq!(step_bound(None, 95_232, Some(33_184)), Some((95_232, 33_184)));
+        assert_eq!(
+            step_bound(None, 95_232, Some(33_184)),
+            Some((95_232, 33_184))
+        );
     }
 }
 
