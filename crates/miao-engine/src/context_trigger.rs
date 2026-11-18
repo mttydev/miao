@@ -1226,6 +1226,15 @@ pub fn prune_tool_output(output_len: usize, budget: usize, is_recent: bool) -> P
 /// so the mark states the facts instead of looking like a truncation.
 pub const PRUNE_MARK: &str = "\n…[older tool output elided by context management — routine pruning, not a low-context signal; the harness compacts automatically near the window limit, so keep working]…\n";
 
+/// The payload and total character budgets used when a request no longer fits
+/// the window and the operator configured none. Old tool output is the
+/// cheapest thing to drop first: the durable transcript keeps every byte, and
+/// a Session whose request fits is left untouched, so its cache prefix stays
+/// stable. A blanket default would re-elide output on every turn and pay a
+/// cache miss for savings the request did not need.
+pub const DEFAULT_PRUNE_CHARS: usize = 16 * 1024;
+pub const DEFAULT_PRUNE_TOTAL_CHARS: usize = 256 * 1024;
+
 /// Gate ④: elide oversized tool results from the outgoing request only, never
 /// from stored history. The newest `protect_turns` user-role messages (prompts
 /// or tool results) keep their output whatever it costs, so the work in flight
@@ -1806,6 +1815,41 @@ mod tests {
         let stats = trim_history_to_fit(&mut messages, 10_000);
         assert_eq!(stats.messages, 0);
         assert_eq!(messages.len(), 2);
+    }
+
+    /// The default budget only fires where it was chosen to: an old payload is
+    /// elided down to the per-payload budget, the newest turn keeps its output,
+    /// and a request that stays under the total target loses nothing.
+    #[test]
+    fn the_default_prune_budget_touches_only_what_no_longer_fits() {
+        let payload = |text: &str| Message {
+            role: "user".into(),
+            content: json!([{"type":"tool_result","tool_use_id":"call","content":text.repeat(40_000)}]),
+            checkpoint: None,
+            recorded_at_ms: None,
+        };
+        let mut messages = vec![payload("a"), payload("b")];
+        let stats = prune_history_with_stats(
+            &mut messages,
+            DEFAULT_PRUNE_CHARS,
+            1,
+            Some(DEFAULT_PRUNE_TOTAL_CHARS),
+        );
+        assert_eq!(stats.payloads, 0, "80 KB of candidates fit the 256 KB target");
+        assert_eq!(messages[0].content[0]["content"].as_str().unwrap().len(), 40_000);
+
+        let mut messages = vec![payload("a"), payload("b")];
+        let stats = prune_history_with_stats(&mut messages, DEFAULT_PRUNE_CHARS, 1, Some(20_000));
+        assert!(stats.payloads >= 1, "the excess is covered oldest-first");
+        assert_eq!(
+            messages[1].content[0]["content"].as_str().unwrap().len(),
+            40_000,
+            "the newest turn keeps its output"
+        );
+        assert!(
+            messages[0].content[0]["content"].as_str().unwrap().len() < 40_000,
+            "the old payload is the one that shrinks"
+        );
     }
 
     #[test]
