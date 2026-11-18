@@ -5149,7 +5149,11 @@ fn goal_state(goal: &crate::session::GoalView, todos: &[crate::session::TodoView
         .filter(|todo| !matches!(todo.status.as_str(), "completed" | "cancelled"))
         .map(|todo| todo.status.as_str())
         .collect::<Vec<_>>();
-    if open.iter().all(|status| matches!(*status, "waiting" | "blocked")) && !open.is_empty() {
+    if open
+        .iter()
+        .all(|status| matches!(*status, "waiting" | "blocked"))
+        && !open.is_empty()
+    {
         return "waiting · external".into();
     }
     "working · decomposing".into()
@@ -5540,7 +5544,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let goal = text.find("GOAL · working · decomposing").expect("goal header");
+        let goal = text
+            .find("GOAL · working · decomposing")
+            .expect("goal header");
         let objective = text.find("ship the offset reporting").expect("objective");
         let budget = text.find("budget  two hours").expect("budget");
         // The fixture's only item is completed, so the header states that the
@@ -5616,7 +5622,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let goal = text.find("GOAL · working · decomposing").expect("goal header");
+        let goal = text
+            .find("GOAL · working · decomposing")
+            .expect("goal header");
         let plan = text.find("PLAN · approved").expect("plan header");
         let summary = text
             .find("read the ledger, then replay it")
