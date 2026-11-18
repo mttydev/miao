@@ -4067,10 +4067,11 @@ impl Pane for SidebarPane {
                 }
             }
             if let Some(goal) = &self.goal {
-                // The status word is the one thing here that can need the
+                // The state word is the one thing here that can need the
                 // operator, so it keeps colour only when it does.
-                let goal_style = match goal.status.as_str() {
-                    "blocked" => Style::new().fg(palette.warning),
+                let state = goal_state(goal, &self.todos);
+                let goal_style = match state.split(' ').next().unwrap_or_default() {
+                    "blocked" | "waiting" => Style::new().fg(palette.warning),
                     "done" => Style::new().fg(palette.success),
                     _ => Style::new().fg(palette.text_muted),
                 };
@@ -4082,7 +4083,7 @@ impl Pane for SidebarPane {
                             .fg(palette.text_muted)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(goal.status.clone(), goal_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(state, goal_style.add_modifier(Modifier::BOLD)),
                 ]));
                 lines.push(Line::from(Span::styled(
                     format!(
@@ -5129,8 +5130,76 @@ fn panel_lines(panel: &Panel, theme: &Theme) -> Vec<Line<'static>> {
     }
 }
 
+/// The Goal's state as the sidebar names it.
+///
+/// The engine's own words cover only part of it: `blocked` already guarantees
+/// the evidence names work outside the Session (`state::blocked_on_external_work`
+/// refuses the mutation otherwise), and `done` speaks for itself. An active Goal
+/// is either working through its checklist or waiting on work only the outside
+/// can move, and the checklist says which by leaving nothing runnable behind.
+fn goal_state(goal: &crate::session::GoalView, todos: &[crate::session::TodoView]) -> String {
+    if goal.status == "blocked" {
+        return "blocked · external".into();
+    }
+    if goal.status != "active" {
+        return goal.status.clone();
+    }
+    let open = todos
+        .iter()
+        .filter(|todo| !matches!(todo.status.as_str(), "completed" | "cancelled"))
+        .map(|todo| todo.status.as_str())
+        .collect::<Vec<_>>();
+    if open
+        .iter()
+        .all(|status| matches!(*status, "waiting" | "blocked"))
+        && !open.is_empty()
+    {
+        return "waiting · external".into();
+    }
+    "working · decomposing".into()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_goal_state_names_the_wait_the_checklist_leaves() {
+        let goal = |status: &str| crate::session::GoalView {
+            objective: "ship the offset reporting".into(),
+            status: status.into(),
+            budget: None,
+            evidence: None,
+        };
+        let todo = |status: &str| crate::session::TodoView {
+            content: "wire the parser".into(),
+            status: status.into(),
+        };
+        // An empty checklist and runnable work both mean the Session is still
+        // moving; only a checklist that leaves nothing runnable is a wait.
+        assert_eq!(
+            super::goal_state(&goal("active"), &[]),
+            "working · decomposing"
+        );
+        assert_eq!(
+            super::goal_state(&goal("active"), &[todo("completed"), todo("pending")]),
+            "working · decomposing"
+        );
+        assert_eq!(
+            super::goal_state(&goal("active"), &[todo("completed"), todo("waiting")]),
+            "waiting · external"
+        );
+        assert_eq!(
+            super::goal_state(&goal("active"), &[todo("blocked")]),
+            "waiting · external"
+        );
+        // The engine refuses a blocked Goal whose evidence names nothing
+        // outside the Session, so the qualifier is the engine's own reading.
+        assert_eq!(
+            super::goal_state(&goal("blocked"), &[]),
+            "blocked · external"
+        );
+        assert_eq!(super::goal_state(&goal("done"), &[]), "done");
+    }
+
     #[test]
     fn the_plan_block_paints_windows_and_skips_an_empty_answer() {
         let palette = home_theme().palette;
@@ -5475,7 +5544,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let goal = text.find("GOAL · active").expect("goal header");
+        let goal = text
+            .find("GOAL · working · decomposing")
+            .expect("goal header");
         let objective = text.find("ship the offset reporting").expect("objective");
         let budget = text.find("budget  two hours").expect("budget");
         // The fixture's only item is completed, so the header states that the
@@ -5551,7 +5622,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let goal = text.find("GOAL · active").expect("goal header");
+        let goal = text
+            .find("GOAL · working · decomposing")
+            .expect("goal header");
         let plan = text.find("PLAN · approved").expect("plan header");
         let summary = text
             .find("read the ledger, then replay it")
