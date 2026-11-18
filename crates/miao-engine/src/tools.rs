@@ -1341,6 +1341,18 @@ impl Tools {
         self.codegraph && self.codegraph_path().is_some()
     }
 
+    /// Start building this workspace's index in the background. The codegraph
+    /// module deduplicates by database path, so repeated construction of a
+    /// Runtime for the same workspace costs one pass.
+    pub(crate) fn codegraph_prewarm(&self) {
+        if !self.codegraph_enabled() {
+            return;
+        }
+        if let Some(database) = self.codegraph_path() {
+            crate::codegraph::prewarm(self.root.clone(), database);
+        }
+    }
+
     /// The LSP registry when startup attached one. `None` means no server was
     /// configured, and a reload cannot attach one without rebuilding `Tools`.
     pub(crate) fn lsp_registry(&self) -> Option<&Arc<crate::lsp::Registry>> {
