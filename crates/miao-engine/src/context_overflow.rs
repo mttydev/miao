@@ -33,6 +33,7 @@ fn patterns() -> &'static Vec<Regex> {
     static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         compile(&[
             r"(?i)prompt is too long",
+            r"(?i)prompt exceeds max length",
             r"(?i)request_too_large",
             r"(?i)input is too long for requested model",
             r"(?i)exceeds the context window",
@@ -131,6 +132,7 @@ mod tests {
             "Requested token count exceeds the model's maximum context length of 131072 tokens.",
             "too large for model with 8192 maximum context length",
             "prompt has 131072 tokens, but the configured context size is 65536 tokens",
+            "invalid request: provider HTTP 400 · {\"error\":{\"code\":\"1261\",\"message\":\"Prompt exceeds max length\"}}",
         ] {
             assert!(is_context_overflow(message), "{message}");
         }
