@@ -4149,7 +4149,15 @@ impl Pane for SidebarPane {
                 .filter(|todo| todo.status == "completed")
                 .count();
             lines.push(section_header(
-                &format!("TODO {done}/{}", self.todos.len()),
+                // A list whose items are all completed is history, not the
+                // work in front of the Session. "TODO 5/5" beside a new
+                // instruction read as current progress; the header says what
+                // it is, until the next list replaces it.
+                &match (done, self.todos.len()) {
+                    (0, len) => format!("TODO 0/{len}"),
+                    (done, len) if done == len => format!("TODO done {done}/{len}"),
+                    (done, len) => format!("TODO {done}/{len}"),
+                },
                 &palette,
             ));
             if self.todos.is_empty() {
@@ -5470,7 +5478,9 @@ mod tests {
         let goal = text.find("GOAL · active").expect("goal header");
         let objective = text.find("ship the offset reporting").expect("objective");
         let budget = text.find("budget  two hours").expect("budget");
-        let todos = text.find("TODO 1/1").expect("todo header");
+        // The fixture's only item is completed, so the header states that the
+        // list is finished rather than reading like current progress.
+        let todos = text.find("TODO done 1/1").expect("todo header");
         assert!(goal < objective && objective < budget, "{text}");
         assert!(
             budget < todos,
