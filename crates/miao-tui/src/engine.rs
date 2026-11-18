@@ -86,6 +86,13 @@ pub enum Request {
         session_id: String,
         tag: String,
     },
+    /// Raise the turns a Goal's own budget allows. A spent Goal budget stops
+    /// the drain before the `goal` tool could rewrite it, so the operator needs
+    /// this path to continue the Session.
+    GoalBudget {
+        session_id: String,
+        turns: u64,
+    },
     /// Ask for a suggested next prompt. Advisory: nothing is admitted for it,
     /// and it costs one one-shot call on the Session's own route.
     Predict {
@@ -479,6 +486,14 @@ impl Handle {
         let _ = self.tx.send(Request::SelectModel {
             session_id: session_id.to_string(),
             binding,
+        });
+    }
+
+    /// Raise the turns this Session's Goal budget allows (`/goal budget`).
+    pub fn goal_budget(&self, session_id: &str, turns: u64) {
+        let _ = self.tx.send(Request::GoalBudget {
+            session_id: session_id.to_string(),
+            turns,
         });
     }
 
@@ -1555,6 +1570,22 @@ async fn run(
                         }
                         Err(error) => {
                             bus.send(AppEvent::ActionFailed(format!("select failed: {error}")))
+                        }
+                    }
+                }
+                Request::GoalBudget { session_id, turns } => {
+                    let result = client
+                        .request(
+                            "goal_budget",
+                            json!({ "session_id": session_id, "turns": turns }),
+                        )
+                        .await;
+                    match result {
+                        Ok(_) => bus.send(AppEvent::Notice(format!(
+                            "Goal budget raised to {turns} turns"
+                        ))),
+                        Err(error) => {
+                            bus.send(AppEvent::Notice(format!("goal budget failed: {error}")))
                         }
                     }
                 }

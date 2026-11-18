@@ -110,6 +110,9 @@ impl Host {
             }
             Command::Remove { session_id } => runtime.remove(&session_id).await,
             Command::Recap { session_id } => runtime.recap(&session_id).await,
+            Command::GoalBudget { session_id, turns } => {
+                runtime.raise_goal_budget(&session_id, turns).await
+            }
             Command::RequestCompact {
                 session_id,
                 through,

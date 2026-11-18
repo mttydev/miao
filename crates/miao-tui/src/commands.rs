@@ -62,10 +62,15 @@ pub enum Builtin {
     Paste,
     Help,
     Quit,
+    /// Raise the turns a Goal's own budget allows. The `goal` tool that could
+    /// rewrite it runs inside a provider turn, and a spent Goal budget stops
+    /// the drain before that turn exists, so this is the operator's way out of
+    /// that deadlock.
+    Goal,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 33] = [
+    pub const ALL: [Builtin; 34] = [
         Builtin::Models,
         Builtin::Permissions,
         Builtin::Sandbox,
@@ -77,6 +82,7 @@ impl Builtin {
         Builtin::NewSession,
         Builtin::Clear,
         Builtin::Compact,
+        Builtin::Goal,
         Builtin::Init,
         Builtin::Rename,
         Builtin::Tag,
@@ -115,6 +121,7 @@ impl Builtin {
             Builtin::NewSession => "new",
             Builtin::Clear => "clear",
             Builtin::Compact => "compact",
+            Builtin::Goal => "goal",
             Builtin::Init => "init",
             Builtin::Rename => "rename",
             Builtin::Tag => "tag",
@@ -172,6 +179,7 @@ impl Builtin {
             Builtin::NewSession => "New session",
             Builtin::Clear => "Clear this session's context",
             Builtin::Compact => "Compact this Session's history now",
+            Builtin::Goal => "Raise this Session's Goal turn budget",
             Builtin::Init => "Write an AGENTS.md for this project",
             Builtin::Rename => "Rename this session",
             Builtin::Tag => "Tag this session",
@@ -222,6 +230,8 @@ impl Builtin {
             // Compaction, the context report, the guidance file and the MCP
             // list have no chord: they are asked for by name.
             Builtin::Compact => None,
+            // Lifting a Goal budget is asked for by name: /goal budget <n>.
+            Builtin::Goal => None,
             Builtin::Init => None,
             Builtin::Rename => Some(Action::SessionRename),
             Builtin::Tag => None,
@@ -725,9 +735,31 @@ pub fn split(text: &str) -> Option<(String, String)> {
     Some((name.to_string(), arguments))
 }
 
+/// The turn budget `/goal budget <turns>` asks to record.
+///
+/// Anything else is a usage error rather than a silent no-op: the command
+/// exists to lift one bound, so a missing or zero number has to say so instead
+/// of leaving the operator waiting for a stop that never moves.
+pub fn goal_budget(arguments: &str) -> Option<u64> {
+    match arguments.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["budget", turns] => turns.parse().ok().filter(|turns| *turns > 0),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_goal_budget_parses_only_a_positive_turn_count() {
+        assert_eq!(goal_budget("budget 120"), Some(120));
+        assert_eq!(goal_budget("  budget   120 "), Some(120));
+        assert_eq!(goal_budget("budget 0"), None);
+        assert_eq!(goal_budget("budget"), None);
+        assert_eq!(goal_budget("turns 120"), None);
+        assert_eq!(goal_budget(""), None);
+    }
 
     #[test]
     fn a_pasted_path_is_a_prompt_not_a_command() {
