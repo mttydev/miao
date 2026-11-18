@@ -1401,13 +1401,20 @@ pub(crate) async fn request_with_retry(
             scope.budget.arm();
         }
         let cause = retry_cause(status, last_failure_detail.as_deref());
+        // An endpoint refusing a request that no longer fits its window is
+        // deterministic: the runner learns the window, asks for a compaction,
+        // and retries with a bounded request. Replaying the identical body here
+        // only spends another request on the same refusal.
+        let overflow = last_failure_detail
+            .as_deref()
+            .is_some_and(crate::context_overflow::is_context_overflow);
         if !retryable {
             // A request the endpoint rejected (HTTP 400) is normally
             // deterministic, but a gateway also wraps a transient upstream
             // hiccup in one. Grant exactly one immediate replay so that class
             // recovers on its own; a real defect still fails, one request
             // later. Mirrors the TS runner's `selfHealable`.
-            if matches!(error, ProviderError::Http(400, _)) && !self_healed {
+            if matches!(error, ProviderError::Http(400, _)) && !self_healed && !overflow {
                 self_healed = true;
                 announce_retry(
                     progress,

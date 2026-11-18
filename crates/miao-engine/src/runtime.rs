@@ -6192,6 +6192,34 @@ command: None,
             .promote_fenced(session, !reply.needs_tools, lease)
             .await?;
         let mut goal_stopped_this_turn = false;
+        // The text-only stall guard below never sees a tool-driven drain, so a
+        // checklist that still has open items and has not been rewritten for
+        // many turns is stopped here: the operator reads the sidebar as current
+        // progress, and one Session drifted for 176 turns that way.
+        let stale_turns = ledger_turns
+            .get(session)
+            .map(|(_, turns)| *turns)
+            .unwrap_or(0);
+        if crate::state::todo_stale(stale_turns, &inner.store.state(session).await?) {
+            inner
+                .store
+                .record(
+                    session,
+                    "loop.stopped",
+                    json!({"run_id":run,"reason":"todo-stale","turns":stale_turns}),
+                )
+                .await?;
+            inner
+                .store
+                .inject(
+                    session,
+                    &format!("todo-stale-{run}"),
+                    &crate::state::todo_stale_note(stale_turns),
+                    "engine",
+                )
+                .await?;
+            return Ok(());
+        }
         if !reply.needs_tools && !text_only && promoted.is_empty() && state_allowed {
             let state = inner.store.state(session).await?;
             let goal = &state["goal"]["value"];
