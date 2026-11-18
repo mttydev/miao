@@ -578,7 +578,15 @@ pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {
 /// calling tools never reaches it. One such Session ran 176 turns with an
 /// untouched list while every turn carried `ledger_nudge`, so a reminder alone
 /// is not a bound: the operator reads the sidebar as current progress.
-pub const TODO_STALE_STOP: u64 = 12;
+///
+/// The bound has to leave room for real work. At twelve turns it stopped two
+/// sessions that were editing files the whole time — one finishing a release,
+/// one implementing a single `in_progress` item across a dozen tool calls — and
+/// an operator had to send a message to continue work that was never adrift.
+/// Twenty-four still bounds the drift the guard exists for (the same failure
+/// now reports at 24 turns instead of 176) while a long implementation stretch
+/// is no longer mistaken for a stale list.
+pub const TODO_STALE_STOP: u64 = 24;
 
 pub fn todo_stale(turns_since_write: u64, state: &Value) -> bool {
     turns_since_write >= TODO_STALE_STOP
@@ -674,8 +682,8 @@ mod tests {
         let open = json!({"todos": {"value": {"todos": [
             {"id": "a", "content": "doing", "status": "in_progress", "priority": "high"},
         ]}}});
-        assert!(!super::todo_stale(11, &open));
-        assert!(super::todo_stale(12, &open));
+        assert!(!super::todo_stale(23, &open));
+        assert!(super::todo_stale(24, &open));
         let finished = json!({"todos": {"value": {"todos": [
             {"id": "a", "content": "done", "status": "completed", "priority": "high"},
             {"id": "b", "content": "dropped", "status": "cancelled", "priority": "low"},
