@@ -676,6 +676,13 @@ pub struct Transcript {
     /// Sequence of the newest projected message. Messages and events share one
     /// sequence, so it says whether a failure still trails the conversation.
     pub tail_seq: u64,
+    /// The last classified loop stop, with the sequence that reported it.
+    ///
+    /// The engine ends a drain for a reason — a blocked item, a list that did
+    /// not move, a goal still open — and records `loop.stopped`. Without this
+    /// the screen showed a quiet idle Session and the operator had to guess why
+    /// nothing moved, which is the "it stopped and I cannot tell why" report.
+    pub paused: Option<(u64, String)>,
 }
 
 impl Transcript {
@@ -968,6 +975,22 @@ impl Transcript {
             // A later drain that ended any other way supersedes the failure.
             "stop" => self.failure = None,
             "tool.completed" => self.push_display(data),
+            // A classified stop is a fact about the Session, not a message, so
+            // it is carried out of the event stream into the transcript where
+            // the operator already looks. Replays are ignored by sequence.
+            "loop.stopped" if self.paused.as_ref().is_none_or(|(at, _)| *at < seq) => {
+                let reason = data["reason"].as_str().unwrap_or("stopped");
+                let text = match data["item"].as_str() {
+                    Some(item) => format!("{reason} · {item}"),
+                    None => reason.to_string(),
+                };
+                self.entries.push(Entry::Context {
+                    source: "engine".into(),
+                    text: format!("paused: {text}"),
+                });
+                self.paused = Some((seq, text));
+            }
+            "loop.continuation" | "loop.armed" => self.paused = None,
             _ => {}
         }
     }
@@ -1571,6 +1594,36 @@ mod tests {
         };
         assert!(tool.failed);
         assert_eq!(tool.output.as_deref(), Some("boom"));
+    }
+
+    /// A drain can end for a reason the operator must be able to read: blocked
+    /// item, unchanged list, goal still open. The engine records it, so the
+    /// view has to show it instead of looking idle.
+    #[test]
+    fn a_classified_stop_reaches_the_transcript_with_its_reason() {
+        let mut transcript = Transcript::default();
+        transcript.apply_event(
+            7,
+            "loop.stopped",
+            &json!({"reason": "blocked", "item": "memory domain"}),
+        );
+        let Entry::Context { source, text } = transcript.entries.last().expect("a row") else {
+            panic!("a stop is context, not a message: {:?}", transcript.entries);
+        };
+        assert_eq!(source, "engine");
+        assert!(text.contains("blocked"), "{text}");
+        assert!(text.contains("memory domain"), "{text}");
+
+        // A replay of the same event must not paint a second row, and a
+        // continuation clears the state because the Session is moving again.
+        transcript.apply_event(
+            7,
+            "loop.stopped",
+            &json!({"reason": "blocked", "item": "memory domain"}),
+        );
+        assert_eq!(transcript.entries.len(), 1, "{:?}", transcript.entries);
+        transcript.apply_event(9, "loop.continuation", &json!({}));
+        assert!(transcript.paused.is_none());
     }
 
     #[test]
