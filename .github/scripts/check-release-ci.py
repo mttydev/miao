@@ -17,7 +17,14 @@ def require_success(runs, sha, workflow):
 
 
 POLL_SECONDS = 30
-WAIT_SECONDS = 45 * 60
+# The longest job in the CI plan is 60 minutes. A wedged self-hosted runner is
+# killed only when that limit runs out, and the retry-cancelled workflow then
+# re-runs the cancelled leg for another full job budget. A gate that gave up
+# after one job budget failed a release while its own automation was still
+# recovering: on 2026-11-18 the gate aborted at 45 minutes with the macOS TUI
+# leg still wedged, and the commit it refused was green everywhere else. Wait
+# out one hang plus one retry, with room for queueing on both.
+WAIT_SECONDS = 150 * 60
 
 
 def fetch_runs(repo, sha, workflow):
