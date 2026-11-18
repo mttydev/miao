@@ -1293,7 +1293,14 @@ pub fn trim_history_to_fit(messages: &mut Vec<Message>, budget: u64) -> TrimStat
         .collect::<Vec<_>>();
     let mut total = sizes.iter().sum::<usize>();
     stats.before_bytes = total;
-    let over = |total: usize| (total as u64).div_ceil(2) > budget;
+    // Trim to below nine tenths of the budget rather than to the boundary.
+    // Left at the boundary, one tool result puts the request back over the
+    // limit and the engine trims again on the very next step — observed as
+    // 11,306 trims across 2,115 turns. The headroom buys several steps before
+    // the next trim, and the oldest history beyond it is what a bounded window
+    // cannot carry anyway.
+    let target = budget.saturating_sub(budget / 10);
+    let over = |total: usize| (total as u64).div_ceil(2) > target;
     let mut dropped = 0;
     // The trailing message is the operator's prompt: without it the request has
     // nothing to do, so it is never dropped.
