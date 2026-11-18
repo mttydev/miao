@@ -1,0 +1,39 @@
+name: retry-cancelled
+
+# A job that never reached a runner is an infrastructure cancellation, not a
+# verdict on the commit. On 2026-11-18 a `macos-15` leg queued for fifteen
+# minutes and was cancelled with `runner_name` empty — three times across two
+# workflows — and the release gate then refused to ship a commit whose code was
+# green everywhere else. Re-running the failed jobs is exactly what an operator
+# does by hand.
+#
+# Only push runs are retried: a pull request's older run is cancelled on
+# purpose when a new push supersedes it, and retrying that would race the run
+# that replaced it. `run_attempt < 3` bounds the retries to two, so a runner
+# pool that is genuinely down reports red instead of looping.
+on:
+  workflow_run:
+    workflows: [ci, native, release]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  retry:
+    if: >-
+      github.event.workflow_run.conclusion == 'cancelled' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Re-run the cancelled jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          echo "attempt $RUN_ATTEMPT for run $RUN_ID was cancelled; re-running its failed jobs"
+          gh run rerun "$RUN_ID" --failed --repo "$GITHUB_REPOSITORY"
