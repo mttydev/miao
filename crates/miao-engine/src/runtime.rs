@@ -4155,9 +4155,8 @@ async fn execute(
             .await?;
         inner
             .store
-            .record(
+            .record_instructions_if_changed(
                 session,
-                crate::events::Lifecycle::InstructionsLoaded.name(),
                 json!({"run_id":run,"sources":sources,"location":inner.tools.location()}),
             )
             .await?;
