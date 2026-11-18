@@ -11,6 +11,15 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.91] - 2026-11-18
+
+### Fixed
+- **engine**: elide old tool output before trimming a request that does not fit (#3185) (`6bb83df969`)
+- **engine**: stop a stale checklist and name the way out of a spent budget (#3183) (`7ab685ab85`)
+
+### Performance
+- **engine**: keep 64 bits of each prefix hash instead of the whole digest (#3186) (`977d0e6cdd`)
+
 ## [0.3.90] - 2026-11-18
 
 ### Added
