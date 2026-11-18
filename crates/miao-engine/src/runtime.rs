@@ -635,6 +635,48 @@ fn bound_budget(
     over.then(|| request_budget(window, headroom))
 }
 
+/// The request bound for one step of a drain.
+///
+/// `cap` is the bound this drain already imposed, as `(window, tokens)`. It is
+/// reused while the window is unchanged: a provider's count is of the request it
+/// answered — the trimmed one — so after a trim that count no longer proves the
+/// next assembly fits, while the durable history it was hiding is still there.
+/// `fresh` is the evidence a step without a bound may use.
+fn step_bound(cap: Option<(u64, u64)>, window: u64, fresh: Option<u64>) -> Option<(u64, u64)> {
+    cap.filter(|(at, _)| *at == window)
+        .or_else(|| fresh.map(|budget| (window, budget)))
+}
+
+#[cfg(test)]
+mod request_bound_tests {
+    use super::step_bound;
+
+    #[test]
+    fn a_trimmed_drain_keeps_its_bound_without_a_fresh_count() {
+        assert_eq!(
+            step_bound(Some((95_232, 33_184)), 95_232, None),
+            Some((95_232, 33_184)),
+            "the count is of the trimmed request; the durable history is unchanged"
+        );
+    }
+
+    #[test]
+    fn a_bound_for_another_window_is_not_reused() {
+        assert_eq!(step_bound(Some((95_232, 33_184)), 1_000_000, None), None);
+        assert_eq!(
+            step_bound(Some((95_232, 33_184)), 1_000_000, Some(600_000)),
+            Some((1_000_000, 600_000)),
+            "a wider model is planned against its own window"
+        );
+    }
+
+    #[test]
+    fn a_drain_without_a_bound_still_needs_fresh_evidence() {
+        assert_eq!(step_bound(None, 95_232, None), None);
+        assert_eq!(step_bound(None, 95_232, Some(33_184)), Some((95_232, 33_184)));
+    }
+}
+
 impl Inner {
     /// Remember the window the endpoint itself stated when it refused a request.
     /// Keyed by the serving model, because one engine serves every Session in a
@@ -3910,6 +3952,10 @@ async fn execute(
     // turns, which is why a busy turn never noticed its own stale list.
     let mut ledger_turns: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
+    // The bound a trimmed request imposed on this drain, as (window, tokens).
+    // See the request-assembly gate: the count a provider reports is of the
+    // trimmed request, so it cannot be the only evidence once a trim happened.
+    let mut request_cap: Option<(u64, u64)> = None;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
@@ -4336,15 +4382,24 @@ async fn execute(
                 };
                 pressure = counted.map(|counted| (limits.window, counted));
                 compaction_threshold = Some(limits.budget().threshold()).filter(|at| *at > 0);
-                bound_budget(
+                // A trim is not a one-off. It bounds the request this step
+                // sends, but the durable history it hid is rebuilt for the next
+                // step, and the provider's count of that trimmed request then
+                // says the history fits — so step 1 went out at 9.2 MB against
+                // a 95 KB window and was refused. Keeping the bound for the
+                // rest of the drain is what makes every step fit; a settled
+                // compaction clears it, because then the history itself shrank.
+                let fresh = bound_budget(
                     limits.window,
                     limits.headroom,
                     refused_before,
                     counted,
                     inner.summarizer_unavailable(session).await,
                     limits.budget().threshold(),
-                )
-                .map(|budget| (limits.window, budget))
+                );
+                let bound = step_bound(request_cap, limits.window, fresh);
+                request_cap = bound;
+                bound
             }
             None => None,
         };
@@ -6042,6 +6097,9 @@ command: None,
             .unwrap_or(false);
             inner.keep_breaker(session, breaker).await;
             if compacted {
+                // The history itself shrank, so the per-step bound it needed is
+                // no longer evidence of anything.
+                request_cap = None;
                 // The next provider request rides the restore budget note.
                 inner
                     .restore_pending
