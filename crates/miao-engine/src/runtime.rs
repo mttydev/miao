@@ -4427,6 +4427,16 @@ async fn execute(
                     "kind": "context.trimmed", "messages": stats.messages,
                     "window": window, "budget": target, "saved_bytes": saved,
                 }));
+                // The request did not fit, so the durable history is what has
+                // to shrink. The boundary trigger cannot see that: it compares
+                // the provider's count of the *trimmed* request with the window
+                // and reports `under_threshold`, which is how a Session sat at
+                // 100% while every step re-trimmed the same 9 MB. Asking here
+                // is idempotent while a pass is pending.
+                let _ = inner
+                    .store
+                    .request_compaction(session, crate::protocol::CompactScope::default())
+                    .await;
             }
         }
         // The disclosed tool surface as one hash. Recorded next to the policy
