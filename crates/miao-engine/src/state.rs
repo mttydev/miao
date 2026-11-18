@@ -221,6 +221,58 @@ pub fn runnable_state(state: &Value) -> Result<Vec<String>, Error> {
         .collect())
 }
 
+/// Work the Session cannot advance on its own: items marked blocked, or items
+/// still waiting on a dependency that is not completed. Each entry names the
+/// item and the dependencies it is waiting for.
+///
+/// This is what makes a stop honest. An empty [`runnable_state`] is ambiguous
+/// on its own — the list may be finished, empty, or blocked — and a continuation
+/// loop that treats all three the same parks an active goal with nothing moving
+/// it. A caller that finds nothing runnable reads this to say which step would
+/// unblock the rest, or that the Session genuinely has nothing left.
+pub fn blocked_work(state: &Value) -> Vec<(String, Vec<String>)> {
+    if state["todos"].is_null() {
+        return Vec::new();
+    }
+    let Ok(todos) = serde_json::from_value::<Vec<Todo>>(state["todos"]["value"]["todos"].clone())
+    else {
+        return Vec::new();
+    };
+    let by_id: HashMap<&str, &Todo> = todos
+        .iter()
+        .filter_map(|todo| todo.id.as_deref().map(|id| (id, todo)))
+        .collect();
+    let unmet = |todo: &Todo| -> Vec<String> {
+        todo.depends_on
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|id| {
+                !by_id
+                    .get(id.as_str())
+                    .is_some_and(|parent| matches!(parent.status, TodoStatus::Completed))
+            })
+            .cloned()
+            .collect()
+    };
+    todos
+        .iter()
+        .filter(|todo| match todo.status {
+            TodoStatus::Blocked => true,
+            TodoStatus::Pending | TodoStatus::InProgress | TodoStatus::Waiting => {
+                !unmet(todo).is_empty()
+            }
+            TodoStatus::Completed | TodoStatus::Cancelled => false,
+        })
+        .map(|todo| {
+            (
+                todo.id.clone().unwrap_or_else(|| todo.content.clone()),
+                unmet(todo),
+            )
+        })
+        .collect()
+}
+
 /// The todo list's meaning: which items exist and what state each is in.
 /// Prose, priority and dependency decoration are excluded on purpose — the
 /// continuation loop asks whether a turn moved the work, and rewriting a todo's
@@ -438,6 +490,32 @@ pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// A list with nothing runnable is not the same as a finished one. This
+    /// names what is holding it, and the dependency that would release it.
+    #[test]
+    fn blocked_work_names_the_item_and_the_dependency_holding_it() {
+        let state = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "port mem", "status": "completed", "priority": "high"},
+            {"id": "b", "content": "memory domain", "status": "blocked", "priority": "high", "depends_on": ["a"]},
+            {"id": "c", "content": "maps", "status": "pending", "priority": "medium", "depends_on": ["z"]},
+        ]}}});
+        let blocked = super::blocked_work(&state);
+        assert_eq!(blocked.len(), 2, "{blocked:?}");
+        assert_eq!(blocked[0].0, "b");
+        assert!(blocked[0].1.is_empty(), "b's only dependency completed");
+        assert_eq!(blocked[1].0, "c");
+        assert_eq!(blocked[1].1, vec!["z".to_string()]);
+    }
+
+    /// A finished list is not blocked: it has simply nothing left, which is a
+    /// different stop and must not be nudged.
+    #[test]
+    fn a_finished_list_has_no_blocked_work() {
+        let state = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "done", "status": "completed", "priority": "low"},
+        ]}}});
+        assert!(super::blocked_work(&state).is_empty());
+    }
     use serde_json::{json, Value};
 
     #[test]
