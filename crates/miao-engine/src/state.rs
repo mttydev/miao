@@ -406,6 +406,18 @@ impl Mutation {
                 {
                     return Err(ToolError::InvalidInput);
                 }
+                // A block is a claim the operator acts on. "Too large to do at
+                // once" is not one — it is a refusal to decompose, and honouring
+                // it parks a Session the operator already approved. The engine's
+                // own blocks carry a `loop: ` prefix and are exempt, because the
+                // loop wrote them and no model claim is involved.
+                if matches!(goal.status, GoalStatus::Blocked)
+                    && goal.evidence.as_deref().is_none_or(|text| {
+                        !text.starts_with("loop: ") && !blocked_on_external_work(text)
+                    })
+                {
+                    return Err(ToolError::InvalidInput);
+                }
                 let mut value = json!({"objective":goal.objective,"status":goal.status,"evidence":goal.evidence});
                 if let Some(budget) = goal.budget {
                     value["budget"] = json!(budget);

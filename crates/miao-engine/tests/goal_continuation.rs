@@ -120,7 +120,10 @@ async fn setup(
     location: &std::path::Path,
 ) {
     seed_work(store, ready, location).await;
-    store.update_state("s", "goal", Mutation::parse("goal", json!({"objective":"Finish tasks","status":status,"autonomous":autonomous,"evidence":"Explicit engagement state"})).unwrap()).await.unwrap();
+    // A blocked goal has to name an external dependency: "too large to finish"
+    // is a refusal to decompose and the write surface now rejects it. This
+    // fixture is about the loop's behaviour, so it states a real one.
+    store.update_state("s", "goal", Mutation::parse("goal", json!({"objective":"Finish tasks","status":status,"autonomous":autonomous,"evidence":"the deployment window needs the operator's approval"})).unwrap()).await.unwrap();
 }
 /// Wait for the n-th completed run. `finished` returns on the first one it
 /// finds, which is enough for one run but not for a sequence of runs.
