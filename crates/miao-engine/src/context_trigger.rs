@@ -1835,8 +1835,14 @@ mod tests {
             1,
             Some(DEFAULT_PRUNE_TOTAL_CHARS),
         );
-        assert_eq!(stats.payloads, 0, "80 KB of candidates fit the 256 KB target");
-        assert_eq!(messages[0].content[0]["content"].as_str().unwrap().len(), 40_000);
+        assert_eq!(
+            stats.payloads, 0,
+            "80 KB of candidates fit the 256 KB target"
+        );
+        assert_eq!(
+            messages[0].content[0]["content"].as_str().unwrap().len(),
+            40_000
+        );
 
         let mut messages = vec![payload("a"), payload("b")];
         let stats = prune_history_with_stats(&mut messages, DEFAULT_PRUNE_CHARS, 1, Some(20_000));
