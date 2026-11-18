@@ -11,6 +11,14 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.85] - 2026-11-18
+
+### Added
+- **codegraph**: prewarm indexes and wait for a complete build (#3156) (`de934a194b`)
+
+### Fixed
+- **release**: retry a notarization poll that lost its network (#3155) (`422d8c9921`)
+
 ## [0.3.84] - 2026-11-17
 
 ### Added
