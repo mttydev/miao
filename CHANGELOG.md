@@ -11,6 +11,17 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.88] - 2026-11-18
+
+### Added
+- **engine**: an active goal may not end on a text-only turn (#3168) (`4aa06f8653`)
+
+### Fixed
+- **tui**: stop calling a decision history "needs you" (#3167) (`fa818d46b1`)
+
+### Performance
+- **engine**: stop recording an unchanged context selection every turn (#3166) (`6b00287b48`)
+
 ## [0.3.87] - 2026-11-18
 
 ### Added
