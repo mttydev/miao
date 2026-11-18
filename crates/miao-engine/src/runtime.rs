@@ -2875,7 +2875,8 @@ impl Runtime {
         let explicit = binding
             .as_ref()
             .and_then(|binding| binding.route_id.as_ref())
-            .and_then(|route| self.inner.provider().route_account(route));
+            .and_then(|route| self.inner.provider().route_account(route))
+            .filter(|account| !account.is_default);
         let account = match &explicit {
             Some(account) => account
                 .id
