@@ -37,6 +37,32 @@ pub fn list(root: &Path) -> Result<Vec<Tree>, Error> {
     Ok(parse(&listed))
 }
 
+/// The main checkout when `root` is a linked worktree, `None` when `root` is
+/// the checkout itself or is not a git top-level.
+///
+/// The code index is keyed by the canonical workspace directory, so a linked
+/// worktree would otherwise start from an empty index and pay a full rebuild
+/// even though its files mostly match the checkout it came from. The common
+/// git directory names that checkout without asking git to resolve every
+/// worktree in the repository.
+pub fn main_checkout(root: &Path) -> Option<PathBuf> {
+    let root = canonical(root);
+    let top = git(&root, &["rev-parse", "--show-toplevel"]).ok()?;
+    let top = canonical(Path::new(top.trim()));
+    if top != root {
+        return None;
+    }
+    let common = git(&root, &["rev-parse", "--git-common-dir"]).ok()?;
+    let common = PathBuf::from(common.trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        root.join(common)
+    };
+    let main = canonical(&common).parent()?.to_path_buf();
+    (main != root).then_some(main)
+}
+
 /// Add a worktree named `name`, creating or resetting the branch of that name.
 pub fn create(root: &Path, name: &str) -> Result<Tree, Error> {
     validate(name)?;
@@ -290,6 +316,22 @@ mod tests {
         assert!(
             roots.iter().any(|root| root == "/elsewhere"),
             "an unrelated root stays put"
+        );
+    }
+
+    #[test]
+    fn a_linked_tree_knows_its_main_checkout() {
+        let root = repository();
+        let tree = create(&root, "work").expect("create");
+        assert_eq!(
+            main_checkout(Path::new(&tree.path)),
+            Some(canonical(&root)),
+            "a linked worktree resolves to its checkout"
+        );
+        assert_eq!(
+            main_checkout(&root),
+            None,
+            "the checkout itself has no parent checkout"
         );
     }
 }

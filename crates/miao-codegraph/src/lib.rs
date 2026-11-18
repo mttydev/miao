@@ -18,6 +18,7 @@ mod sync;
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,6 +26,8 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("index still building: {pending} file(s) pending")]
+    Pending { pending: usize },
 }
 
 /// One tool answer plus what the index did to produce it. The counters are what
@@ -66,10 +69,56 @@ impl Index {
         self
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn refresh(&mut self) -> Result<(), Error> {
         let report = sync::sync(&mut self.connection, &self.root, self.budget)?;
         self.report = Some(report);
         Ok(())
+    }
+
+    /// Refresh until the workspace has no pending files or `deadline` passes.
+    ///
+    /// A bounded refresh is what keeps one tool call inside a turn, but a
+    /// partial index is worse than a slow answer for the caller: it can only
+    /// return a subset of the workspace and may blame the missing symbols on
+    /// the code. The engine therefore waits here instead of serving the
+    /// half-built index. `Pending` is reported rather than a partial answer
+    /// when the deadline passes.
+    pub fn wait_until_ready(&mut self, deadline: Duration) -> Result<(), Error> {
+        let started = Instant::now();
+        loop {
+            match self.refresh() {
+                Ok(()) => {
+                    let pending = self
+                        .report
+                        .as_ref()
+                        .map(|report| report.pending)
+                        .unwrap_or(0);
+                    if pending == 0 {
+                        return Ok(());
+                    }
+                    if started.elapsed() >= deadline {
+                        return Err(Error::Pending { pending });
+                    }
+                }
+                Err(Error::Sqlite(error)) if busy(&error) => {
+                    if started.elapsed() >= deadline {
+                        return Err(Error::Pending {
+                            pending: self
+                                .report
+                                .as_ref()
+                                .map(|report| report.pending)
+                                .unwrap_or(0),
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub fn explore(
@@ -148,6 +197,44 @@ impl Index {
             millis: report.millis,
         }
     }
+}
+
+/// Copy a completed index into a new workspace's index file.
+///
+/// A linked worktree has the same relative source layout as its main checkout,
+/// so the rows copied here are valid for every file whose size and mtime did
+/// not change. The first refresh against the worktree then re-extracts only the
+/// files the branch touched, instead of rebuilding the whole repository.
+pub fn seed(target: &Path, source: &Path) -> Result<bool, Error> {
+    if target.exists() || !source.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let target_text = target.to_str().ok_or_else(|| {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "index path is not UTF-8",
+        ))
+    })?;
+    let connection =
+        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    match connection.execute("VACUUM INTO ?1", [target_text]) {
+        Ok(_) => Ok(true),
+        // Another session may have seeded the same worktree while this copy
+        // was running; the existing file is the one we would have written.
+        Err(_) if target.exists() => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::DatabaseBusy
+    )
 }
 
 fn digest(bytes: &[u8]) -> String {

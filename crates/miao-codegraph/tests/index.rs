@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 fn write(root: &Path, path: &str, text: &str) {
     let full = root.join(path);
@@ -598,4 +599,69 @@ fn a_shell_source_resolves_a_cross_file_function() {
         "{}",
         callers.content
     );
+}
+
+#[test]
+fn wait_until_ready_finishes_a_build_that_the_budget_capped() {
+    let dir = tempfile::tempdir().expect("temp");
+    let root = dir.path();
+    for number in 0..5 {
+        write(
+            root,
+            &format!("src/f{number}.rs"),
+            &format!("pub fn symbol{number}() {{}}\n"),
+        );
+    }
+    let mut index = index(root).with_budget(1, 60_000);
+    let partial = index.explore("symbol0", None, None).expect("explore");
+    assert!(
+        partial.pending > 0,
+        "the one-file budget indexed everything"
+    );
+    index
+        .wait_until_ready(Duration::from_secs(10))
+        .expect("ready");
+    let complete = index.explore("symbol0", None, None).expect("explore");
+    assert_eq!(complete.pending, 0);
+    assert_eq!(complete.files, 5);
+}
+
+#[test]
+fn a_deadline_reports_pending_instead_of_returning_half_an_index() {
+    let dir = tempfile::tempdir().expect("temp");
+    let root = dir.path();
+    write(root, "src/one.rs", "pub fn one() {}\n");
+    let mut index = index(root).with_budget(0, 60_000);
+    let error = index
+        .wait_until_ready(Duration::from_millis(0))
+        .expect_err("a zero budget cannot finish");
+    match error {
+        miao_codegraph::Error::Pending { pending } => assert!(pending > 0),
+        other => panic!("{other}"),
+    }
+}
+
+#[test]
+fn a_seeded_index_reuses_unchanged_rows_and_reindexes_only_the_change() {
+    let dir = tempfile::tempdir().expect("temp");
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(tree.join("src")).expect("tree");
+    write(&tree, "src/one.rs", "pub fn one() {}\n");
+    write(&tree, "src/two.rs", "pub fn two() {}\n");
+    let source = dir.path().join("main.db");
+    let mut main = miao_codegraph::Index::open(&tree, &source).expect("index");
+    main.explore("one", None, None).expect("explore");
+
+    let target = dir.path().join("worktree.db");
+    assert!(miao_codegraph::seed(&target, &source).expect("seed"));
+    assert!(!miao_codegraph::seed(&target, &source).expect("second seed"));
+
+    let mut seeded = miao_codegraph::Index::open(&tree, &target).expect("index");
+    let reused = seeded.explore("one", None, None).expect("explore");
+    assert_eq!(reused.refreshed, 0, "seeded rows were reindexed");
+    assert!(reused.content.contains("src/one.rs"), "{}", reused.content);
+
+    write(&tree, "src/two.rs", "pub fn two() -> u8 { 2 }\n");
+    let changed = seeded.explore("one", None, None).expect("explore");
+    assert_eq!(changed.refreshed, 1, "{}", changed.content);
 }
