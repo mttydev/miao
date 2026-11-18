@@ -2872,43 +2872,45 @@ impl Runtime {
         ) {
             return Err(Error::Conflict);
         }
-        let explicit = binding
+        let picked_account = binding
             .as_ref()
             .and_then(|binding| binding.route_id.as_ref())
             .and_then(|route| self.inner.provider().route_account(route))
-            .filter(|account| !account.is_default);
-        let account = match &explicit {
-            Some(account) => account
-                .id
-                .as_ref()
-                .map(|id| crate::session_account::Selection {
-                    credential_id: Some(id.clone()),
-                }),
-            None => self.inner.store.account_selection(session).await?,
+            .filter(|account| !account.is_default)
+            .and_then(|account| account.id)
+            .map(|id| crate::session_account::Selection {
+                credential_id: Some(id),
+            });
+        // A pin keeps a model pick only while it still serves the picked model.
+        // Otherwise the pick owns the account: it moves the pin to the route the
+        // picked model lives on, and clears it when no account serves that
+        // model. Keeping a stale pin made `resolve` answer with a model the old
+        // account serves, so the pick silently never took effect.
+        let pinned = self.inner.store.account_selection(session).await?;
+        let keeps = match &pinned {
+            Some(pin) => {
+                crate::session_account::serves(&self.inner.provider(), pin, binding.as_ref())?
+            }
+            None => false,
         };
-        let effective = if explicit.is_some() {
-            binding.clone()
-        } else {
-            match &account {
-                Some(account) => crate::session_account::resolve(
+        let (effective, account) = match pinned.filter(|_| keeps) {
+            Some(pin) => (
+                crate::session_account::resolve(
                     &self.inner.provider(),
                     binding.as_ref(),
-                    account.credential_id.as_deref(),
+                    pin.credential_id.as_deref(),
                 )?,
-                None => binding.clone(),
-            }
+                Some(pin),
+            ),
+            None => (binding.clone(), picked_account),
         };
         let selected = crate::session_model::select(&self.inner.provider(), effective.as_ref())?;
         let (history, _) = self.inner.store.selected_input(session).await?;
         crate::session_model::validate_history(&history, effective.as_ref(), selected.identity())?;
-        if explicit.is_some() {
-            self.inner
-                .store
-                .select_model_with_account(session, binding, account)
-                .await
-        } else {
-            self.inner.store.select_model(session, binding).await
-        }
+        self.inner
+            .store
+            .select_model_with_account(session, binding, account)
+            .await
     }
 
     pub async fn resolve_recovery(

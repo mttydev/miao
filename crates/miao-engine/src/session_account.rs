@@ -159,3 +159,57 @@ pub(crate) fn resolve(
     };
     Ok(binding)
 }
+
+/// Whether a pinned account still serves the model a pick names.
+///
+/// A pick that leaves the pin's routes belongs to the pick: keeping the pin
+/// would let [`resolve`] answer with a model that account serves, so the picked
+/// model would silently not take effect. The comparison is on the model family,
+/// not only the wire identity, because one provider can serve two accounts
+/// under the same protocol and model name.
+pub(crate) fn serves(
+    provider: &std::sync::Arc<dyn crate::provider::Provider>,
+    pin: &Selection,
+    binding: Option<&Binding>,
+) -> Result<bool, Error> {
+    let Some(picked) = binding else {
+        return Ok(true);
+    };
+    let identity = crate::session_model::select(provider, binding)?
+        .identity()
+        .ok_or_else(|| Error::Invalid("current model identity is unavailable".into()))?;
+    let Some(route) = provider
+        .account_route(pin.credential_id.as_deref(), Some(picked), &identity)
+        .map_err(|error| Error::Invalid(error.to_string()))?
+    else {
+        return Ok(false);
+    };
+    let catalog = provider.model_catalog();
+    let family = |route_id: Option<&str>, protocol: &str, model: &str| {
+        catalog
+            .iter()
+            .find(|info| match route_id {
+                Some(id) => info.route_id.as_deref() == Some(id),
+                None => info.route_id.is_none() && info.protocol == protocol && info.model == model,
+            })
+            .map(|info| {
+                (
+                    info.protocol.clone(),
+                    info.model.clone(),
+                    info.model_key.clone(),
+                )
+            })
+    };
+    Ok(
+        match (
+            family(picked.route_id.as_deref(), &picked.protocol, &picked.model).as_ref(),
+            family(route.route_id.as_deref(), &route.protocol, &route.model).as_ref(),
+        ) {
+            (Some(picked_key), Some(route_key)) => picked_key == route_key,
+            // A route the host publishes without account metadata names no
+            // family, so the wire identity is the only evidence left that the
+            // pin still answers for the picked model.
+            _ => route.protocol == picked.protocol && route.model == picked.model,
+        },
+    )
+}
