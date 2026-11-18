@@ -11,6 +11,16 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.90] - 2026-11-18
+
+### Added
+- **tui**: name a goal's state, including the wait it leaves behind (#3179) (`2747af59c9`)
+
+### Fixed
+- **engine**: keep a trimmed request bound for the rest of the drain (#3182) (`a1ea7a4b30`)
+- **engine**: let the operator lift a spent Goal budget (#3181) (`3253bd8c3e`)
+- **engine**: a model pick moves an account pin that does not serve it (#3178) (`e69150a7fd`)
+
 ## [0.3.89] - 2026-11-18
 
 ### Added
