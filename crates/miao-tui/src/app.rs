@@ -2008,9 +2008,7 @@ impl App {
             Builtin::Recall => {
                 self.notice("/recall <tool_use_id> restores an archived tool output")
             }
-            Builtin::Goal => {
-                self.notice("/goal budget <turns> raises this Session's Goal budget")
-            }
+            Builtin::Goal => self.notice("/goal budget <turns> raises this Session's Goal budget"),
             Builtin::TurnTimings => self.open_turn_timings(),
             Builtin::Tag => match self.session.as_ref() {
                 Some(session) => self.open_dialog(Dialog::tag(&session.id, "")),
