@@ -212,6 +212,14 @@ pub(crate) fn history_summary_text(summary: &str) -> String {
     format!("<history-summary>\n{summary}\n</history-summary>\nThis summarizes completed history. Do not repeat completed operations or unknown side effects automatically.")
 }
 
+/// Request-only guidance for an operator who asked for a finished result.
+///
+/// A model that answers with a plan and then stops has ended its drain: the
+/// engine sees a text-only turn, nothing continues it, and the operator has to
+/// prompt again for each step they already asked for once. The note states the
+/// contract — keep working until the deliverable exists, report once.
+pub(crate) const WHOLE_TASK_NOTE: &str = "WHOLE TASK\n\nThe operator asked for the complete result, not a series of steps reported back. Keep calling tools until the deliverable exists and is verified, and do not end a turn to announce what you will do next. Do not split the request into separate confirmations. Report once, at the end.";
+
 pub(crate) fn restore_note() -> String {
     "The conversation was just compacted into a summary, so earlier details may be missing. \
      You have a restore budget of about 50,000 tokens: re-read the files you need to continue \
