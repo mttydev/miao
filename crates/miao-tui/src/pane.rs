@@ -3870,11 +3870,12 @@ impl Pane for SidebarPane {
                             text_width,
                         );
                     }
-                    // What a person had to decide, including the drafts they
-                    // rewrote: the headline count, then only the kinds that
-                    // happened. The gate admits the row for edits alone, so an
-                    // edits-only Session reads "needs you 2 edits" instead of a
-                    // row of zeroes.
+                    // What a person decided over this Session, including the
+                    // drafts they rewrote: the headline count, then only the
+                    // kinds that happened. These are history, not a queue —
+                    // "needs you" read as a pending request with nothing to
+                    // answer. The gate admits the row for edits alone, so an
+                    // edits-only Session still reads "decisions 2 edits".
                     let decisions =
                         usage.approvals + usage.answers + usage.rejections + usage.cancels;
                     if decisions > 0 || usage.input_edits > 0 {
@@ -3914,7 +3915,7 @@ impl Pane for SidebarPane {
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            format!("needs you {}", parts.join(" · ")),
+                            format!("decisions {}", parts.join(" · ")),
                             Style::new().fg(palette.text_muted),
                             text_width,
                         );
@@ -9108,14 +9109,14 @@ mod tests {
         );
         // What went wrong leads; supervision and delegation follow, because a
         // monochrome terminal can only carry priority through order.
-        assert!(at("retried") < at("needs you"), "{painted:#?}");
-        assert!(at("needs you") < at("subagents"), "{painted:#?}");
+        assert!(at("retried") < at("decisions"), "{painted:#?}");
+        assert!(at("decisions") < at("subagents"), "{painted:#?}");
         // Only the parts that happened: an approval and no answers must not
         // paint "0 answers".
-        let needs_you = &painted[at("needs you")];
-        assert!(needs_you.contains("needs you 1"), "{needs_you:?}");
-        assert!(!needs_you.contains("0 answer"), "{needs_you:?}");
-        assert!(!needs_you.contains("0 reject"), "{needs_you:?}");
+        let decisions = &painted[at("decisions")];
+        assert!(decisions.contains("decisions 1"), "{decisions:?}");
+        assert!(!decisions.contains("0 answer"), "{decisions:?}");
+        assert!(!decisions.contains("0 reject"), "{decisions:?}");
         // Two retries and one failed attempt inside five attempts stay on the
         // one rework row that already says how many attempts were billed.
         let rework = &painted[at("retried")];
