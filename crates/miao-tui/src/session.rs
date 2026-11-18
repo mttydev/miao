@@ -975,15 +975,25 @@ impl Transcript {
             // A later drain that ended any other way supersedes the failure.
             "stop" => self.failure = None,
             "tool.completed" => self.push_display(data),
-            // A classified stop is a fact about the Session, not a message, so
-            // it is carried out of the event stream into the transcript where
-            // the operator already looks. Replays are ignored by sequence.
+            // A classified stop is a status fact, not a message: the engine
+            // already persists the full notice as an injected-context message,
+            // so this only marks where the loop paused. A session that pauses
+            // once per turn would otherwise paint one identical block per
+            // pause on every resume, which buried the conversation; the newest
+            // entry replaces the previous one, so exactly one pause stays.
             "loop.stopped" if self.paused.as_ref().is_none_or(|(at, _)| *at < seq) => {
                 let reason = data["reason"].as_str().unwrap_or("stopped");
                 let text = match data["item"].as_str() {
                     Some(item) => format!("{reason} · {item}"),
                     None => reason.to_string(),
                 };
+                self.entries.retain(|entry| {
+                    !matches!(
+                        entry,
+                        Entry::Context { source, text }
+                            if source == "engine" && text.starts_with("paused: ")
+                    )
+                });
                 self.entries.push(Entry::Context {
                     source: "engine".into(),
                     text: format!("paused: {text}"),
@@ -1624,6 +1634,33 @@ mod tests {
         assert_eq!(transcript.entries.len(), 1, "{:?}", transcript.entries);
         transcript.apply_event(9, "loop.continuation", &json!({}));
         assert!(transcript.paused.is_none());
+    }
+
+    /// A session that pauses once per turn records one stop each time, and a
+    /// resume replays all of them. Each replay used to add its own block, so a
+    /// session that waited on background work came back as a wall of identical
+    /// rows. Only the newest pause stays; the engine's own notice still keeps
+    /// the detail in history.
+    #[test]
+    fn replaying_many_stops_keeps_only_the_newest_pause() {
+        let mut transcript = Transcript::default();
+        transcript.apply_event(4, "loop.stopped", &json!({"reason": "waiting"}));
+        transcript.apply_event(8, "loop.continuation", &json!({}));
+        transcript.apply_event(12, "loop.stopped", &json!({"reason": "todo-stale"}));
+        transcript.apply_event(19, "loop.stopped", &json!({"reason": "waiting"}));
+        let pauses: Vec<&str> = transcript
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Context { source, text }
+                    if source == "engine" && text.starts_with("paused: ") =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pauses, ["paused: waiting"], "{:?}", transcript.entries);
     }
 
     #[test]
