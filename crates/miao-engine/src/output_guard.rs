@@ -235,6 +235,46 @@ pub(crate) fn neutralize(history: &mut [Message]) {
     }
 }
 
+/// Drop an assistant message that only repeats the one just before it.
+///
+/// A model that closes one turn with a conclusion and opens the next with the
+/// same conclusion states one fact twice, and the copy in the prompt teaches it
+/// to keep doing so — the reported "it says the same thing again and again".
+/// Only the request copy is touched: the durable transcript keeps both rows.
+/// A message carrying a tool call is never dropped, because the calls are the
+/// work; short courtesies repeat harmlessly and are left alone.
+pub(crate) fn collapse_repeats(history: &mut Vec<Message>) {
+    fn substantive(message: &Message) -> Option<String> {
+        let blocks = message.content.as_array()?;
+        if blocks.iter().any(|block| block["type"] != "text") {
+            return None;
+        }
+        let text = blocks
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (flat.chars().count() >= 80).then_some(flat)
+    }
+    let mut previous: Option<String> = None;
+    let mut keep = Vec::with_capacity(history.len());
+    for message in history.drain(..) {
+        let current = match message.role.as_str() {
+            "assistant" => substantive(&message),
+            // A user turn or a tool result between two replies is a boundary:
+            // the same words either side of it are two answers, not an echo.
+            _ => None,
+        };
+        if current.is_some() && current == previous {
+            continue;
+        }
+        previous = current;
+        keep.push(message);
+    }
+    *history = keep;
+}
+
 fn is_bullet(line: &str) -> bool {
     let mut characters = line.chars();
     matches!(characters.next(), Some('-' | '*' | '+'))
@@ -255,6 +295,56 @@ fn prose_pattern() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    use super::collapse_repeats;
+    use crate::protocol::Message;
+    use serde_json::json;
+
+    fn assistant(text: &str) -> Message {
+        Message {
+            role: "assistant".into(),
+            content: json!([{ "type": "text", "text": text }]),
+            checkpoint: None,
+            recorded_at_ms: None,
+        }
+    }
+
+    /// The same conclusion twice in a row is one fact; the request copy keeps
+    /// one, because the duplicate is what the model reads back and imitates.
+    #[test]
+    fn a_repeated_conclusion_is_collapsed_in_the_request_only() {
+        let long = "The map diverged because the reader rejects FILE mode, which is why the rebuild produced no picture at all this time.";
+        let mut history = vec![
+            Message {
+                role: "user".into(),
+                content: json!([{ "type": "text", "text": "why?" }]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            assistant(long),
+            assistant(long),
+        ];
+        collapse_repeats(&mut history);
+        assert_eq!(history.len(), 2, "{history:?}");
+    }
+
+    /// A turn that did work separates two identical replies: they are two
+    /// answers, not an echo, so neither may be dropped.
+    #[test]
+    fn a_message_with_a_call_or_a_boundary_is_never_dropped() {
+        let long = "The map diverged because the reader rejects FILE mode, which is why the rebuild produced no picture at all this time.";
+        let mut history = vec![
+            assistant(long),
+            Message {
+                role: "assistant".into(),
+                content: json!([{ "type": "tool_use", "id": "c1", "name": "bash", "input": {} }]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            assistant(long),
+        ];
+        collapse_repeats(&mut history);
+        assert_eq!(history.len(), 3, "{history:?}");
+    }
     use super::*;
 
     fn text(input: &str) -> Option<Channel> {
