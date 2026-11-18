@@ -18,8 +18,11 @@ jobs:
   version:
     runs-on: ubuntu-latest
     # The gate waits for the release commit's own CI, which is usually still
-    # queued right after the merge that created it.
-    timeout-minutes: 60
+    # queued right after the merge that created it, and it now also waits out a
+    # wedged leg plus its automatic retry. Keep this above the gate's own
+    # budget in check-release-ci.py, or the job is killed before the gate can
+    # report why.
+    timeout-minutes: 180
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}

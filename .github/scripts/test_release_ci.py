@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 
 spec = importlib.util.spec_from_file_location("release_ci", Path(__file__).with_name("check-release-ci.py"))
@@ -48,6 +49,30 @@ class ReleaseCITest(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.require_success([run(), run(id=2, status="in_progress", conclusion=None)], "release-sha", "test.yml")
         self.assertEqual(release.require_success([run(conclusion="failure"), run(id=2)], "release-sha", "test.yml"), "https://example.invalid/run/1")
+
+    def test_gate_outlasts_one_wedged_job_and_its_automatic_retry(self):
+        # A job wedged on a self-hosted runner is killed only when its own
+        # `timeout-minutes` runs out, and retry-cancelled then re-runs it for
+        # another full job budget. A gate shorter than both aborted a release
+        # on 2026-11-18 while its own automation was still recovering, so this
+        # test derives the budget from the workflows instead of restating it.
+        workflows = Path(__file__).resolve().parents[1].joinpath("workflows")
+        ci = workflows.joinpath("ci.yml").read_text()
+        guarded = [workflows.joinpath("ci.yml")] + [
+            workflows.joinpath(Path(used).name)
+            for used in re.findall(r"uses: \./\.github/workflows/([\w-]+\.yml)", ci)
+        ]
+        longest_job = max(
+            int(match.group(1))
+            for path in guarded
+            for match in re.finditer(r"timeout-minutes:\s*(\d+)", path.read_text())
+        )
+        self.assertGreaterEqual(release.WAIT_SECONDS, 2 * longest_job * 60 + 10 * 60)
+
+        release_yml = Path(__file__).resolve().parents[1].joinpath("workflows/release.yml").read_text()
+        version_job = release_yml.split("\n  cli:")[0]
+        version_timeout = int(re.search(r"timeout-minutes:\s*(\d+)", version_job).group(1))
+        self.assertGreaterEqual(version_timeout, release.WAIT_SECONDS // 60 + 15)
 
 
 if __name__ == "__main__":
