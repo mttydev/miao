@@ -16,6 +16,11 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+/// Startup budget for the fixture's first product-tool frame. It is not a
+/// boundary assertion: the tests that check how quickly a cancellation lands
+/// keep their own short deadlines.
+const FIXTURE_START: Duration = Duration::from_secs(60);
+
 struct Caller;
 
 #[async_trait]
@@ -91,7 +96,12 @@ async fn running_in(name: &str) -> Fixture {
         )
         .await
         .unwrap();
-    let frame = tokio::time::timeout(Duration::from_secs(5), receive.recv())
+    // The fixture's first frame is a startup budget, not a boundary assertion:
+    // on the Windows release gate this wait timed out at five seconds with 579
+    // other tests running beside it, while the same code was green everywhere
+    // else. The boundary tests below keep their short deadlines; only the wait
+    // for the run to reach its first product tool is generous.
+    let frame = tokio::time::timeout(FIXTURE_START, receive.recv())
         .await
         .unwrap()
         .unwrap();
