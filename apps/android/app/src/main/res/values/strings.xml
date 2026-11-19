@@ -159,6 +159,10 @@
     <string name="common_stop">停止</string>
     <string name="common_delete">删除</string>
     <string name="common_edit">编辑</string>
+    <string name="local_image_placeholder">（图片）</string>
+    <string name="local_tool_limit">（工具调用次数达到上限，先停在这里）</string>
+    <string name="export_user_label">我</string>
+    <string name="export_tool_label">工具</string>
     <string name="local_allow">允许</string>
     <string name="local_new_session">新会话</string>
     <string name="local_rename_short">改名</string>

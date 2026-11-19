@@ -196,49 +196,49 @@ fun LocalScreen(agent: LocalAgent) {
         var mcpField by remember(agent.mcpURL) { mutableStateOf(agent.mcpURL ?: "") }
         AlertDialog(
             onDismissRequest = { showSettings = false },
-            title = { Text("本机设置") },
+            title = { Text(stringResource(R.string.local_settings_title)) },
             text = {
                 Column(
                     Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     val themeContext = LocalContext.current
-                    Text("外观", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(stringResource(R.string.local_appearance), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row {
                         androidx.compose.material3.Checkbox(
                             checked = ThemePrefs.dynamic,
                             onCheckedChange = { ThemePrefs.set(themeContext, it) },
                         )
-                        Text("跟随系统壁纸取色（Material You，Android 12+）", fontSize = 12.sp)
+                        Text(stringResource(R.string.local_dynamic_color), fontSize = 12.sp)
                     }
-                    Text("工作区：${agent.workspace.path}", fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    Text(stringResource(R.string.local_workspace, agent.workspace.path), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                     Row {
                         androidx.compose.material3.Checkbox(
                             checked = agent.autoAllowTools,
                             onCheckedChange = { agent.autoAllowTools = it },
                         )
-                        Text("自动允许写入与联网（不再逐次确认）", fontSize = 12.sp)
+                        Text(stringResource(R.string.local_auto_allow), fontSize = 12.sp)
                     }
                     OutlinedTextField(
                         value = mcpField,
                         onValueChange = { mcpField = it },
-                        label = { Text("MCP 服务地址（可选，HTTP）") },
+                        label = { Text(stringResource(R.string.local_mcp_label)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { agent.setMcp(mcpField) }) { Text("保存并连接") }
+                        OutlinedButton(onClick = { agent.setMcp(mcpField) }) { Text(stringResource(R.string.local_mcp_save)) }
                         OutlinedButton(
                             onClick = { agent.setMcp("") },
                             enabled = agent.mcpURL != null,
-                        ) { Text("断开") }
+                        ) { Text(stringResource(R.string.local_mcp_disconnect)) }
                     }
                     Text(
                         when {
-                            agent.mcpURL == null -> "未连接 MCP 服务"
+                            agent.mcpURL == null -> stringResource(R.string.local_mcp_none)
                             agent.mcpError != null -> agent.mcpError ?: ""
-                            agent.mcpTools.isEmpty() -> "正在连接…"
-                            else -> "已连接 ${agent.mcpTools.size} 个 MCP 工具"
+                            agent.mcpTools.isEmpty() -> stringResource(R.string.local_mcp_connecting)
+                            else -> stringResource(R.string.local_mcp_connected, agent.mcpTools.size)
                         },
                         fontSize = 11.sp,
                         color = if (agent.mcpError != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -246,17 +246,17 @@ fun LocalScreen(agent: LocalAgent) {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showSettings = false }) { Text("关闭") }
+                TextButton(onClick = { showSettings = false }) { Text(stringResource(R.string.common_close)) }
             },
         )
     }
     agent.approval?.let { approval ->
         AlertDialog(
             onDismissRequest = { agent.resolve(false) },
-            title = { Text("允许执行 ${approval.tool}？") },
+            title = { Text(stringResource(R.string.local_approval_title, approval.tool)) },
             text = { Text(approval.detail, fontSize = 11.sp, fontFamily = FontFamily.Monospace) },
-            confirmButton = { TextButton(onClick = { agent.resolve(true) }) { Text("允许") } },
-            dismissButton = { TextButton(onClick = { agent.resolve(false) }) { Text("拒绝") } },
+            confirmButton = { TextButton(onClick = { agent.resolve(true) }) { Text(stringResource(R.string.local_allow)) } },
+            dismissButton = { TextButton(onClick = { agent.resolve(false) }) { Text(stringResource(R.string.permission_reject)) } },
         )
     }
 }
@@ -265,10 +265,9 @@ fun LocalScreen(agent: LocalAgent) {
 private fun LocalIntro(agent: LocalAgent) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("手机自己就能用", style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.local_pitch_title), style = MaterialTheme.typography.titleMedium)
             Text(
-                "在「服务商」里填入一个 OpenAI 兼容接口（预置了常见服务商）后，本机会话直接在手机上运行，" +
-                    "工具只能读写应用自己的工作区。",
+                stringResource(R.string.local_pitch_body),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -284,7 +283,7 @@ private fun LocalBubble(message: LocalMessage) {
                     LocalImages.decode(image)?.let { bitmap ->
                         Image(
                             bitmap = bitmap.asImageBitmap(),
-                            contentDescription = "附件",
+                            contentDescription = stringResource(R.string.attachment),
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
                         )
@@ -298,7 +297,7 @@ private fun LocalBubble(message: LocalMessage) {
         }
         LocalMessage.Role.Tool -> Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(10.dp)) {
-                Text("工具 ${message.toolName ?: ""}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.tool_label, message.toolName ?: ""), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(message.text, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
             }
         }
@@ -311,7 +310,7 @@ private fun SessionsDialog(agent: LocalAgent, onDismiss: () -> Unit) {
     var showRename by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("本机会话") },
+        title = { Text(stringResource(R.string.local_sessions_title)) },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                 agent.sessions.forEach { session ->
@@ -321,14 +320,14 @@ private fun SessionsDialog(agent: LocalAgent, onDismiss: () -> Unit) {
                             agent.selectSession(session.id)
                             onDismiss()
                         }) {
-                            Text((if (current) "✓ " else "") + (session.title.ifEmpty { "新会话" }))
+                            Text((if (current) "✓ " else "") + (session.title.ifEmpty { stringResource(R.string.local_new_session) }))
                         }
                         Spacer(Modifier.weight(1f))
                         TextButton(onClick = {
                             renameID = session.id
                             showRename = true
-                        }) { Text("改名") }
-                        TextButton(onClick = { agent.deleteSession(session.id) }) { Text("删除") }
+                        }) { Text(stringResource(R.string.local_rename_short)) }
+                        TextButton(onClick = { agent.deleteSession(session.id) }) { Text(stringResource(R.string.common_delete)) }
                     }
                 }
             }
@@ -337,9 +336,9 @@ private fun SessionsDialog(agent: LocalAgent, onDismiss: () -> Unit) {
             TextButton(onClick = {
                 agent.newSession()
                 onDismiss()
-            }) { Text("新会话") }
+            }) { Text(stringResource(R.string.local_new_session)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } },
     )
     val id = renameID
     if (showRename && id != null) {
@@ -348,15 +347,15 @@ private fun SessionsDialog(agent: LocalAgent, onDismiss: () -> Unit) {
         }
         AlertDialog(
             onDismissRequest = { showRename = false },
-            title = { Text("重命名会话") },
+            title = { Text(stringResource(R.string.session_rename_title)) },
             text = { OutlinedTextField(value = title, onValueChange = { title = it }, singleLine = true) },
             confirmButton = {
                 TextButton(onClick = {
                     agent.renameSession(id, title)
                     showRename = false
-                }) { Text("保存") }
+                }) { Text(stringResource(R.string.common_save)) }
             },
-            dismissButton = { TextButton(onClick = { showRename = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { showRename = false }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 }
@@ -366,7 +365,7 @@ private fun ProvidersDialog(agent: LocalAgent, onDismiss: () -> Unit) {
     var editing by remember { mutableStateOf<LocalProvider?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("服务商") },
+        title = { Text(stringResource(R.string.providers_header)) },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                 agent.providers.forEach { provider ->
@@ -376,15 +375,15 @@ private fun ProvidersDialog(agent: LocalAgent, onDismiss: () -> Unit) {
                             Text((if (selected) "✓ " else "") + (provider.name.ifEmpty { provider.baseURL }), maxLines = 1)
                         }
                         Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { editing = provider }) { Text("编辑") }
-                        TextButton(onClick = { agent.remove(provider.id) }) { Text("删除") }
+                        TextButton(onClick = { editing = provider }) { Text(stringResource(R.string.common_edit)) }
+                        TextButton(onClick = { agent.remove(provider.id) }) { Text(stringResource(R.string.common_delete)) }
                     }
                     Text(provider.model, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                TextButton(onClick = { editing = LocalProvider() }) { Text("添加服务商") }
+                TextButton(onClick = { editing = LocalProvider() }) { Text(stringResource(R.string.providers_add)) }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } },
     )
     editing?.let { provider ->
         ProviderEditor(agent, provider) { editing = null }
@@ -399,13 +398,13 @@ private fun ProviderEditor(agent: LocalAgent, initial: LocalProvider, onDismiss:
     var apiKey by rememberSaveable(initial.id) { mutableStateOf(initial.apiKey) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initial.name.isEmpty()) "添加服务商" else "编辑服务商") },
+        title = { Text(if (initial.name.isEmpty()) stringResource(R.string.providers_add) else stringResource(R.string.providers_edit)) },
         text = {
             Column(
                 Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("预置", fontSize = 11.sp)
+                Text(stringResource(R.string.providers_presets), fontSize = 11.sp)
                 LocalPresets.all.forEach { preset ->
                     FilterChip(
                         selected = baseURL == preset.baseURL,
@@ -420,21 +419,21 @@ private fun ProviderEditor(agent: LocalAgent, initial: LocalProvider, onDismiss:
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("名称") },
+                    label = { Text(stringResource(R.string.provider_name_label)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
                     value = baseURL,
                     onValueChange = { baseURL = it },
-                    label = { Text("接口地址（OpenAI 兼容）") },
+                    label = { Text(stringResource(R.string.provider_base_url_label)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
                     value = model,
                     onValueChange = { model = it },
-                    label = { Text("模型") },
+                    label = { Text(stringResource(R.string.settings_models_header)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -446,7 +445,7 @@ private fun ProviderEditor(agent: LocalAgent, initial: LocalProvider, onDismiss:
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Text("密钥只保存在本机应用私有目录。", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.provider_key_note), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
         confirmButton = {
@@ -456,8 +455,8 @@ private fun ProviderEditor(agent: LocalAgent, initial: LocalProvider, onDismiss:
                     onDismiss()
                 },
                 enabled = baseURL.isNotBlank() && model.isNotBlank(),
-            ) { Text("保存") }
+            ) { Text(stringResource(R.string.common_save)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }

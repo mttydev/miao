@@ -131,7 +131,7 @@ fun SessionScreen(remote: RemoteSession, onBack: () -> Unit) {
                                 menuExpanded = false
                                 val send = Intent(Intent.ACTION_SEND).apply {
                                     type = "text/plain"
-                                    putExtra(Intent.EXTRA_TEXT, transcriptMarkdown(remote.visibleMessages))
+                                    putExtra(Intent.EXTRA_TEXT, transcriptMarkdown(context, remote.visibleMessages))
                                 }
                                 context.startActivity(Intent.createChooser(send, context.getString(R.string.session_export)))
                             },
@@ -196,7 +196,7 @@ fun SessionScreen(remote: RemoteSession, onBack: () -> Unit) {
             title = { Text(stringResource(R.string.diff_title)) },
             text = {
                 Text(
-                    remote.diff?.let { renderDiff(it) } ?: stringResource(R.string.diff_loading),
+                    remote.diff?.let { renderDiff(context, it) } ?: stringResource(R.string.diff_loading),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                 )
@@ -350,7 +350,7 @@ private fun AssistantCard(message: Map<String, JsonValue>) {
                     "tool" -> {
                         val state = part["state"]
                         Text(
-                            "工具 ${part["name"]?.string ?: ""} · ${state?.get("status")?.string ?: "pending"}",
+                            stringResource(R.string.tool_label, part["name"]?.string ?: "") + " · " + (state?.get("status")?.string ?: "pending"),
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                         )
@@ -456,11 +456,11 @@ fun renderValue(value: JsonValue): String = when (value) {
     is JsonValue.Obj -> value.entries.entries.joinToString(", ", "{", "}") { (key, item) -> "$key: ${renderValue(item)}" }
 }
 
-private fun renderDiff(value: JsonValue): String {
+private fun renderDiff(context: Context, value: JsonValue): String {
     val files = value["data"]?.array ?: value.array ?: return renderValue(value)
     return files.joinToString("\n") { file ->
         buildString {
-            append(file["file"]?.string ?: file["path"]?.string ?: "变更")
+            append(file["file"]?.string ?: file["path"]?.string ?: context.getString(R.string.session_changes))
             append("  +").append(file["additions"]?.long ?: 0)
             append(" -").append(file["deletions"]?.long ?: 0)
             file["diff"]?.string?.let { append('\n'); append(it) }
@@ -504,17 +504,17 @@ private fun QueuedList(prompts: List<QueuedPrompt>) {
 }
 
 /** Plain Markdown so the export reads well in any editor or chat. */
-private fun transcriptMarkdown(messages: List<Map<String, JsonValue>>): String =
+private fun transcriptMarkdown(context: Context, messages: List<Map<String, JsonValue>>): String =
     messages.mapNotNull { message ->
         when (message["type"]?.string) {
-            "user" -> "**我**\n\n" + textOf(message)
+            "user" -> "**${context.getString(R.string.export_user_label)}**\n\n" + textOf(message)
             "assistant" -> {
                 val text = (message["content"]?.array ?: emptyList())
                     .filter { it["type"]?.string == "text" }
                     .joinToString("\n\n") { it["text"]?.string ?: "" }
                 text.ifBlank { null }?.let { "**miao**\n\n$it" }
             }
-            "tool" -> "_[工具] " + (message["name"]?.string ?: "tool") + "_"
+            "tool" -> "_" + context.getString(R.string.export_tool_label).let { "[${it}] " } + (message["name"]?.string ?: "tool") + "_"
             "shell" -> "```\n$ " + (message["command"]?.string ?: "") + "\n" + (message["output"]?.string ?: "") + "\n```"
             else -> null
         }

@@ -159,6 +159,10 @@
     <string name="common_stop">Stop</string>
     <string name="common_delete">Delete</string>
     <string name="common_edit">Edit</string>
+    <string name="local_image_placeholder">(image)</string>
+    <string name="local_tool_limit">(Tool call limit reached — stopping here)</string>
+    <string name="export_user_label">Me</string>
+    <string name="export_tool_label">tool</string>
     <string name="local_allow">Allow</string>
     <string name="local_new_session">New session</string>
     <string name="local_rename_short">Rename</string>
