@@ -14,6 +14,7 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 ## [0.3.98] - 2026-11-19
 
 ### Added
+- **android**: localize the LocalAgent runtime messages (#3227) (`b55170213d`)
 - **ios**: allow local tools by default (#3224) (`3fd4ad6b9c`)
 - **ios**: translate the interpolated UI strings (#3223) (`e9497f6bb0`)
 - **tui**: run approval-free by default; --ask restores the gate (#3225) (`535e073980`)
