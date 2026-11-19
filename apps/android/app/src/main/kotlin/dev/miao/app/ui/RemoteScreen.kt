@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.sp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import dev.miao.app.AppModel
+import dev.miao.app.KeepAlive
 import dev.miao.app.local.LocalAgent
 import dev.miao.app.HostClient
 import dev.miao.app.InboxEntry
@@ -72,6 +73,7 @@ fun MiaoRoot(model: AppModel) {
     var tab by rememberSaveable { mutableIntStateOf(1) }
     var showAccount by rememberSaveable { mutableStateOf(false) }
     var showPairing by rememberSaveable { mutableStateOf(false) }
+    var showKeepAlive by rememberSaveable { mutableStateOf(true) }
     var pairingLink by rememberSaveable { mutableStateOf("") }
     var providersHost by remember { mutableStateOf<HostClient?>(null) }
     var openSession by remember { mutableStateOf<Pair<HostClient, SessionSummary>?>(null) }
@@ -91,6 +93,10 @@ fun MiaoRoot(model: AppModel) {
     }
 
     Column(Modifier.fillMaxSize()) {
+        val bannerActivity = context as? androidx.activity.ComponentActivity
+        if (showKeepAlive && bannerActivity != null && KeepAlive.shouldRemind(context)) {
+            KeepAliveBanner(bannerActivity, onDismiss = { showKeepAlive = false })
+        }
         androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
             if (tab == 0) {
                 LocalScreen(agent)
