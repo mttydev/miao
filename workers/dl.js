@@ -29,7 +29,7 @@ export default {
     const origin = `${url.protocol}//${url.host}`;
 
     if (path === "/releases/latest") {
-      const upstream = await fetch("https://github.com/oxdingzg/miao/releases/latest", {
+      const upstream = await fetch("https://github.com/mttydev/miao/releases/latest", {
         redirect: "manual",
       });
       const location = upstream.headers.get("location");
@@ -42,9 +42,9 @@ export default {
 
     let upstream;
     if (path.startsWith("/releases/")) {
-      upstream = `https://github.com/oxdingzg/miao${path}`;
+      upstream = `https://github.com/mttydev/miao${path}`;
     } else if (path === "/raw/main/install" || path === "/raw/main/install.ps1") {
-      upstream = `https://raw.githubusercontent.com/oxdingzg/miao/main${path.slice("/raw/main".length)}`;
+      upstream = `https://raw.githubusercontent.com/mttydev/miao/main${path.slice("/raw/main".length)}`;
     } else {
       return new Response("not found", { status: 404 });
     }

@@ -13,12 +13,12 @@
 ## 发布流程
 
 1. **通过 PR 准备版本**：创建短期发布分支，运行 `bun script/set-version.ts X.Y.Z`，准备 changelog 和简体中文 release notes 镜像。只提交发布相关路径，推送并创建 PR。包检查与原生 CI 通过后，squash 合入 `main`。正式发布前，在配置好的构建机上构建并冒烟测试 preview。
-2. **从已合并的 main 触发**：获得明确发布确认后，运行 `gh workflow run release.yml --ref main --repo oxdingzg/miao`。工作流有一个可选的 `commit` 输入，用于指定已通过验证的 `main` 提交；留空则构建 dispatch 所在提交。版本完全取自根 `package.json`；在 Actions 页面手动 dispatch 也一样。不要直接向 `main` 提交或推送版本准备改动。
+2. **从已合并的 main 触发**：获得明确发布确认后，运行 `gh workflow run release.yml --ref main --repo mttydev/miao`。工作流有一个可选的 `commit` 输入，用于指定已通过验证的 `main` 提交；留空则构建 dispatch 所在提交。版本完全取自根 `package.json`；在 Actions 页面手动 dispatch 也一样。不要直接向 `main` 提交或推送版本准备改动。
 3. **工作流 `.github/workflows/release.yml`**：
    - `version`：先要求该提交自身的 CI 为绿，再运行 `script/version.ts`，以根 `package.json` 的版本创建**草稿** release `vX.Y.Z`，正文由上次发布以来的提交生成，输出 `version/release/tag/repo`。
    - `cli`：矩阵 `macos-26`(darwin-arm64) / `macos-26-intel`(darwin-x64) / `ubuntu-latest`(linux-x64) / `ubuntu-24.04-arm`(linux-arm64) / `windows-2025`(windows-x64)。每个平台安装 Rust 后执行 `bun script/build-native-cli.ts --native-cli`，用 cargo 构建 `crates/miao-cli`，并把 `miao-<target>.zip|tar.gz` 上传到该草稿 release。这是脚本保留的唯一路径：它原先携带的 TypeScript 打包器已随 TypeScript 产品线一起移除。
    - `publish`：所有平台成功后，先追加 Windows 签名状态，再用 `docs/releases/vX.Y.Z.md` 与 `.zh.md` 的策展正文替换自动生成的正文（`script/release-notes.ts`，任一文件缺失即失败），最后执行 `gh release edit --draft=false` 正式发布。
-4. **产物**：`miao-darwin-{arm64,x64}.zip`、`miao-linux-{x64,arm64}.tar.gz`、`miao-windows-x64.zip`（较旧的 CPU 另有 `miao-windows-x64-baseline.zip`），命名与 `install` 脚本、自更新（`Installation.latest` → `oxdingzg/miao/releases/latest`）一致。
+4. **产物**：`miao-darwin-{arm64,x64}.zip`、`miao-linux-{x64,arm64}.tar.gz`、`miao-windows-x64.zip`（较旧的 CPU 另有 `miao-windows-x64-baseline.zip`），命名与 `install` 脚本、自更新（`Installation.latest` → `mttydev/miao/releases/latest`）一致。
 
 上述工作流是当前维护的发布入口。构建期不拉取模型目录：引擎读取随二进制一起安装的 `models.json` 快照，其次是 `~/.miao/bin/models.json`、`~/.local/share/miao/bin/models.json`，最后是目录服务缓存的 `~/.cache/miao/models.json`（`MIAO_MODELS_PATH` 可显式指定）。仓库没有单独提交模型快照的工作流；运行时会独立刷新缓存，并用源站的 ETag 做条件请求，内容未变则不重新下载。
 
@@ -40,8 +40,8 @@
 
 - [ ] `docs/releases/<x.y.z>.zh.md` 已存在：release 正文链接指向的简体中文镜像。
 - [ ] Windows 真机验证 VT：PowerShell 5.1 老控制台 / Windows Terminal / pwsh 7 各跑一次（目前只在 macOS 上验证了逻辑，未上真机）。
-- [ ] `curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash` 能装到该 release。
-- [ ] `miao upgrade` 与启动自更新检查指向 `oxdingzg/miao` 且能识别新版本。
+- [ ] `curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash` 能装到该 release。
+- [ ] `miao upgrade` 与启动自更新检查指向 `mttydev/miao` 且能识别新版本。
 - [ ] native addon：确认各平台构建的 addon 能加载、且 `MIAO_NATIVE=0` 可回退，OS 沙箱 runner 与其他原生辅助不受 native PoC 的未决风险影响。
 - [ ] 无凭证/密钥入库；产物里不含 `auth.json`、`.env`。
 - [ ] LICENSE 与归属（基于 opencode，MIT）。

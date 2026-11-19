@@ -6,7 +6,7 @@
 
 任务使用未修改的 suite-v6 `read-only` / `small-edit` 合同，具体 suite/task hash、源码 SHA、二进制 SHA、权限/工具 profile、工具数和外置验证结果见 [summary.json](summary.json)。每项限时90秒；原生策略最多6个provider turn，禁用进程网络。每轮使用独立工作目录和凭据快照；日常安装没有替换。原生调试产物来自构建机，下载后核对二进制 SHA；相应已跟踪原生源文件、清单和测试也逐项核对。
 
-两端策略和工具面不同，且没有足够重复样本，因此时长只保留为回执，不计算比较收益。费用未定价，`null` 表示未知。TS 臂通过 `--engine ts` 明确选择后端（[#1646](https://github.com/oxdingzg/miao/pull/1646)），不使用默认后端猜测。
+两端策略和工具面不同，且没有足够重复样本，因此时长只保留为回执，不计算比较收益。费用未定价，`null` 表示未知。TS 臂通过 `--engine ts` 明确选择后端（[#1646](https://github.com/mttydev/miao/pull/1646)），不使用默认后端猜测。
 
 ## 全部模型样本
 
@@ -40,7 +40,7 @@ TS 首次命令中的完整revision字符串有录入错误。实际入口来自
 
 该调用还携带了 `read_file` 返回的 `expected_sha256`。旧schema同时广告两套互斥名称，模型给未使用别名填空串后，解析器报告 `pass the replaced text once, as old_string or anchor, not both`。诊断轮改用事务patch才完成编辑。
 
-[#1647](https://github.com/oxdingzg/miao/pull/1647) 将广告schema收敛为必需的 `old_string` / `new_string`，保留旧别名解析及冲突拒绝。真实Runtime回归在原实现失败，修复后替换和空串删除通过；189项定向Rust测试及clippy通过。修复产物的模型试跑使用5个provider调用、7个工具，工具错误为0，现有测试与不可修改文件检查全部通过。该样本不证明全任务分布的改善。
+[#1647](https://github.com/mttydev/miao/pull/1647) 将广告schema收敛为必需的 `old_string` / `new_string`，保留旧别名解析及冲突拒绝。真实Runtime回归在原实现失败，修复后替换和空串删除通过；189项定向Rust测试及clippy通过。修复产物的模型试跑使用5个provider调用、7个工具，工具错误为0，现有测试与不可修改文件检查全部通过。该样本不证明全任务分布的改善。
 
 ## 剩余验收
 

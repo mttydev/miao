@@ -12,7 +12,7 @@
 
 ```powershell
 # 通过 PowerShell 脚本安装
-irm https://raw.githubusercontent.com/oxdingzg/miao/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mttydev/miao/main/install.ps1 | iex
 # 或直接把 miao-windows-x64.zip 解压出来的 miao.exe 放到 PATH
 miao --version
 ```

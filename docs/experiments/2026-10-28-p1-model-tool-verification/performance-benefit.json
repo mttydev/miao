@@ -73,7 +73,7 @@
         "startup-samples.json",
         "packages/miao/src/index.ts",
         "crates/miao-tui/src/lib.rs",
-        "https://github.com/oxdingzg/miao/pull/1583"
+        "https://github.com/mttydev/miao/pull/1583"
       ]
     },
     {
@@ -92,7 +92,7 @@
         "idle-baseline.json",
         "idle-feature.json",
         "crates/miao-tui/src/lib.rs",
-        "https://github.com/oxdingzg/miao/pull/1581"
+        "https://github.com/mttydev/miao/pull/1581"
       ]
     },
     {

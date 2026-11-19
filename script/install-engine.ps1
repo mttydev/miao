@@ -3,7 +3,7 @@ param(
     [string]$Release,
     [switch]$Rollback,
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA 'miao-engine\bin'),
-    [string]$ReleaseBaseUrl = 'https://github.com/oxdingzg/miao/releases'
+    [string]$ReleaseBaseUrl = 'https://github.com/mttydev/miao/releases'
 )
 # Dedicated engine installation; never replaces the daily miao command.
 # -Binary installs a prebuilt executable, -Release latest/vX.Y.Z downloads a

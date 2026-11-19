@@ -32,7 +32,7 @@ enter public documentation.**
   same pull request (a test-fixture sentence, a measurements note, and one
   acceptance record's `ssh` hint now say "build host"); a repo-wide scan for
   the aliases and addresses now comes back empty.
-- *Links*: release [v0.3.46](https://github.com/oxdingzg/miao/releases/tag/v0.3.46);
+- *Links*: release [v0.3.46](https://github.com/mttydev/miao/releases/tag/v0.3.46);
   `.github/workflows/release.yml`, `script/install-engine.sh`,
   `script/install-local.sh`; the earlier v0.3.30 publication notes in this
   issue.

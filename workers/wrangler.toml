@@ -4,7 +4,7 @@ compatibility_date = "2026-11-01"
 account_id = "e8173df9e0f5ba9476dc8eb622b153b8"
 
 # dl.mtty.dev answers GitHub-shaped release paths for miao:
-#   /releases/*   the release surface of github.com/oxdingzg/miao
+#   /releases/*   the release surface of github.com/mttydev/miao
 #   /raw/main/*   the published install scripts
 #
 # Deploy with a Cloudflare account that owns the mtty.dev zone — the stored

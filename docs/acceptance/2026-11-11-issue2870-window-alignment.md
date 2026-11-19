@@ -51,7 +51,7 @@ window is.
 | format and lints | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` | clean; `Finished` with no warnings |
 
 The whole-tree record is CI run
-[`42998019112`](https://github.com/oxdingzg/miao/actions/runs/42998019112) on `f55ad57b92`:
+[`42998019112`](https://github.com/mttydev/miao/actions/runs/42998019112) on `f55ad57b92`:
 every job green, the four engine shards included. The run for the earlier commit of the same
 branch, `42997642616`, reads `cancelled`: `ci.yml`'s `concurrency` group cancelled it when the
 next commit was pushed, after it had reported `policy`, the engine reference corpus, all three

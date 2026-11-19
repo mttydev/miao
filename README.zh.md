@@ -6,14 +6,14 @@
   <a href="README.md">English</a> | <a href="README.zh.md">简体中文</a>
 </p>
 <p align="center">
-  <a href="https://mtty.dev/zh/miao">官网</a> · <a href="#快速开始">快速开始</a> · <a href="#为什么选择-miao">为什么选择 miao</a> · <a href="docs/guide.zh.md">使用指南</a> · <a href="https://github.com/oxdingzg/miao/releases">下载版本</a> · <a href="#相关项目">相关项目</a>
+  <a href="https://mtty.dev/zh/miao">官网</a> · <a href="#快速开始">快速开始</a> · <a href="#为什么选择-miao">为什么选择 miao</a> · <a href="docs/guide.zh.md">使用指南</a> · <a href="https://github.com/mttydev/miao/releases">下载版本</a> · <a href="#相关项目">相关项目</a>
 </p>
 
 ---
 
 **miao 是一个在终端中与你协作的开源 AI 智能体。** 使用你选择的模型，编写代码、开展调研、管理文件和自动化任务，并随时查看执行进展、上下文用量与费用。
 
-搭配 [mtty](https://github.com/oxdingzg/mtty)（AI 原生终端与编辑器）使用，可在每个窗格查看智能体状态、在需要输入时收到通知，并在任务运行时排队准备下一条提示。
+搭配 [mtty](https://github.com/mttydev/mtty)（AI 原生终端与编辑器）使用，可在每个窗格查看智能体状态、在需要输入时收到通知，并在任务运行时排队准备下一条提示。
 
 miao 把重点放在模型周围的工程能力上：**上下文效率、持久化会话、代理协作，以及长任务的执行控制。** 目标是用更少的等待、更少浪费的 token，得到同样有用的结果。
 
@@ -177,8 +177,8 @@ miao 无需项目账号即可本地运行；连接模型时使用你选择的供
 
 | 项目             | 是什么                                                                                                | 链接                                                                                                                                  |
 | ---------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **miao**(本仓库) | 在终端中与你协作的 AI 智能体                                                                            | [mtty.dev/miao](https://mtty.dev/zh/miao) · [文档](https://mtty.dev/zh/docs/miao) · [oxdingzg/miao](https://github.com/oxdingzg/miao) |
-| **mtty**         | 用 Rust 编写、GPU 渲染的终端(macOS、Linux、Windows),能看出每个窗格里的代理正在工作、在等你,还是已完成 | [mtty.dev/mtty](https://mtty.dev/zh/mtty) · [oxdingzg/mtty](https://github.com/oxdingzg/mtty)                                         |
+| **miao**(本仓库) | 在终端中与你协作的 AI 智能体                                                                            | [mtty.dev/miao](https://mtty.dev/zh/miao) · [文档](https://mtty.dev/zh/docs/miao) · [mttydev/miao](https://github.com/mttydev/miao) |
+| **mtty**         | 用 Rust 编写、GPU 渲染的终端(macOS、Linux、Windows),能看出每个窗格里的代理正在工作、在等你,还是已完成 | [mtty.dev/mtty](https://mtty.dev/zh/mtty) · [mttydev/mtty](https://github.com/mttydev/mtty)                                         |
 | **mtty.dev**     | 两者的官网与文档站                                                                                    | [mtty.dev](https://mtty.dev/zh/)                                                                                                      |
 
 miao 与 mtty 是两个独立项目,任意一个都可以单独使用。在 mtty 的窗格里运行 miao 时,miao 会把自己的状态(工作中、等待你、已完成、出错)上报给 mtty;mtty 据此给窗格加徽章、在代理需要你时通知你,并在它空闲时发出你排队的提示。离开 mtty,上报不产生任何作用。`miaotty` 是这个终端的个人 macOS 原型,已由 mtty 取代。

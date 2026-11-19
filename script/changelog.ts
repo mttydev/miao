@@ -14,7 +14,7 @@ import { parseArgs } from "util"
 const root = path.resolve(import.meta.dir, "..")
 const upcomingFile = path.join(root, "UPCOMING_CHANGELOG.md")
 const changelogFile = path.join(root, "CHANGELOG.md")
-const repo = process.env.GH_REPO ?? "oxdingzg/miao"
+const repo = process.env.GH_REPO ?? "mttydev/miao"
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),

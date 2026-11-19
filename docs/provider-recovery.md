@@ -1,6 +1,6 @@
 # Provider connection and recovery
 
-These fixes shipped in [v0.1.2](https://github.com/oxdingzg/miao/releases/tag/v0.1.2), published on 2026-10-04. Run `miao upgrade`, then restart miao and confirm `miao --version` reports `0.1.2` or later.
+These fixes shipped in [v0.1.2](https://github.com/mttydev/miao/releases/tag/v0.1.2), published on 2026-10-04. Run `miao upgrade`, then restart miao and confirm `miao --version` reports `0.1.2` or later.
 
 ## Log in by provider name
 

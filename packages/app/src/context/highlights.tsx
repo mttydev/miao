@@ -7,7 +7,7 @@ import { useSettings } from "@/context/settings"
 import { persisted } from "@/utils/persist"
 import { DialogReleaseNotes, type Highlight } from "@/components/dialog-release-notes"
 
-const CHANGELOG_URL = "https://api.github.com/repos/oxdingzg/miao/releases?per_page=100"
+const CHANGELOG_URL = "https://api.github.com/repos/mttydev/miao/releases?per_page=100"
 
 type Store = {
   version?: string

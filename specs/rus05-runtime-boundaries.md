@@ -1,6 +1,6 @@
 # RUS-05：JS 运行时与可选 worker 边界
 
-状态：**设计与可选 worker 发布入口修复；Rust 化尚未完成**。基线源码为 `4fbd5f01341206de1d29a5af58dac7185466ac97`。本项接续 [控制面责任图](rus03-control-plane-responsibilities.md) 和 [TS runner 退役边界](https://github.com/oxdingzg/miao/blob/e509b14de27a2c6c41e980d936f53391fdec50bc/specs/rus02-ts-runner-retirement.md)；后者尚待独立 PR 合入。
+状态：**设计与可选 worker 发布入口修复；Rust 化尚未完成**。基线源码为 `4fbd5f01341206de1d29a5af58dac7185466ac97`。本项接续 [控制面责任图](rus03-control-plane-responsibilities.md) 和 [TS runner 退役边界](https://github.com/mttydev/miao/blob/e509b14de27a2c6c41e980d936f53391fdec50bc/specs/rus02-ts-runner-retirement.md)；后者尚待独立 PR 合入。
 
 ## 1. 当前必需依赖和可选依赖
 

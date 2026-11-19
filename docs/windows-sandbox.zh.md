@@ -17,7 +17,7 @@
 2. **Git**：`winget install Git.Git`；`curl` 是 Windows 10+ 自带。
 3. **克隆仓库**（公开仓库，无需鉴权）：
    ```powershell
-   git clone https://github.com/oxdingzg/miao
+   git clone https://github.com/mttydev/miao
    ```
 4. **构建沙箱与测试**（只需要 `miao-run` 与 `miao-sandbox`，不必构建整个原生 addon）：
    ```powershell

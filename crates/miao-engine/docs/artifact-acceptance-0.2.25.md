@@ -112,7 +112,7 @@ cross-version drill on **native Intel macOS** — GitHub's hosted
 free-for-public-repos runner, so the drill no longer depends on owning Intel
 hardware. The drill runs on demand via
 `.github/workflows/artifact-drill.yml` against any release pair
-([run 40040213453](https://github.com/oxdingzg/miao/actions/runs/40040213453)).
+([run 40040213453](https://github.com/mttydev/miao/actions/runs/40040213453)).
 
 | Stage | Result |
 | --- | --- |
@@ -170,7 +170,7 @@ AppContainer + ConPTY combination on real hardware: `miao-sandbox`'s
 strict no-fallback rule needs no `windows_unconfined` escape hatch.
 
 Release-endpoint connectivity from that host is **unavailable**: three probes
-of `https://github.com/oxdingzg/miao/releases/download/...` failed — twice
+of `https://github.com/mttydev/miao/releases/download/...` failed — twice
 `schannel: failed to receive handshake, SSL/TLS connection failed`, once a
 21 s connect timeout — with WinHTTP set to direct access and per-user proxying
 disabled, while crates.io and python.org downloads from the same host succeed.

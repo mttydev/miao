@@ -22,10 +22,10 @@ macOS, Linux and Windows. The Windows installer is checked in CI; terminal rende
 
 ```bash
 # stable
-curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash
+curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash
 
 # a specific version
-curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash -s -- --version 0.0.1
+curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash -s -- --version 0.0.1
 
 # from a local binary
 ./install --binary /path/to/miao
@@ -34,15 +34,15 @@ curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash -
 On Windows, run the PowerShell installer (Windows PowerShell 5.1 or PowerShell 7). It installs to `~\.miao\bin` and adds that directory to your user PATH:
 
 ```powershell
-irm https://raw.githubusercontent.com/oxdingzg/miao/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mttydev/miao/main/install.ps1 | iex
 
 # a specific version
-$env:MIAO_VERSION = "0.0.33"; irm https://raw.githubusercontent.com/oxdingzg/miao/main/install.ps1 | iex
+$env:MIAO_VERSION = "0.0.33"; irm https://raw.githubusercontent.com/mttydev/miao/main/install.ps1 | iex
 ```
 
 The installer places the binary at `~/.miao/bin/miao` and updates PATH unless `--no-modify-path`.
 
-The current Windows release is not Authenticode-signed. The archive is `miao-windows-x64.zip` (older CPUs: `miao-windows-x64-baseline.zip`), containing `miao.exe`; you can also download and extract it manually from [miao GitHub Releases](https://github.com/oxdingzg/miao/releases). The install script itself usually runs without a prompt, but starting a downloaded `miao.exe` may trigger the SmartScreen “Windows protected your PC” dialog. Follow the [shared Windows security guidance](https://mtty.dev/docs/about/windows-downloads/) when it appears, and do not allow a threat reported by antivirus software.
+The current Windows release is not Authenticode-signed. The archive is `miao-windows-x64.zip` (older CPUs: `miao-windows-x64-baseline.zip`), containing `miao.exe`; you can also download and extract it manually from [miao GitHub Releases](https://github.com/mttydev/miao/releases). The install script itself usually runs without a prompt, but starting a downloaded `miao.exe` may trigger the SmartScreen “Windows protected your PC” dialog. Follow the [shared Windows security guidance](https://mtty.dev/docs/about/windows-downloads/) when it appears, and do not allow a threat reported by antivirus software.
 
 **Three entry points (coexisting, independent)**
 

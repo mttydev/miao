@@ -1,11 +1,11 @@
 [
   {
-    "sha256": "95a6c4d843275af11c66ed464dfc1b815f5a5938de0f3ecc675cc34c6921dea5"
+    "sha256": "8cec4b3660747eb2f30facb16a41e17d7a17a3e3c0d0debbc1d3d1d3de0f728d"
   },
   {
     "providerID": "fixture",
     "modelID": "custom",
-    "sha256": "95a6c4d843275af11c66ed464dfc1b815f5a5938de0f3ecc675cc34c6921dea5"
+    "sha256": "8cec4b3660747eb2f30facb16a41e17d7a17a3e3c0d0debbc1d3d1d3de0f728d"
   },
   {
     "modelID": "gpt-4.1",
@@ -37,7 +37,7 @@
   },
   {
     "modelID": "claude-sonnet",
-    "sha256": "b8f777f7bff46b8a971952f5cf30c5af250def773aa0b1ecd29ce0324449d5c9"
+    "sha256": "041d61f0bfca11ea37e9c1305903c9688f79f21ade7e89860d5e096042670551"
   },
   {
     "modelID": "trinity-large",
@@ -64,11 +64,11 @@
   },
   {
     "modelID": "muse-spark",
-    "sha256": "79ec8736dbbc4e7c28bbcac064e06bafd8589c74a3bafc64b8fa3fbf5107ca9d"
+    "sha256": "b571a21363dc2b69f213c72e626e9572375ddca7ff80f430cffabce7789504a5"
   },
   {
     "modelID": "muse-glimmer",
-    "sha256": "62554ed816924fe68e270793b3049a9de1e2fe4971035d0a8b91fd0ca2858008"
+    "sha256": "ec845e4d7a402368609284a1a448700f234b191a237aa1e4cfb415cb5641a95a"
   },
   {
     "modelID": "GEMINI-3-FLASH",
@@ -86,6 +86,6 @@
   },
   {
     "modelID": "codex",
-    "sha256": "95a6c4d843275af11c66ed464dfc1b815f5a5938de0f3ecc675cc34c6921dea5"
+    "sha256": "8cec4b3660747eb2f30facb16a41e17d7a17a3e3c0d0debbc1d3d1d3de0f728d"
   }
 ]

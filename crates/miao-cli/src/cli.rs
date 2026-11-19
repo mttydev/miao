@@ -628,7 +628,7 @@ fn latest_version(feed: Option<&str>) -> Result<String, String> {
     // defeat the pin.
     let bases: &[&str] = match feed {
         Some(feed) => &[feed],
-        None => &["https://dl.mtty.dev", "https://github.com/oxdingzg/miao"],
+        None => &["https://dl.mtty.dev", "https://github.com/mttydev/miao"],
     };
     let mut last_error = None;
     for base in bases {
@@ -714,7 +714,7 @@ fn run_installer(feed: Option<&str>, latest: &str) -> Result<(), String> {
     // feed is honored alone, matching the update check above.
     let bases: &[&str] = match feed {
         Some(feed) => &[feed],
-        None => &["https://dl.mtty.dev", "https://github.com/oxdingzg/miao"],
+        None => &["https://dl.mtty.dev", "https://github.com/mttydev/miao"],
     };
     // Download first, then run: a `curl | bash` pipe reports the tail's exit
     // code, so a failed download would pipe an empty script into bash, exit 0,

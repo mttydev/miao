@@ -27,7 +27,7 @@ rejected, including for maintainers.
 - After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit `src/generated` or `src/generated-effect` directly.
 - Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk` composes Client, Core, and Server.
 - The default branch in this repo is `main`. It is the only long-lived branch, and it is protected: changes arrive by pull request, never by direct push, and no `dev` branch exists. Short-lived topic branches are created per change and deleted after merge.
-- `origin` is this fork (`oxdingzg/miao`); `upstream` is `anomalyco/opencode`, which is fetch-only and narrowed to its `dev` branch. When diffing against upstream use `upstream/dev`.
+- `origin` is this fork (`mttydev/miao`); `upstream` is `anomalyco/opencode`, which is fetch-only and narrowed to its `dev` branch. When diffing against upstream use `upstream/dev`.
 
 ## Licence and Upstream Code
 
@@ -207,9 +207,9 @@ Keep the release-managed `miao` as the daily command and validate edits in separ
 entry points so a work-in-progress change can never break the tool you rely on.
 
 - `miao` is the stable command: the official release binary, installed from GitHub with
-  `curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash`. It
+  `curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash`. It
   lands at `~/.miao/bin/miao`, runs channel `latest` (DB `miao.db`), and
-  auto-updates from `oxdingzg/miao` releases in the background.
+  auto-updates from `mttydev/miao` releases in the background.
 - `miao-dev` runs the Rust binary from source for fast iteration: `bun run dev`
   (that is, `cargo run --manifest-path crates/miao-cli/Cargo.toml`) on channel
   `local` with DB `miao-local.db`. It is the only entry point that reflects

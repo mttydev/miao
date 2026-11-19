@@ -7,7 +7,7 @@
 //
 // Usage: bun script/release-notes.ts <tag> < generated.md > body.md
 
-export const repoDefault = "oxdingzg/miao"
+export const repoDefault = "mttydev/miao"
 
 export function chineseLink(tag: string, repo: string = repoDefault): string {
   return `[简体中文](https://github.com/${repo}/blob/main/docs/releases/${tag}.zh.md)`

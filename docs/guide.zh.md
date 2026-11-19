@@ -21,10 +21,10 @@ miao 采用 MIT 许可证。本指南描述当前源码，已安装的发行版�
 
 ```bash
 # 安装稳定版
-curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash
+curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash
 
 # 指定版本
-curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash -s -- --version 0.0.1
+curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash -s -- --version 0.0.1
 
 # 从本地二进制安装
 ./install --binary /path/to/miao
@@ -33,15 +33,15 @@ curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash -
 Windows 用 PowerShell 安装脚本（Windows PowerShell 5.1 或 PowerShell 7），装到 `~\.miao\bin` 并加入用户 PATH：
 
 ```powershell
-irm https://raw.githubusercontent.com/oxdingzg/miao/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mttydev/miao/main/install.ps1 | iex
 
 # 指定版本
-$env:MIAO_VERSION = "0.0.33"; irm https://raw.githubusercontent.com/oxdingzg/miao/main/install.ps1 | iex
+$env:MIAO_VERSION = "0.0.33"; irm https://raw.githubusercontent.com/mttydev/miao/main/install.ps1 | iex
 ```
 
 安装脚本默认会把二进制放到 `~/.miao/bin/miao` 并写入 PATH；用 `--no-modify-path` 可跳过。
 
-当前 Windows 版本没有 Authenticode 签名。发布包是 `miao-windows-x64.zip`（较旧的 CPU 可用 `miao-windows-x64-baseline.zip`），内含 `miao.exe`；也可以从 [miao GitHub Releases](https://github.com/oxdingzg/miao/releases) 手动下载解压。安装脚本本身通常不会触发提示，但直接启动下载得到的 `miao.exe` 可能出现 SmartScreen 的“Windows 已保护你的电脑”对话框。出现时按[共用的 Windows 安全提示说明](https://mtty.dev/zh/docs/about/windows-downloads/)处理；杀毒软件报出威胁时不要放行。
+当前 Windows 版本没有 Authenticode 签名。发布包是 `miao-windows-x64.zip`（较旧的 CPU 可用 `miao-windows-x64-baseline.zip`），内含 `miao.exe`；也可以从 [miao GitHub Releases](https://github.com/mttydev/miao/releases) 手动下载解压。安装脚本本身通常不会触发提示，但直接启动下载得到的 `miao.exe` 可能出现 SmartScreen 的“Windows 已保护你的电脑”对话框。出现时按[共用的 Windows 安全提示说明](https://mtty.dev/zh/docs/about/windows-downloads/)处理；杀毒软件报出威胁时不要放行。
 
 **三个入口（并存，互不干扰）**
 

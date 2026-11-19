@@ -425,7 +425,7 @@ pub fn spawn_command(
                 "BIN=\"$HOME/.miao/bin/miao\"".to_string(),
                 "if [ ! -x \"$BIN\" ]; then".to_string(),
                 format!(
-                    "  curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash -s -- --version {} --no-modify-path",
+                    "  curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash -s -- --version {} --no-modify-path",
                     shell_escape(&version)
                 ),
                 "fi".to_string(),

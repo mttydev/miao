@@ -2,7 +2,7 @@
 
 import { parseArgs } from "util"
 
-const defaultRepo = process.env.GH_REPO ?? process.env.GITHUB_REPOSITORY ?? "oxdingzg/miao"
+const defaultRepo = process.env.GH_REPO ?? process.env.GITHUB_REPOSITORY ?? "mttydev/miao"
 const defaultAgeMonths = 1
 const defaultThreshold = 2
 const defaultSleepMs = 20_000

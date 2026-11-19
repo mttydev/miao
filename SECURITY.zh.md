@@ -65,7 +65,7 @@ Hub 登录负责中继访问，本地批准的设备公钥和限定范围、带�
 ## 报告安全问题
 
 请使用 GitHub Security Advisory 的
-["Report a Vulnerability"](https://github.com/oxdingzg/miao/security/advisories/new)
+["Report a Vulnerability"](https://github.com/mttydev/miao/security/advisories/new)
 入口。在公开之前，它一直是私密的。
 
 你会收到一封回信说明后续如何推进，之后也会同步修复的进展。这里没有安全团队，也没有承诺的响应时限

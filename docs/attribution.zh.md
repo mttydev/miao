@@ -9,7 +9,7 @@ miao 是衍生自 [opencode](https://github.com/anomalyco/opencode) 的开源 AI
 
 miao 作为单独的项目维护，有自己的开发方向、问题追踪和发布版本。
 代码来源关系不代表与 opencode 维护者存在隶属关系或获得其背书。
-miao 的问题反馈与版本下载请使用 [oxdingzg/miao](https://github.com/oxdingzg/miao)。
+miao 的问题反馈与版本下载请使用 [mttydev/miao](https://github.com/mttydev/miao)。
 
 ## 许可与再分发
 

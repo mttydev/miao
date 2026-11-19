@@ -22,7 +22,7 @@ if [[ "$MODE" == "--release" ]]; then
   EXT=tar.gz
   [[ "$OS_TAG" != darwin ]] || EXT=zip
   ASSET="miao-engine-${OS_TAG}-${ARCH_TAG}.${EXT}"
-  BASE="${MIAO_ENGINE_RELEASE_BASE_URL:-https://github.com/oxdingzg/miao/releases}"
+  BASE="${MIAO_ENGINE_RELEASE_BASE_URL:-https://github.com/mttydev/miao/releases}"
   if [[ "$TAG" == "latest" ]]; then
     URL="$BASE/latest/download/$ASSET"
     SHAS_URL="$BASE/latest/download/$ASSET.sha256"
