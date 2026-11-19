@@ -42,10 +42,14 @@ const MAX_IDENTICAL_TOOL_CALLS: u32 = 5;
 /// for three hours and 275 provider turns on a ~750K-token context).
 const MAX_IDENTICAL_REFUSALS: u32 = 3;
 /// Continuation turns that may leave the todo list's *meaning* untouched. A
-/// turn that rewrites a todo's words, re-sorts the list, or runs tools without
-/// moving any todo's state is not progress, and treating it as progress is what
+/// turn that only rewrites a todo's words, re-sorts the list, or repeats tool
+/// calls it already made is not progress, and treating it as progress is what
 /// let an idle Session be re-prompted forever (the repeated fixed continuation
-/// prompt). The faster text-only stop stays at two turns; this one bounds the
+/// prompt). A turn that executed a call it had not made before did work even
+/// when the checklist stayed put: one long implementation step, a verification
+/// run, and a wait polled with a new command all leave the list alone, and
+/// stopping them cost the operator a message to resume work that was never
+/// adrift. The faster text-only stop stays at two turns; this one bounds the
 /// shapes that stop cannot see.
 const MAX_FLAT_CONTINUATIONS: usize = 24;
 
@@ -3938,6 +3942,12 @@ async fn execute(
     // instead of being re-prompted forever.
     let mut goal_open_continuations = 0;
     let mut repeats = HashMap::<String, u32>::new();
+    // Whether this turn executed a tool call it had not already made. Writing
+    // the checklist is bookkeeping, not work: both stale-list bounds below use
+    // this as the progress signal, so a long implementation step or a wait on
+    // an external process is not mistaken for drift while a loop that rewrites
+    // its own list words still is.
+    let mut turn_new_calls = false;
     // Per-run count of calls refused because their input already spent
     // MAX_IDENTICAL_TOOL_CALLS. Scoped to the run so a new prompt starts clean.
     let mut refusals = HashMap::<String, u32>::new();
@@ -3951,9 +3961,9 @@ async fn execute(
     let mut internal_inputs = HashSet::new();
     let mut goal_iterations = 0;
     let mut goal_stalls = 0;
-    // Continuation turns that left the todo list's *meaning* where it was, with
-    // or without a tool batch and whatever prose the turn rewrote. See
-    // `MAX_FLAT_CONTINUATIONS`.
+    // Continuation turns that left the todo list's *meaning* where it was and
+    // executed no call it had not already made, whatever prose the turn
+    // rewrote. See `MAX_FLAT_CONTINUATIONS`.
     let mut goal_flat = 0usize;
     let mut goal_flat_signature: Option<String> = None;
     let mut goal_polls = 0u32;
@@ -5867,6 +5877,11 @@ command: None,
                 // recorded result, mirroring TS which drops replayed calls
                 // before counting.
                 if !replayed_call {
+                    if !repeats.contains_key(&repeat_key)
+                        && !matches!(name, "todowrite" | "goal" | "planwrite")
+                    {
+                        turn_new_calls = true;
+                    }
                     let repeat = repeats.entry(repeat_key.clone()).or_default();
                     *repeat += 1;
                     if *repeat == MAX_IDENTICAL_TOOL_CALLS + 1 && loop_reported.insert(repeat_key) {
@@ -6227,15 +6242,26 @@ command: None,
             .promote_fenced(session, !reply.needs_tools, lease)
             .await?;
         let mut goal_stopped_this_turn = false;
+        // A turn that executed a call it had not made before did work even
+        // when it left the checklist alone. Counting that as debt is what made
+        // a long implementation stretch and a wait on an external process read
+        // as a stale list, so the debt only grows across turns that repeated
+        // themselves.
+        let worked_this_turn = std::mem::replace(&mut turn_new_calls, false);
+        let state_now = inner.store.state(session).await?;
+        if worked_this_turn {
+            let revision = state_now["todos"]["revision"].as_u64().unwrap_or(0);
+            ledger_turns.insert(session.to_owned(), (revision, 0));
+        }
         // The text-only stall guard below never sees a tool-driven drain, so a
-        // checklist that still has open items and has not been rewritten for
-        // many turns is stopped here: the operator reads the sidebar as current
-        // progress, and one Session drifted for 176 turns that way.
+        // checklist that still has open items through many self-repeating turns
+        // is stopped here: the operator reads the sidebar as current progress,
+        // and one Session drifted for 176 turns that way.
         let stale_turns = ledger_turns
             .get(session)
             .map(|(_, turns)| *turns)
             .unwrap_or(0);
-        if crate::state::todo_stale(stale_turns, &inner.store.state(session).await?) {
+        if crate::state::todo_stale(stale_turns, &state_now) {
             inner
                 .store
                 .record(
@@ -6322,7 +6348,9 @@ command: None,
                 // made no progress, and counting that as progress is what let an
                 // idle Session be re-prompted indefinitely.
                 let flat = crate::state::todo_signature(&state);
-                goal_flat = if goal_flat_signature.as_ref() == Some(&flat) {
+                // Only a turn with no new call and no todo movement may feed
+                // the cap; `worked_this_turn` carries that evidence.
+                goal_flat = if goal_flat_signature.as_ref() == Some(&flat) && !worked_this_turn {
                     goal_flat + 1
                 } else {
                     0
@@ -6461,7 +6489,7 @@ command: None,
                         // stop, and the next real event clears it.
                         if goal_status.is_null() || goal_status == "active" {
                             let evidence = format!(
-                                "loop: no todo changed state for {goal_flat} continuation turns (round {round} of this list). It re-arms on its own with the next operator message, the next background notice, or a changed todo list."
+                                "loop: no todo changed state and no new tool call ran for {goal_flat} continuation turns (round {round} of this list). It re-arms on its own with the next operator message, the next background notice, or a changed todo list."
                             );
                             let mut next = goal.clone();
                             next["status"] = json!("blocked");
@@ -6516,7 +6544,7 @@ command: None,
                         // any todo's state, is not progress, and this is where
                         // the loop stops re-prompting itself for it.
                         "flat" => format!(
-                            "Task paused: {goal_flat} continuation turns ran without any todo changing state, so the loop stopped repeating itself (round {blocked_round} of this list). Nothing is running now. It re-arms on its own with your next message, the next background notice, or a change to a todo's state."
+                            "Task paused: {goal_flat} continuation turns ran without any todo changing state and without a tool call it had not already made, so the loop stopped repeating itself (round {blocked_round} of this list). Nothing is running now. It re-arms on its own with your next message, the next background notice, or a change to a todo's state."
                         ),
                         _ => format!(
                             "Task paused: the todo list stayed unchanged for {goal_stalls} continuation turns over {waited}s, so the loop stopped waiting for it to move (round {blocked_round} of this list). Nothing is running now. It re-arms on its own with your next message, the next background notice, or a change to a todo's state."

@@ -14,6 +14,7 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 ## [0.3.92] - 2026-11-19
 
 ### Fixed
+- **engine**: count a new tool call as progress against the stale-list stop (#3194)
 - **engine**: let a long implementation run past the stale-list stop (#3193) (`360f4e06c0`)
 - **tui**: keep one pause entry in the transcript instead of every replay (#3191) (`186023657e`)
 

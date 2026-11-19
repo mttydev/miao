@@ -956,3 +956,75 @@ async fn an_operator_pause_is_not_re_armed_by_a_notification() {
         "paused"
     );
 }
+
+/// The stale-list bound counts provider turns since the last `todowrite`. That
+/// is bookkeeping, not progress: a Session implementing one item across many
+/// tool calls leaves the list alone for a long stretch, and stopping it costs
+/// an operator message to resume work that was never adrift. A turn that
+/// executes a call it had not already made is work, so the debt must reset.
+#[tokio::test]
+async fn long_work_that_leaves_the_checklist_alone_is_not_stopped_as_stale() {
+    const WORK_TURNS: usize = 30;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    setup(&store, "active", true, true, dir.path()).await;
+    (0..WORK_TURNS).for_each(|index| {
+        std::fs::write(
+            dir.path().join(format!("work-{index}.txt")),
+            format!("step {index}"),
+        )
+        .unwrap()
+    });
+    let steps = (0..WORK_TURNS)
+        .map(|index| {
+            (
+                true,
+                json!([{"type":"tool_use","id":format!("work-{index}"),"name":"read_file","input":{
+                    "path":format!("work-{index}.txt")
+                }}]),
+            )
+        })
+        .chain([
+            (
+                true,
+                json!([{"type":"tool_use","id":"close","name":"todowrite","input":{"todos":[
+                    {"id":"4","content":"CI","status":"completed","priority":"high"},
+                    {"id":"5","content":"Release","status":"completed","priority":"high"},
+                    {"id":"7","content":"Audit","status":"completed","priority":"medium"}
+                ]}}]),
+            ),
+            (false, json!([{"type":"text","text":"all done"}])),
+        ])
+        .collect();
+    let provider = Arc::new(Sequence {
+        calls: AtomicUsize::new(0),
+        steps,
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        Policy::new(Config {
+            continuation_min_interval_ms: 0,
+            mode: Mode::Workspace,
+            ..Config::default()
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime.resume("s").await.unwrap();
+    finished(&store).await;
+    assert_eq!(provider.calls.load(Ordering::SeqCst), WORK_TURNS + 2);
+    let events = store.events("s", 0, 5000).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "loop.stopped" && event.data["reason"] == "todo-stale"),
+        "work that executed a new call each turn is not a stale list"
+    );
+    assert!(events
+        .iter()
+        .any(|event| event.kind == "run.finished" && event.data["reason"] == "completed"));
+    runtime.shutdown().await;
+}
