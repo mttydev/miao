@@ -20,9 +20,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.miao.app.HostClient
+import dev.miao.app.R
 import dev.miao.app.RemoteSession
 import dev.miao.app.userMessage
 import dev.miao.core.JsonValue
@@ -114,14 +116,14 @@ fun SessionSettingsDialog(remote: RemoteSession, client: HostClient, onDismiss: 
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("会话设置") },
+        title = { Text(stringResource(R.string.settings_title)) },
         text = {
             Column(
                 modifier = Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (loading) {
-                    Text("正在读取会话设置…", fontSize = 12.sp)
+                    Text(stringResource(R.string.settings_loading), fontSize = 12.sp)
                     return@Column
                 }
                 failure?.let {
@@ -141,7 +143,7 @@ fun SessionSettingsDialog(remote: RemoteSession, client: HostClient, onDismiss: 
                         }
                     }
                 }
-                Text("模型", style = MaterialTheme.typography.titleSmall)
+                Text(stringResource(R.string.settings_models_header), style = MaterialTheme.typography.titleSmall)
                 models.take(120).forEach { entry ->
                     FilterChip(
                         selected = model?.key == entry.key,
@@ -154,7 +156,7 @@ fun SessionSettingsDialog(remote: RemoteSession, client: HostClient, onDismiss: 
                 }
                 val variants = model?.variants ?: emptyList()
                 if (variants.isNotEmpty()) {
-                    Text("变体", style = MaterialTheme.typography.titleSmall)
+                    Text(stringResource(R.string.settings_variants_header), style = MaterialTheme.typography.titleSmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         variants.forEach { id ->
                             FilterChip(
@@ -169,9 +171,9 @@ fun SessionSettingsDialog(remote: RemoteSession, client: HostClient, onDismiss: 
         },
         confirmButton = {
             TextButton(onClick = { apply() }, modifier = Modifier.fillMaxWidth(), enabled = !busy) {
-                Text(if (busy) "应用中…" else "应用")
+                Text(if (busy) stringResource(R.string.settings_applying) else stringResource(R.string.settings_apply))
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } },
     )
 }

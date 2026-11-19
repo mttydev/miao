@@ -44,11 +44,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.miao.app.R
 import dev.miao.app.local.LocalAgent
 import dev.miao.app.local.LocalImages
 import dev.miao.app.local.LocalMessage
@@ -94,19 +96,19 @@ fun LocalScreen(agent: LocalAgent) {
             TopAppBar(
                 title = {
                     Column {
-                        Text("本机", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(stringResource(R.string.tab_local), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
-                            agent.provider.name.ifEmpty { "未选择服务商" } +
-                                if (agent.ready) "" else " · 需要配置",
+                            agent.provider.name.ifEmpty { stringResource(R.string.local_provider_none) } +
+                                if (agent.ready) "" else stringResource(R.string.local_provider_needs_config),
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 },
                 actions = {
-                    TextButton(onClick = { showSessions = true }) { Text("会话") }
-                    TextButton(onClick = { showProviders = true }) { Text("服务商") }
-                    TextButton(onClick = { showSettings = true }) { Text("设置") }
+                    TextButton(onClick = { showSessions = true }) { Text(stringResource(R.string.sidebar_sessions)) }
+                    TextButton(onClick = { showProviders = true }) { Text(stringResource(R.string.providers_header)) }
+                    TextButton(onClick = { showSettings = true }) { Text(stringResource(R.string.common_settings)) }
                 },
             )
         },
@@ -116,19 +118,19 @@ fun LocalScreen(agent: LocalAgent) {
                     agent.error?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error) }
                     if (attached.isNotEmpty() || attaching) {
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (attaching) Text("正在处理图片…", fontSize = 11.sp)
+                            if (attaching) Text(stringResource(R.string.local_attaching), fontSize = 11.sp)
                             attached.forEachIndexed { index, image ->
                                 Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
                                     LocalImages.decode(image)?.let { bitmap ->
                                         Image(
                                             bitmap = bitmap.asImageBitmap(),
-                                            contentDescription = "附件",
+                                            contentDescription = stringResource(R.string.attachment),
                                             contentScale = ContentScale.Crop,
                                             modifier = Modifier.size(56.dp),
                                         )
                                     }
                                     TextButton(onClick = { attached = attached.filterIndexed { i, _ -> i != index } }) {
-                                        Text("移除", fontSize = 10.sp)
+                                        Text(stringResource(R.string.remove), fontSize = 10.sp)
                                     }
                                 }
                             }
@@ -138,7 +140,7 @@ fun LocalScreen(agent: LocalAgent) {
                         value = draft,
                         onValueChange = { draft = it },
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text(if (agent.ready) "本机直连，不经过电脑…" else "先在「服务商」里配置接口与密钥") },
+                        placeholder = { Text(if (agent.ready) stringResource(R.string.local_placeholder_ready) else stringResource(R.string.local_placeholder_setup)) },
                         maxLines = 5,
                         enabled = agent.ready,
                     )
@@ -148,7 +150,7 @@ fun LocalScreen(agent: LocalAgent) {
                                 picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                             },
                             enabled = agent.ready && !agent.busy && attached.size < LocalImages.MAX_IMAGES,
-                        ) { Text("图片") }
+                        ) { Text(stringResource(R.string.composer_photo)) }
                         Button(
                             onClick = {
                                 val text = draft
@@ -158,14 +160,14 @@ fun LocalScreen(agent: LocalAgent) {
                                 agent.send(text, images)
                             },
                             enabled = agent.ready && !agent.busy && (draft.isNotBlank() || attached.isNotEmpty()),
-                        ) { Text("发送") }
+                        ) { Text(stringResource(R.string.composer_send)) }
                         OutlinedButton(
                             onClick = { agent.retryLast() },
                             enabled = agent.ready && !agent.busy && messages.isNotEmpty(),
-                        ) { Text("重试") }
-                        OutlinedButton(onClick = { agent.newSession() }) { Text("新会话") }
+                        ) { Text(stringResource(R.string.common_retry)) }
+                        OutlinedButton(onClick = { agent.newSession() }) { Text(stringResource(R.string.local_new_session)) }
                         Spacer(Modifier.weight(1f))
-                        if (agent.busy) OutlinedButton(onClick = { agent.stop() }) { Text("停止") }
+                        if (agent.busy) OutlinedButton(onClick = { agent.stop() }) { Text(stringResource(R.string.common_stop)) }
                     }
                 }
             }

@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">miao</string>
+
+    <!-- Common -->
+    <string name="common_close">关闭</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_save">保存</string>
+    <string name="common_back">返回</string>
+    <string name="common_settings">设置</string>
+    <string name="common_rename">重命名</string>
+    <string name="common_more">更多</string>
+
+    <!-- Tabs -->
+    <string name="tab_local">本机</string>
+    <string name="tab_computer">电脑</string>
+
+    <!-- Session screen -->
+    <string name="session_syncing">同步中…</string>
+    <string name="session_changes">变更</string>
+    <string name="session_share_link">分享会话链接</string>
+    <string name="session_copy_link">复制会话链接</string>
+    <string name="session_export">导出对话</string>
+    <string name="session_rename_title">重命名会话</string>
+    <string name="session_fallback_title">会话</string>
+    <string name="diff_title">文件变更</string>
+    <string name="diff_loading">正在读取…</string>
+
+    <!-- Composer -->
+    <string name="composer_placeholder">输入消息…</string>
+    <string name="composer_send">发送</string>
+    <string name="composer_queue">排队</string>
+    <string name="composer_speech_active">说…</string>
+    <string name="composer_speech_idle">语音</string>
+    <string name="composer_interrupt">中断</string>
+
+    <!-- Queue -->
+    <string name="queued_collapsed">已排队 %1$d 条，本轮结束后依次发送</string>
+    <string name="queued_expanded">已排队 %1$d 条（收起）</string>
+
+    <!-- Transcript -->
+    <string name="tool_label">工具 %1$s</string>
+    <string name="compaction_summary">摘要</string>
+
+    <!-- Pending -->
+    <string name="pending_wait">等待你处理</string>
+    <string name="permission_allow_once">允许一次</string>
+    <string name="permission_reject">拒绝</string>
+    <string name="question_answer">回答</string>
+    <string name="question_skip">跳过</string>
+
+    <!-- Session settings -->
+    <string name="settings_title">会话设置</string>
+    <string name="settings_loading">正在读取会话设置…</string>
+    <string name="settings_models_header">模型</string>
+    <string name="settings_variants_header">变体</string>
+    <string name="settings_applying">应用中…</string>
+    <string name="settings_apply">应用</string>
+
+    <!-- Keep-alive banner -->
+    <string name="keepalive_title">后台容易被系统清理</string>
+    <string name="keepalive_body">锁屏后可能会话停止响应。允许后台运行，或打开你手机品牌的管理页把 miao 加入白名单。</string>
+    <string name="keepalive_later">暂不</string>
+    <string name="keepalive_vendor">品牌设置</string>
+    <string name="keepalive_allow">允许后台</string>
+
+    <!-- Local screen -->
+    <string name="local_settings_title">本机设置</string>
+    <string name="local_appearance">外观</string>
+    <string name="local_dynamic_color">跟随系统壁纸取色（Material You，Android 12+）</string>
+    <string name="local_auto_allow">自动允许写入与联网（不再逐次确认）</string>
+    <string name="local_workspace">工作区：%1$s</string>
+    <string name="local_mcp_label">MCP 服务地址（可选，HTTP）</string>
+    <string name="local_mcp_save">保存并连接</string>
+    <string name="local_mcp_disconnect">断开</string>
+    <string name="local_mcp_none">未连接 MCP 服务</string>
+    <string name="local_mcp_connecting">正在连接…</string>
+    <string name="local_mcp_connected">已连接 %1$d 个 MCP 工具</string>
+    <string name="local_approval_title">允许执行 %1$s？</string>
+
+    <!-- Computer list -->
+    <string name="account">账号</string>
+    <string name="common_collapse">收起</string>
+    <string name="common_expand">展开</string>
+    <string name="pair">配对</string>
+    <string name="error_dismiss">知道了</string>
+    <string name="relay_signin_title">登录中继</string>
+    <string name="relay_signin_body">手机通过电脑使用的中继访问你的会话。登录后即可扫码配对或接入同账号电脑。</string>
+    <string name="relay_signin_account">登录账号</string>
+    <string name="relay_account">中继账号</string>
+    <string name="refresh_computers">刷新电脑</string>
+    <string name="adopt_computers">接入同账号电脑</string>
+    <string name="no_computers">还没有电脑</string>
+    <string name="no_computers_body">在电脑上运行 /remote-control 并扫码配对；同账号电脑可在一键接入后直接出现。</string>
+    <string name="pending_yours">等待你的处理</string>
+    <string name="sidebar_sessions">会话</string>
+    <string name="search_sessions">搜索会话</string>
+    <string name="archived_filter">归档</string>
+    <string name="no_sessions">没有可显示的会话</string>
+    <string name="unpin">取消置顶</string>
+    <string name="pin">置顶</string>
+    <string name="unarchive">取消归档</string>
+    <string name="archive">归档</string>
+    <string name="delete_forever">永久删除</string>
+    <string name="sending">发送中…</string>
+    <string name="new_session">新建会话</string>
+    <string name="project_fallback">项目</string>
+
+    <!-- Account / pairing / providers dialogs -->
+    <string name="account_relay_url_hint">中继地址（留空使用默认 %1$s）</string>
+    <string name="account_relay_url_label">HTTPS 中继地址</string>
+    <string name="account_email">邮箱</string>
+    <string name="account_password">密码</string>
+    <string name="account_signing_in">登录中…</string>
+    <string name="account_sign_in">登录</string>
+    <string name="account_sign_out">退出登录</string>
+    <string name="account_hosts_header">账号电脑</string>
+    <string name="host_online">在线</string>
+    <string name="host_offline">离线</string>
+    <string name="enrollment_header">同账号设备注册</string>
+    <string name="enrollment_confirm_statement">我确认在电脑上把此设备选为账号签名设备</string>
+    <string name="enrollment_init_signer">初始化签名设备</string>
+    <string name="enrollment_gen_code">生成注册码</string>
+    <string name="enrollment_signer_key">签名公钥：%1$s</string>
+    <string name="enrollment_local_code">本机注册码（交给已信任设备）</string>
+    <string name="enrollment_new_code_label">新设备注册码（批准用）</string>
+    <string name="enrollment_approve_device">批准新设备</string>
+    <string name="enrollment_result_label">批准结果（交给新设备）</string>
+    <string name="enrollment_paste_result">新设备：粘贴批准结果</string>
+    <string name="enrollment_signer_key_label">批准设备的签名公钥</string>
+    <string name="enrollment_verify_statement">我已通过独立渠道核对签名公钥</string>
+    <string name="enrollment_finish">完成注册</string>
+    <string name="enrollment_done">注册完成</string>
+    <string name="enrollment_busy">处理中…</string>
+    <string name="pairing_title">配对电脑</string>
+    <string name="pairing_link_label">配对链接（miao://pair#…）</string>
+    <string name="pairing_device_label">设备名称</string>
+    <string name="pairing_scan_prompt">扫描电脑上的配对二维码</string>
+    <string name="pairing_scan">扫描二维码</string>
+    <string name="pairing_start">开始配对</string>
+    <string name="pairing_fingerprint">设备指纹：%1$s</string>
+    <string name="providers_title">连接密钥</string>
+    <string name="providers_key_note">密钥只通过加密信道发送一次，不会保存到本机。</string>
+    <string name="provider_status_connected">已连接</string>
+    <string name="provider_status_disconnected">未连接</string>
+    <string name="provider_has_key"> · 可用密钥</string>
+    <string name="providers_connect_key">连接密钥</string>
+    <string name="providers_default_model">默认模型</string>
+    <string name="providers_current">当前：%1$s</string>
+    <string name="providers_list_title">服务商与模型</string>
+    <string name="pairing_default_device">Android 设备</string>
+
+    <!-- Local screen -->
+    <string name="local_provider_none">未选择服务商</string>
+    <string name="local_provider_needs_config"> · 需要配置</string>
+    <string name="providers_header">服务商</string>
+    <string name="composer_photo">图片</string>
+    <string name="common_retry">重试</string>
+    <string name="common_stop">停止</string>
+    <string name="common_delete">删除</string>
+    <string name="common_edit">编辑</string>
+    <string name="local_allow">允许</string>
+    <string name="local_new_session">新会话</string>
+    <string name="local_rename_short">改名</string>
+    <string name="local_sessions_title">本机会话</string>
+    <string name="local_placeholder_ready">本机直连，不经过电脑…</string>
+    <string name="local_placeholder_setup">先在「服务商」里配置接口与密钥</string>
+    <string name="local_attaching">正在处理图片…</string>
+    <string name="attachment">附件</string>
+    <string name="local_pitch_title">手机自己就能用</string>
+    <string name="local_pitch_body">在「服务商」里填入一个 OpenAI 兼容接口（预置了常见服务商）后，本机会话直接在手机上运行，工具只能读写应用自己的工作区。</string>
+    <string name="providers_add">添加服务商</string>
+    <string name="providers_edit">编辑服务商</string>
+    <string name="providers_presets">预置</string>
+    <string name="provider_name_label">名称</string>
+    <string name="provider_base_url_label">接口地址（OpenAI 兼容）</string>
+    <string name="provider_key_note">密钥只保存在本机应用私有目录。</string>
+</resources>
