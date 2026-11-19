@@ -52,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.miao.app.QueuedPrompt
 import dev.miao.app.RemoteSession
 import dev.miao.core.JsonValue
 import dev.miao.core.OperationKind
