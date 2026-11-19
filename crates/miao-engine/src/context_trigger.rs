@@ -120,6 +120,85 @@ pub fn window_note(occupancy: Option<(u64, u64)>, threshold: Option<u64>) -> Str
     }
 }
 
+/// Whether a model reply claims the context window is exhausted.
+///
+/// A model sometimes ends an autonomous stretch by announcing the window is
+/// full and asking the operator to start a new session, while the engine's
+/// own occupancy says the window has room and automatic compaction is armed.
+/// The claim is text, not state. The match stays conservative on purpose: it
+/// fires only when a window word appears alongside an exhaustion word or an
+/// explicit hand-off to a new session, so an answer that merely mentions the
+/// window, or reports the compaction threshold, does not fire it.
+pub fn claims_context_exhaustion(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let names_the_window = ["上下文", "窗口", "压缩", "context", "window", "compaction"]
+        .into_iter()
+        .any(|word| lower.contains(word));
+    if !names_the_window {
+        return false;
+    }
+    let claims_exhausted = [
+        "用完",
+        "用尽",
+        "耗尽",
+        "用光",
+        "满了",
+        "已满",
+        "不够",
+        "不足",
+        "到头",
+        "到限",
+        "极限",
+        "装不下",
+        "exhaust",
+        "used up",
+        "no room",
+        "ran out",
+        "out of room",
+        "out of space",
+        "at its limit",
+        "is full",
+        "no longer fit",
+        "cannot fit",
+        "can't fit",
+    ]
+    .into_iter()
+    .any(|word| lower.contains(word));
+    let hands_off_to_a_new_session = [
+        "新会话",
+        "新对话",
+        "新窗口",
+        "new session",
+        "new conversation",
+        "new chat",
+    ]
+    .into_iter()
+    .any(|word| lower.contains(word));
+    claims_exhausted || hands_off_to_a_new_session
+}
+
+/// The continuation a drain injects when the model's reply claims the window
+/// is exhausted while the engine's own occupancy says otherwise. The engine
+/// owns the measurement, so the correction leads with the measured fact and
+/// then what the loop expects: work continues here, compaction is automatic,
+/// and a new session is never the way out of a window that still has room.
+pub fn context_claim_correction(occupancy: Option<(u64, u64)>, threshold: Option<u64>) -> String {
+    format!(
+        "Your previous reply told the operator the context window is exhausted. The engine's own measurement contradicts that: {}. Automatic compaction is armed and runs before a turn that would cross the threshold, and the engine never requires a new session. Do not ask the operator to start a new session and do not restate finished work. Continue the next dependency-ready todo now with tools; if a task is genuinely blocked by an external dependency, mark that todo blocked and name exactly what is missing.",
+        window_note(occupancy, threshold)
+    )
+}
+
+/// The pause printed when the claim repeats past the correction bound. It
+/// carries the same measured figures, so the operator can see the claim is
+/// the model's rather than engine state.
+pub fn context_claim_pause(occupancy: Option<(u64, u64)>, threshold: Option<u64>) -> String {
+    format!(
+        "Task paused: the model stopped again claiming the context window is exhausted, after corrections carrying the engine's own measurement: {}. The claim is the model's, not engine state; automatic compaction is armed and the engine never requires a new session. Nothing is running now; your next message resumes the task, and /compact forces a compaction pass immediately.",
+        window_note(occupancy, threshold)
+    )
+}
+
 /// Conservative char-based estimate for messages a provider has not counted
 /// yet. Deliberately coarse (≈3 chars/token, rounded up) so the trigger errs
 /// toward compacting; gate ② replaces it with the provider's own count.
@@ -1739,6 +1818,34 @@ mod tests {
                 .unwrap();
         assert_eq!(bare.prefix_scope, PrefixScope::Total);
         assert_eq!(bare.retention, None);
+    }
+
+    /// The fabricated claim a weak model produces to stop an autonomous
+    /// stretch — in either language — reads as a claim, while an ordinary
+    /// mention of the window, its figures, or unrelated waiting does not.
+    #[test]
+    fn an_exhausted_window_claim_matches_without_firing_on_plain_mentions() {
+        assert!(claims_context_exhaustion(
+            "这个会话的上下文窗口用完了。继续方式：开一个新会话即可无缝接上。"
+        ));
+        assert!(claims_context_exhaustion(
+            "The context window is exhausted; please open a new session to continue."
+        ));
+        assert!(claims_context_exhaustion(
+            "本会话上下文到此为止，剩余余量已不足以安全地再开一个多步任务。"
+        ));
+        assert!(!claims_context_exhaustion(
+            "自动压缩是存在的，触发线是窗口的 90%，当前占用 61%。"
+        ));
+        assert!(!claims_context_exhaustion(
+            "The context window carries 534800 of 868900 tokens (61%)."
+        ));
+        assert!(!claims_context_exhaustion(
+            "Waiting for the device to recover."
+        ));
+        assert!(!claims_context_exhaustion(
+            "任务完成，四个 PR 已合入 main。"
+        ));
     }
 
     /// A summarizer call the interrupt aborted reports a transport error. Read
