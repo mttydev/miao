@@ -150,7 +150,24 @@
     "需要授权" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Needs authorization" } } } },
     "首次使用请先扫码配对，并在电脑设备管理中明确选择本设备作为账号签名设备。" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "For first use, scan to pair, then explicitly choose this device as the account signer in the computer's device management." } } } },
     "默认" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Default" } } } },
-    "默认模型" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Default model" } } } }
+    "默认模型" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Default model" } } } },
+    "默认使用 %@，有该站账号即可登录；要自建中继请填写其地址。登录后可扫码配对，或让已信任的签名设备批准本设备注册。" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Uses the default %@ — an account on that site is enough to sign in; to run your own relay, enter its URL. After signing in you can scan-pair, or have a trusted signer device approve this device's enrollment." } } } },
+    "已连接：%@" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected: %@" } } } },
+    "将从本机移除「%@」及其缓存，电脑上的任务继续运行。账号电脑不会自动重新添加，可在中继账号中点击「连接我的电脑」恢复。要撤销授权，请在电脑的设备接入界面操作。" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Removes \"%@\" from this phone along with its cache. Sessions on the computer keep running. Account computers are not re-added automatically — tap \"Connect my computer\" in Relay account to restore. To revoke authorization, use the computer's device adoption screen." } } } },
+    "%lld" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld" } } } },
+    "仅显示前 %lld 行" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Showing only the first %lld lines" } } } },
+    "+%lld" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "+%lld" } } } },
+    "-%lld" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "-%lld" } } } },
+    "%lld 行变化" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld lines changed" } } } },
+    "已排队 %lld 条，本轮结束后依次发送" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld queued — sending after this turn" } } } },
+    "停顿约 %lld 秒自动完成" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Auto-finishes after about %lld seconds of silence" } } } },
+    "跟随系统（%@）" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Follow system (%@)" } } } },
+    "需要你确认：%@" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Needs your confirmation: %@" } } } },
+    "用量：%@" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Usage: %@" } } } },
+    "移除附件 %@" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove attachment %@" } } } },
+    "展开全部（%lld 字符）" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Expand all (%lld characters)" } } } },
+    "已录音 %lld 秒" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Recorded %lld seconds" } } } },
+    "移除电脑：%@" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove computer: %@" } } } }
   },
   "version" : "1.0"
 }
