@@ -465,7 +465,7 @@ mod ceiling_tests {
     fn the_trigger_plans_against_the_input_ceiling() {
         let limits = effective_limits(None, route(Some(1_048_576), Some(393_216)), None).unwrap();
         assert_eq!(limits.window, 655_360);
-        assert_eq!(limits.budget().threshold(), 576_716);
+        assert_eq!(limits.budget().threshold(), 622_592);
     }
 
     /// A route that declares no output capacity is not unlimited: the quarter
@@ -474,7 +474,7 @@ mod ceiling_tests {
     fn an_undeclared_capacity_still_leaves_the_trigger_below_the_window() {
         let limits = effective_limits(None, route(Some(1_000_000), None), None).unwrap();
         assert_eq!(limits.window, 750_000);
-        assert_eq!(limits.budget().threshold(), 660_000);
+        assert_eq!(limits.budget().threshold(), 712_500);
     }
 
     /// The trigger must stay below the request ceiling on every real shape,
@@ -483,7 +483,7 @@ mod ceiling_tests {
     fn a_large_output_reserve_keeps_the_trigger_reachable() {
         let limits = effective_limits(None, route(Some(200_000), Some(64_000)), None).unwrap();
         assert_eq!(limits.window, 136_000);
-        assert_eq!(limits.budget().threshold(), 119_680);
+        assert_eq!(limits.budget().threshold(), 129_200);
         assert!(limits.budget().threshold() < limits.window);
     }
 
@@ -536,7 +536,11 @@ mod ceiling_tests {
 fn window_limits(window: u64) -> ContextLimits {
     ContextLimits {
         window,
-        ratio: 0.88,
+        // 0.95 lines up with Codex's effective ceiling (window × 95%) and sits
+        // just under Claude Code's ~96.7% on 1M windows: the pass still has
+        // room for the summary it writes, but a heavy day no longer stops at
+        // 88% of the window with a third of it unread.
+        ratio: 0.95,
         // Mirrors the product's headroom: pruning protection, the summary
         // reserve, and the default slack.
         headroom: 40_000 + 2_048 + 20_000,
