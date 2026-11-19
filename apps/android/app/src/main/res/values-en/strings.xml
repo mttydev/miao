@@ -180,4 +180,24 @@
     <string name="provider_name_label">Name</string>
     <string name="provider_base_url_label">Endpoint (OpenAI-compatible)</string>
     <string name="provider_key_note">The key is stored only in the app\'s private directory on this device.</string>
+
+    <!-- Local agent runtime -->
+    <string name="local_mcp_connect_failed">MCP connection failed</string>
+    <string name="local_error_provider_status">Provider returned %1$d: %2$s</string>
+    <string name="local_error_unparseable_response">The model returned unparseable content</string>
+    <string name="local_error_empty_reply">(The model returned no content)</string>
+    <string name="local_error_invalid_endpoint">Invalid endpoint URL</string>
+    <string name="local_tool_calling">Calling %1$s</string>
+    <string name="local_tool_denied">The user denied this action.</string>
+    <string name="local_tool_unknown">Unknown tool: %1$s</string>
+    <string name="local_tool_failed">Failed: %1$s</string>
+    <string name="local_error_path_outside">Path escapes the local workspace</string>
+    <string name="local_list_empty">(empty directory)</string>
+    <string name="local_error_file_missing">File not found</string>
+    <string name="local_file_empty">(empty file)</string>
+    <string name="local_error_write_failed">Write failed</string>
+    <string name="local_write_done">Wrote %1$s (%2$d bytes)</string>
+    <string name="local_error_mcp_not_connected">MCP is not connected</string>
+    <string name="local_error_unavailable">The local assistant is temporarily unavailable</string>
+    <string name="local_error_save_failed">Save failed</string>
 </resources>

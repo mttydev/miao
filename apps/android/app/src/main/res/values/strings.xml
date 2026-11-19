@@ -180,4 +180,24 @@
     <string name="provider_name_label">名称</string>
     <string name="provider_base_url_label">接口地址（OpenAI 兼容）</string>
     <string name="provider_key_note">密钥只保存在本机应用私有目录。</string>
+
+    <!-- Local agent runtime -->
+    <string name="local_mcp_connect_failed">MCP 连接失败</string>
+    <string name="local_error_provider_status">服务商返回 %1$d：%2$s</string>
+    <string name="local_error_unparseable_response">模型返回了无法解析的内容</string>
+    <string name="local_error_empty_reply">（模型没有返回内容）</string>
+    <string name="local_error_invalid_endpoint">接口地址无效</string>
+    <string name="local_tool_calling">调用 %1$s</string>
+    <string name="local_tool_denied">用户拒绝了这次操作。</string>
+    <string name="local_tool_unknown">未知工具：%1$s</string>
+    <string name="local_tool_failed">失败：%1$s</string>
+    <string name="local_error_path_outside">路径超出了本机工作区</string>
+    <string name="local_list_empty">（空目录）</string>
+    <string name="local_error_file_missing">文件不存在</string>
+    <string name="local_file_empty">（空文件）</string>
+    <string name="local_error_write_failed">写入失败</string>
+    <string name="local_write_done">已写入 %1$s（%2$d 字节）</string>
+    <string name="local_error_mcp_not_connected">MCP 未连接</string>
+    <string name="local_error_unavailable">本机助手暂时不可用</string>
+    <string name="local_error_save_failed">保存失败</string>
 </resources>
