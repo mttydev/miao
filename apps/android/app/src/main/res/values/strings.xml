@@ -10,6 +10,7 @@
     <string name="common_settings">设置</string>
     <string name="common_rename">重命名</string>
     <string name="common_more">更多</string>
+    <string name="remove">移除</string>
 
     <!-- Tabs -->
     <string name="tab_local">本机</string>

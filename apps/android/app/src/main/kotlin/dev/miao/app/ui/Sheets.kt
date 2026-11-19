@@ -183,7 +183,8 @@ fun AccountDialog(model: AppModel, onDismiss: () -> Unit) {
 @Composable
 fun PairingDialog(model: AppModel, initialLink: String, onDismiss: () -> Unit) {
     var link by rememberSaveable { mutableStateOf(initialLink) }
-    var label by rememberSaveable { mutableStateOf(stringResource(R.string.pairing_default_device)) }
+    val defaultLabel = stringResource(R.string.pairing_default_device)
+    var label by rememberSaveable { mutableStateOf(defaultLabel) }
     val scanPrompt = stringResource(R.string.pairing_scan_prompt)
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let { link = it }
