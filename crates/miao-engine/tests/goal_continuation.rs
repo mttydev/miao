@@ -294,6 +294,10 @@ async fn continues_independent_work_without_a_human_prompt_then_idles_with_locke
 
 #[tokio::test]
 async fn a_paced_text_only_wait_ends_the_drain_instead_of_re_requesting_the_model() {
+    // The pacing case depends on the no-progress floor staying at its default:
+    // a test that lowers it to zero in the same process would stop the drain
+    // before the interval expires.
+    let _env = NO_PROGRESS_ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("engine.db")).await.unwrap();
     setup(&store, "active", true, true, dir.path()).await;

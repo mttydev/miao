@@ -3948,8 +3948,9 @@ async fn execute(
     // an external process is not mistaken for drift while a loop that rewrites
     // its own list words still is.
     let mut turn_new_calls = false;
-    // Per-run count of calls refused because their input already spent
-    // MAX_IDENTICAL_TOOL_CALLS. Scoped to the run so a new prompt starts clean.
+    // Count of calls refused because their input already spent
+    // MAX_IDENTICAL_TOOL_CALLS, cleared with `repeats` when an external prompt
+    // arrives.
     let mut refusals = HashMap::<String, u32>::new();
     // Signatures whose bound exhaustion already fired loop.detected, so a
     // signature is reported once instead of on every refused call.
@@ -6931,6 +6932,11 @@ command: None,
                 empty_completions = 0;
                 verification_failures = 0;
                 repeats.clear();
+                // The refusal count is the other half of the same leash: an
+                // operator prompt asks for a different approach, so a call that
+                // was refused before it must start from zero rather than reach
+                // the stop on its next refusal.
+                refusals.clear();
                 loop_reported.clear();
                 goal_iterations = 0;
                 goal_stalls = 0;
