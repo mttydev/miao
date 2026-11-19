@@ -4974,16 +4974,30 @@ impl App {
         };
         // The title outlives the phase: once the run settles, say what it did
         // instead of going blank. The duration is the wall clock of the run the
-        // engine reported, not a guess from the transcript.
+        // engine reported, not a guess from the transcript. A classified stop
+        // rides the same line: it is the state that explains why nothing is
+        // moving, and the input is where a state belongs. Painting it in the
+        // transcript made it read as a message that never cleared, because the
+        // engine reports the same stop again at the end of every drain.
+        let pause = self
+            .shell
+            .transcript()
+            .and_then(|transcript| transcript.paused.as_ref())
+            .map(|(_, reason)| format!("paused: {reason}"));
         self.shell.composer.idle = if self.shell.composer.phase.is_some() {
             None
         } else {
-            Some(match self.last_worked {
-                Some(worked) => format!(
+            let worked = self.last_worked.map(|worked| {
+                format!(
                     "Worked for {}",
                     crate::pane::duration_ms(worked.as_millis() as u64)
-                ),
-                None => "Idle".to_string(),
+                )
+            });
+            Some(match (worked, pause) {
+                (Some(worked), Some(pause)) => format!("{worked} · {pause}"),
+                (Some(worked), None) => worked,
+                (None, Some(pause)) => pause,
+                (None, None) => "Idle".to_string(),
             })
         };
         // Which model answers, and what the Session has cost so far. A pin on
@@ -8306,6 +8320,45 @@ mod tests {
             app.shell.composer.idle.as_deref(),
             Some("Worked for 1m 35s")
         );
+    }
+
+    /// A classified stop is a state, so it belongs in the composer title, not
+    /// in the transcript: a row there was re-synthesized at the end of every
+    /// drain, so it read as a message that never cleared while a background
+    /// job was still running.
+    #[test]
+    fn a_classified_stop_rides_the_composer_title_not_the_transcript() {
+        let mut app = session_app();
+        let mut transcript = Transcript::default();
+        transcript.apply_event(4, "loop.stopped", &serde_json::json!({"reason": "waiting"}));
+        app.handle(AppEvent::SessionOpened {
+            summary: None,
+            transcript: Box::new(transcript),
+            state: Box::new(SessionState::default()),
+        });
+        app.update_status();
+        assert_eq!(app.shell.composer.idle.as_deref(), Some("paused: waiting"));
+
+        // A run in flight owns the title: the pause state is not a second line
+        // competing with it.
+        app.state.active_run = Some("run-1".into());
+        app.update_status();
+        assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
+        assert!(app.shell.composer.idle.is_none());
+
+        // A resumed loop clears the state, so the title stops naming it.
+        let mut resumed = Transcript::default();
+        resumed.apply_event(4, "loop.stopped", &serde_json::json!({"reason": "waiting"}));
+        resumed.apply_event(9, "run.started", &serde_json::json!({}));
+        app.state.active_run = None;
+        app.handle(AppEvent::SessionOpened {
+            summary: None,
+            transcript: Box::new(resumed),
+            state: Box::new(SessionState::default()),
+        });
+        app.update_status();
+        let idle = app.shell.composer.idle.clone().expect("idle title");
+        assert!(!idle.contains("paused"), "{idle}");
     }
 
     /// The state is the box's own title: an idle Session names itself there, a
