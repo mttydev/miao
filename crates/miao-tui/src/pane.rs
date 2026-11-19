@@ -674,11 +674,32 @@ impl Shell {
             let style = Style::new()
                 .fg(self.transcript.theme.palette.text_muted)
                 .bg(self.transcript.theme.palette.background);
-            let buffer = frame.buffer_mut();
-            for y in area.y..area.y + area.height {
-                buffer[(area.x, y)].set_symbol("│").set_style(style);
+            paint_divider(frame.buffer_mut(), area, style);
+        }
+    }
+}
+
+/// Paint the divider column and keep a wide glyph from leaning on it.
+///
+/// The crossterm backend repositions the cursor only when the next cell is not
+/// at `x + 1`. A wide glyph advances the terminal two columns, so the cell
+/// right after it is printed one column to the right whenever that cell changed
+/// in the same frame. At the conversation's edge that print lands on the
+/// divider and the rule cell then goes one column into the sidebar: the broken,
+/// intermittently gapped rule Windows terminals showed. Replacing a wide glyph
+/// in the last two conversation columns keeps every row of the divider on its
+/// own column.
+fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
+    if area.x == 0 {
+        return;
+    }
+    for y in area.y..area.y + area.height {
+        for x in [area.x.saturating_sub(2), area.x - 1] {
+            if buffer[(x, y)].symbol().width() > 1 {
+                buffer[(x, y)].set_symbol(" ");
             }
         }
+        buffer[(area.x, y)].set_symbol("│").set_style(style);
     }
 }
 
@@ -9844,6 +9865,28 @@ mod final_layout_check {
             let cell = &buffer[(rule, y)];
             assert_eq!(cell.symbol(), "│", "row {y} lost the rule");
             assert_eq!(cell.bg, palette.background, "row {y} tinted the rule");
+        }
+    }
+
+    /// A wide glyph in the conversation's last columns must not lean on the
+    /// divider. The backend prints the cell after a wide glyph one column to
+    /// the right when that cell changed, and at the pane edge that print
+    /// overwrites the rule and pushes the rule cell into the sidebar.
+    #[test]
+    fn a_wide_glyph_never_leans_on_the_divider() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 2));
+        buffer[(6, 0)].set_symbol("中");
+        buffer[(7, 1)].set_symbol("文");
+        paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), Style::new());
+        for y in 0..2 {
+            assert_eq!(buffer[(8, y)].symbol(), "│", "row {y} lost the rule");
+            for x in [6, 7] {
+                assert_eq!(
+                    buffer[(x, y)].symbol().width(),
+                    1,
+                    "row {y} column {x} kept a wide glyph"
+                );
+            }
         }
     }
 }
