@@ -11,6 +11,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.97] - 2026-11-19
+
+### Fixed
+- **engine**: read the compaction anchor and occupancy after the pass (#3209) (`bd6581f608`)
+
 ## [0.3.96] - 2026-11-19
 
 ### Fixed
