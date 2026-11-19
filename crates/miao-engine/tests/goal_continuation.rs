@@ -294,6 +294,10 @@ async fn continues_independent_work_without_a_human_prompt_then_idles_with_locke
 
 #[tokio::test]
 async fn a_paced_text_only_wait_ends_the_drain_instead_of_re_requesting_the_model() {
+    // The pacing case depends on the no-progress floor staying at its default:
+    // a test that lowers it to zero in the same process would stop the drain
+    // before the interval expires.
+    let _env = NO_PROGRESS_ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("engine.db")).await.unwrap();
     setup(&store, "active", true, true, dir.path()).await;
@@ -1026,5 +1030,73 @@ async fn long_work_that_leaves_the_checklist_alone_is_not_stopped_as_stale() {
     assert!(events
         .iter()
         .any(|event| event.kind == "run.finished" && event.data["reason"] == "completed"));
+    runtime.shutdown().await;
+}
+
+/// The no-progress stop now asks the same question the stale-list stop asks:
+/// did this turn do anything new? A read-only investigation runs many turns on
+/// one checklist item, so counting a new read as an idle reply parked work
+/// that was never idle.
+#[tokio::test]
+async fn read_only_work_does_not_trip_the_no_progress_stop() {
+    let _env = NO_PROGRESS_ENV_LOCK.lock().await;
+    std::env::set_var("MIAO_NO_PROGRESS_MIN_SECS", "0");
+    const WORK_TURNS: usize = 4;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    setup(&store, "active", true, true, dir.path()).await;
+    (0..WORK_TURNS).for_each(|index| {
+        std::fs::write(dir.path().join(format!("read-{index}.txt")), "x").unwrap()
+    });
+    let steps = (0..WORK_TURNS)
+        .map(|index| {
+            (
+                true,
+                json!([{"type":"tool_use","id":format!("read-{index}"),"name":"read_file","input":{
+                    "path":format!("read-{index}.txt")
+                }}]),
+            )
+        })
+        .chain([
+            (
+                true,
+                json!([{"type":"tool_use","id":"close","name":"todowrite","input":{"todos":[
+                    {"id":"4","content":"CI","status":"completed","priority":"high"},
+                    {"id":"5","content":"Release","status":"completed","priority":"high"},
+                    {"id":"7","content":"Audit","status":"completed","priority":"medium"}
+                ]}}]),
+            ),
+            (false, json!([{"type":"text","text":"all done"}])),
+        ])
+        .collect();
+    let provider = Arc::new(Sequence {
+        calls: AtomicUsize::new(0),
+        steps,
+    });
+    let runtime = Runtime::with_policy(
+        store.clone(),
+        provider.clone(),
+        Tools::new(dir.path()).await.unwrap(),
+        Policy::new(Config {
+            continuation_min_interval_ms: 0,
+            mode: Mode::Workspace,
+            max_provider_turns: Some(20),
+            ..Config::default()
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime.resume("s").await.unwrap();
+    finished(&store).await;
+    std::env::remove_var("MIAO_NO_PROGRESS_MIN_SECS");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), WORK_TURNS + 2);
+    let events = store.events("s", 0, 5000).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "loop.stopped" && event.data["reason"] == "no-progress"),
+        "a turn that read a new file is not an idle reply"
+    );
     runtime.shutdown().await;
 }
