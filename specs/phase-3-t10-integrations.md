@@ -36,6 +36,7 @@
 
 - 写入：先写 OSC 52（tmux/ST 透传），再调用平台命令（macOS `pbcopy`；Linux `wl-copy` / `xclip` / `xsel`；Windows PowerShell `Set-Clipboard`）。平台命令失败不报错，OSC 52 仍是有效通道。
 - 读取：`MTTY_CLIPBOARD_FILE` 按写入身份（mtime + 长度 + 内容哈希）去重，每次写只服务一次；同一张图再次粘贴是新写入，仍会挂载。文件不被删除（宿主每次粘贴都会重写它）。配置路径失效时（宿主重启后 restored pane 仍指向旧 PID），读取同目录里最新鲜的 `mtty-clipboard-*.png`；超过 10 秒的旧文件不当作本次粘贴。否则 macOS osascript JXA、Windows/WSL PowerShell、Linux `wl-paste` / `xclip` 取图；都没有则读文本（`pbpaste` / PowerShell / `wl-paste` / `xclip`）。
+- Windows 读图显式使用 `-STA`，优先 System32 的 `powershell.exe` 并回退 `pwsh.exe`；每次脚本 5 秒超时并杀掉进程，避免卡住的剪贴板占用者让后续粘贴永久静默；Explorer 复制的图片文件走 file-drop 列表；超过 4 MiB 的截图按 2400px 重编码为 JPEG，避开引擎 8 MiB base64 附件上限。
 - 空 bracketed paste 与 `Ctrl+V` 都触发读取；读取在后台线程完成，UI 不阻塞。
 - 图片以 `[Image N] ` 文本标记留在 composer，附件单独随 `admit` 的 `attachments` 发送；提交失败时文本与附件一起恢复。
 

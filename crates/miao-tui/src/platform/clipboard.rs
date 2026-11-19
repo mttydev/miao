@@ -5,9 +5,10 @@
 //! image because that is what a TUI paste most often carries on macOS and
 //! Windows; text is the fallback.
 
-use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::io::{self, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 
@@ -294,8 +295,15 @@ fn read_text_macos() -> Option<Content> {
     non_empty_text(text)
 }
 
-/// The Windows image bridge: the clipboard image as base64 on stdout.
-const WINDOWS_IMAGE_SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [System.Convert]::ToBase64String($ms.ToArray()) }";
+/// The Windows image bridge: the encoding on the first line, the image as
+/// base64 on the second.
+///
+/// An oversized screenshot is re-encoded as JPEG here, the way `read_macos`
+/// uses `sips`: a 4K PNG's base64 can exceed the engine's 8 MiB attachment
+/// bound, so the prompt would bounce after the operator already pasted it.
+/// A file copied in Explorer carries no bitmap, so the file-drop list is the
+/// second source.
+const WINDOWS_IMAGE_SCRIPT: &str = r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img -eq $null) { foreach ($path in [System.Windows.Forms.Clipboard]::GetFileDropList()) { try { $loaded = [System.Drawing.Image]::FromFile($path); if ($loaded -ne $null) { $img = $loaded; break } } catch {} } }; if ($img -ne $null) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $bytes = $ms.ToArray(); $mime = 'image/png'; if ($bytes.Length -gt 4194304) { $scale = [Math]::Min(1.0, 2400.0 / [Math]::Max($img.Width, $img.Height)); $width = [int][Math]::Max(1, $img.Width * $scale); $height = [int][Math]::Max(1, $img.Height * $scale); $bmp = New-Object System.Drawing.Bitmap -ArgumentList $width, $height; $g = [System.Drawing.Graphics]::FromImage($bmp); $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $g.DrawImage($img, 0, 0, $width, $height); $g.Dispose(); $jpg = New-Object System.IO.MemoryStream; $bmp.Save($jpg, [System.Drawing.Imaging.ImageFormat]::Jpeg); if ($jpg.Length -lt $bytes.Length) { $bytes = $jpg.ToArray(); $mime = 'image/jpeg' }; $jpg.Dispose(); $bmp.Dispose() }; $ms.Dispose(); $img.Dispose(); Write-Output $mime; Write-Output ([System.Convert]::ToBase64String($bytes)) }"#;
 
 /// Windows clipboard access is contended: the app that owns the clipboard may
 /// hold it while another read races it, and `OpenClipboard` fails with
@@ -303,6 +311,10 @@ const WINDOWS_IMAGE_SCRIPT: &str = "Add-Type -AssemblyName System.Windows.Forms;
 /// bounded so a wedged clipboard costs a moment, not a hang.
 const WINDOWS_READ_ATTEMPTS: u32 = 3;
 const WINDOWS_RETRY_DELAY_MS: u64 = 50;
+/// A wedged clipboard owner can hold `OpenClipboard` for tens of seconds. The
+/// read runs off the UI thread, but a stuck script would keep the paste flag
+/// set for the rest of the session, so each attempt is bounded and killed.
+const WINDOWS_SCRIPT_TIMEOUT_MS: u64 = 5_000;
 
 /// One attempt to run a Windows clipboard script. `Output` carries the stdout
 /// bytes of a clean exit; `Failed` covers spawn errors and nonzero exits, the
@@ -333,13 +345,68 @@ fn windows_read<T>(
     None
 }
 
+/// The PowerShell that will run the clipboard scripts.
+///
+/// `powershell.exe` is not always on `PATH` (a packaged launcher can replace
+/// it), so the System32 copy is preferred. `pwsh.exe` covers a machine where
+/// Windows PowerShell was removed or is not installed.
+fn windows_shell() -> Option<PathBuf> {
+    let system = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+        .filter(|path| path.is_file());
+    if system.is_some() {
+        return system;
+    }
+    ["powershell.exe", "pwsh.exe"]
+        .into_iter()
+        .find(|name| command_exists(name))
+        .map(PathBuf::from)
+}
+
 fn run_powershell(script: &str) -> WindowsOutput {
-    match Command::new("powershell.exe")
-        .args(["-NonInteractive", "-NoProfile", "-Command", script])
+    let Some(shell) = windows_shell() else {
+        return WindowsOutput::Failed;
+    };
+    let Ok(mut child) = Command::new(&shell)
+        .args(["-NonInteractive", "-NoProfile", "-STA", "-Command", script])
         .stdin(Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => WindowsOutput::Output(output.stdout),
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return WindowsOutput::Failed;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return WindowsOutput::Failed;
+    };
+    // A base64 payload can exceed a pipe buffer, so it is drained while the
+    // child runs; waiting first would deadlock once the buffer filled.
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        std::io::BufReader::new(stdout)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let deadline = Instant::now() + Duration::from_millis(WINDOWS_SCRIPT_TIMEOUT_MS);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let bytes = reader.join().ok().and_then(|read| read.ok());
+    match (status, bytes) {
+        (Some(status), Some(bytes)) if status.success() => WindowsOutput::Output(bytes),
         _ => WindowsOutput::Failed,
     }
 }
@@ -362,18 +429,28 @@ fn read_text_windows() -> Option<Content> {
     )
 }
 
-/// The image bridge returns base64 of the PNG bytes. Keep it only when it is
-/// canonical base64, so console noise can never reach the engine as pixels.
 fn parse_windows_image(bytes: &[u8]) -> Option<Content> {
-    let data = parse_base64_payload(bytes)?;
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    let (mime, payload) = match text.split_once('\n') {
+        Some((header, payload)) => {
+            let header = header.trim_end_matches('\r');
+            if header != "image/png" && header != "image/jpeg" {
+                return None;
+            }
+            (header, payload.trim())
+        }
+        None => ("image/png", text),
+    };
+    let data = canonical_base64(payload)?;
     Some(Content::Image {
-        mime: "image/png".into(),
+        mime: mime.into(),
         data,
     })
 }
 
-fn parse_base64_payload(bytes: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(bytes).ok()?.trim();
+/// Keep only canonical base64, so console noise can never reach the engine as
+/// pixels.
+fn canonical_base64(text: &str) -> Option<String> {
     let canonical = !text.is_empty()
         && text
             .bytes()
@@ -758,10 +835,25 @@ mod tests {
         assert_eq!(content, None);
     }
 
-    /// Console noise can never reach the engine as pixels: only canonical
-    /// base64 passes as the image bridge's payload.
+    /// The bridge names the encoding it chose (a re-encoded screenshot is
+    /// JPEG), and a payload without a header keeps the legacy PNG shape.
+    /// Console noise can never reach the engine as pixels.
     #[test]
-    fn parse_windows_image_accepts_only_canonical_base64() {
+    fn parse_windows_image_reads_the_encoding_header() {
+        assert_eq!(
+            parse_windows_image(b"image/png\ncG5n\r\n"),
+            Some(Content::Image {
+                mime: "image/png".into(),
+                data: "cG5n".into()
+            })
+        );
+        assert_eq!(
+            parse_windows_image(b"image/jpeg\ncG5n\n"),
+            Some(Content::Image {
+                mime: "image/jpeg".into(),
+                data: "cG5n".into()
+            })
+        );
         assert_eq!(
             parse_windows_image(b"cG5n\n"),
             Some(Content::Image {
@@ -769,8 +861,19 @@ mod tests {
                 data: "cG5n".into()
             })
         );
+        assert_eq!(parse_windows_image(b"image/gif\ncG5n\n"), None);
         assert_eq!(parse_windows_image(b"Add-Type : error at line 1"), None);
         assert_eq!(parse_windows_image(b""), None);
+    }
+
+    /// Without Windows PowerShell and without `pwsh`, the bridge reports a
+    /// failed attempt instead of hanging or flashing a shell window. This is
+    /// the shape every non-Windows CI leg sees.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_host_without_powershell_has_no_windows_shell() {
+        assert!(windows_shell().is_none());
+        assert!(matches!(run_powershell("script"), WindowsOutput::Failed));
     }
 
     /// PowerShell's `-Raw` adds one newline as a console terminator; a newline
