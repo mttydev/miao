@@ -314,7 +314,14 @@ const WINDOWS_RETRY_DELAY_MS: u64 = 50;
 /// A wedged clipboard owner can hold `OpenClipboard` for tens of seconds. The
 /// read runs off the UI thread, but a stuck script would keep the paste flag
 /// set for the rest of the session, so each attempt is bounded and killed.
-const WINDOWS_SCRIPT_TIMEOUT_MS: u64 = 5_000;
+/// Ten seconds leaves room for a cold `Add-Type` plus the 2400px re-encode of a
+/// large screenshot, which together can outlast a tight five-second bound.
+const WINDOWS_SCRIPT_TIMEOUT_MS: u64 = 10_000;
+/// How long the drain waits after the script settled or was killed. A process
+/// killed on timeout can leave a grandchild holding stdout; joining the reader
+/// forever would keep the paste flag set for the rest of the session, which is
+/// exactly the silence this path exists to end.
+const WINDOWS_DRAIN_GRACE_MS: u64 = 2_000;
 
 /// One attempt to run a Windows clipboard script. `Output` carries the stdout
 /// bytes of a clean exit; `Failed` covers spawn errors and nonzero exits, the
@@ -377,15 +384,21 @@ fn run_powershell(script: &str) -> WindowsOutput {
         return WindowsOutput::Failed;
     };
     let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
         return WindowsOutput::Failed;
     };
     // A base64 payload can exceed a pipe buffer, so it is drained while the
-    // child runs; waiting first would deadlock once the buffer filled.
-    let reader = std::thread::spawn(move || {
+    // child runs; waiting first would deadlock once the buffer filled. The
+    // reader reports over a channel so a pipe a grandchild keeps open times out
+    // instead of pinning the caller.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        std::io::BufReader::new(stdout)
+        let read = std::io::BufReader::new(stdout)
             .read_to_end(&mut bytes)
-            .map(|_| bytes)
+            .map(|_| bytes);
+        let _ = tx.send(read);
     });
     let deadline = Instant::now() + Duration::from_millis(WINDOWS_SCRIPT_TIMEOUT_MS);
     let status = loop {
@@ -404,7 +417,10 @@ fn run_powershell(script: &str) -> WindowsOutput {
             }
         }
     };
-    let bytes = reader.join().ok().and_then(|read| read.ok());
+    let bytes = rx
+        .recv_timeout(Duration::from_millis(WINDOWS_DRAIN_GRACE_MS))
+        .ok()
+        .and_then(|read| read.ok());
     match (status, bytes) {
         (Some(status), Some(bytes)) if status.success() => WindowsOutput::Output(bytes),
         _ => WindowsOutput::Failed,
