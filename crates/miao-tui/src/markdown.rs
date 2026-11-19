@@ -283,9 +283,15 @@ fn parse_inline(text: &str, style: Style, theme: &Theme, spans: &mut Vec<Span<'s
     let mut index = 0;
     while index < chars.len() {
         let c = chars[index];
-        if c == '\\' && index + 1 < chars.len() {
-            plain.push(chars[index + 1]);
-            index += 2;
+        if c == '\\' {
+            // A backslash escapes the character that follows it. A line-final
+            // one is the markdown hard break, and the reading flow re-wraps
+            // paragraphs anyway, so neither may paint a literal backslash.
+            index += 1;
+            if index < chars.len() {
+                plain.push(chars[index]);
+                index += 1;
+            }
             continue;
         }
         if c == '`' {
@@ -407,6 +413,20 @@ mod tests {
         assert!(painted.contains("plain"));
         assert!(!painted.contains('\u{1b}'));
         assert!(!painted.contains('\u{7}'));
+    }
+
+    /// The model writes markdown hard breaks as a line-final backslash. It
+    /// marks a break; the reading flow re-wraps paragraphs, so it must never
+    /// paint as a literal glyph at the end of a row.
+    #[test]
+    fn a_hard_break_backslash_does_not_paint() {
+        let rendered = lines("thought ends here \\\nnext paragraph", &theme())
+            .iter()
+            .map(text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.starts_with("thought ends here \nnext paragraph"));
+        assert!(!rendered.contains('\\'));
     }
 
     #[test]
