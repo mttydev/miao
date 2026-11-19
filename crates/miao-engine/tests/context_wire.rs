@@ -222,15 +222,18 @@ async fn a_scoped_threshold_discounts_the_carried_summary() {
     // stays idle, while the unscoped one still compacts.
     let (_dir, store, boundary, counted) = seeded().await;
     store
+        .compact_for_run("s", "run", "cut_prior", boundary, "x".repeat(30_000))
+        .await
+        .unwrap();
+    // The report has to describe the compacted prefix: a count from before the
+    // pass names history the next request no longer carries, so it is not an
+    // anchor at all.
+    store
         .record(
             "s",
             "usage",
             json!({"run_id":"run","step":0,"usage":{"inputTokens":1_900,"outputTokens":100},"context_message_seq":counted}),
         )
-        .await
-        .unwrap();
-    store
-        .compact_for_run("s", "run", "cut_prior", boundary, "x".repeat(30_000))
         .await
         .unwrap();
     let carried = store.carried_prefix_tokens("s").await.unwrap();
