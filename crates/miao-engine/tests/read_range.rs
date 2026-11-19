@@ -37,7 +37,7 @@ async fn a_line_window_returns_only_that_range_with_whole_file_metadata() {
 }
 
 #[tokio::test]
-async fn a_large_file_is_readable_through_a_window_but_not_wholesale() {
+async fn a_large_file_is_readable_wholesale_as_its_first_window() {
     let dir = tempfile::tempdir().unwrap();
     let body = (0..5000)
         .map(|index| format!("line {index}\n"))
@@ -45,14 +45,15 @@ async fn a_large_file_is_readable_through_a_window_but_not_wholesale() {
     std::fs::write(dir.path().join("big.txt"), &body).unwrap();
     let tools = Tools::new(dir.path()).await.unwrap();
 
-    let whole = tools
-        .execute(
-            "read_file",
-            json!({"path":"big.txt"}),
-            CancellationToken::new(),
-        )
-        .await;
-    assert!(whole.is_err(), "the whole-file path keeps its byte bound");
+    let whole = read(&tools, json!({"path":"big.txt"})).await;
+    assert_eq!(whole["truncated"], json!(true));
+    assert_eq!(whole["total_lines"], json!(5000));
+    assert!(
+        whole["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("first window")),
+        "{whole}"
+    );
 
     let window = read(&tools, json!({"path":"big.txt","offset":100,"limit":3})).await;
     assert_eq!(window["text"], json!("line 99\nline 100\nline 101"));
@@ -70,17 +71,15 @@ async fn a_window_read_stays_inside_the_32768_byte_bound_and_the_ranged_cap_hold
     std::fs::write(dir.path().join("wide.txt"), &body).unwrap();
     let tools = Tools::new(dir.path()).await.unwrap();
 
-    let whole = tools
-        .execute(
-            "read_file",
-            json!({"path":"wide.txt"}),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-    assert!(whole.to_string().contains("79979 bytes"), "{whole}");
+    // The whole-file read auto-returns the first window; the byte cap holds.
+    let whole = read(&tools, json!({"path":"wide.txt"})).await;
+    let text = whole["text"].as_str().unwrap();
+    assert!(text.len() <= 32768, "{}", text.len());
+    assert_eq!(whole["truncated"], json!(true));
     assert!(
-        whole.to_string().contains("32768-byte whole-file bound"),
+        whole["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("whole-file bound")),
         "{whole}"
     );
 

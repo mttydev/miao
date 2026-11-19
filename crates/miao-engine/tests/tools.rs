@@ -9,7 +9,7 @@ async fn read_is_bounded_and_cannot_escape_workspace() {
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("file"), "hello").unwrap();
     std::fs::write(dir.path().join("outside"), "secret").unwrap();
-    std::fs::write(root.join("large"), vec![b'x'; 32769]).unwrap();
+    std::fs::write(root.join("large"), "line of padding\n".repeat(4000)).unwrap();
     std::fs::write(root.join("binary"), [0xff]).unwrap();
     let tools = Tools::new(&root).await.unwrap();
     assert_eq!(
@@ -43,18 +43,25 @@ async fn read_is_bounded_and_cannot_escape_workspace() {
             .await,
         Err(ToolError::InvalidFile)
     ));
-    // An oversized whole-file read guides the model to a line window instead
-    // of a bare refusal.
-    assert!(matches!(
-        tools
-            .execute(
-                "read_file",
-                json!({"path":"large"}),
-                CancellationToken::new()
-            )
-            .await,
-        Err(ToolError::TooLarge(_))
-    ));
+    // An oversized whole-file read returns the first window instead of an
+    // error: the model has no size information before reading, so the refusal
+    // only cost a retry turn, and the window's flag says how to continue.
+    let first = tools
+        .execute(
+            "read_file",
+            json!({"path":"large"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["truncated"], json!(true), "{first}");
+    assert_eq!(first["total_lines"], json!(4000), "{first}");
+    assert!(
+        first["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("first window")),
+        "{first}"
+    );
     assert!(matches!(
         tools
             .execute("bash", json!({}), CancellationToken::new())

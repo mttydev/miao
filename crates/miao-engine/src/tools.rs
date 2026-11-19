@@ -2568,7 +2568,7 @@ impl Tools {
     fn all_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions=vec![ToolDefinition {
             name:"read_file".into(),
-            description:"Read a UTF-8 file or PDF under the configured workspace. Text reads are limited to 32768 bytes; for larger files pass a 1-based line offset and a line limit (up to 2000 lines) to read one window. PDF reads return page text and page images; pass pages such as 1-3,5 (at most 20 pages) to select pages.".into(),
+            description:"Read a UTF-8 file or PDF under the configured workspace. Text reads are limited to 32768 bytes; larger files return the first window (truncated, with total_lines and a note) — pass a 1-based line offset and a line limit (up to 2000 lines) to read further windows. PDF reads return page text and page images; pass pages such as 1-3,5 (at most 20 pages) to select pages.".into(),
             input_schema:json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":2000},"pages":{"type":"string"}},"required":["path"],"additionalProperties":false}),
         },ToolDefinition {
             name:"list_files".into(),
@@ -2920,18 +2920,25 @@ impl Tools {
                     // A line range makes a large file readable; the whole-file
                     // path keeps its historical 32 KiB bound.
                     let ranged = input.offset.is_some() || input.limit.is_some();
-                    if ranged {
-                        if input.offset == Some(0) || input.limit == Some(0) {
-                            return Err(ToolError::InvalidInput);
-                        }
-                        if metadata.len() > 1024 * 1024 {
-                            return Err(ToolError::InvalidFile);
-                        }
-                    } else if metadata.len() > 32768 {
-                        // Guide the model to the window instead of a bare
-                        // refusal: without it a large file looks unreadable.
+                    if input.offset == Some(0) || input.limit == Some(0) {
+                        return Err(ToolError::InvalidInput);
+                    }
+                    if metadata.len() > 1024 * 1024 {
+                        return Err(ToolError::InvalidFile);
+                    }
+                    // A whole-file read of a large file returns the first
+                    // window instead of an error: the model has no size
+                    // information before reading, so the refusal only cost a
+                    // retry turn, and the window's `truncated` flag and `note`
+                    // say how to continue. Context assembly's probes keep the
+                    // refusal — truncated instructions would silently lose
+                    // their tail, where the recorded skip states it.
+                    let probe = self.read_scope == PROBE_READ_SCOPE;
+                    let auto_window = !ranged && !probe && metadata.len() > 32768;
+                    if !ranged && !auto_window && metadata.len() > 32768 {
                         return Err(ToolError::TooLarge(metadata.len() as usize));
                     }
+                    let ranged = ranged || auto_window;
                     let mut bytes = Vec::new();
                     tokio::fs::File::open(&path)
                         .await?
@@ -2971,15 +2978,21 @@ impl Tools {
                             lines += 1;
                         }
                         let truncated = offset.saturating_sub(1) + lines < total;
-                        (
-                            window,
-                            json!({
-                                "offset": offset,
-                                "lines": lines,
-                                "total_lines": total,
-                                "truncated": truncated
-                            }),
-                        )
+                        let mut meta = json!({
+                            "offset": offset,
+                            "lines": lines,
+                            "total_lines": total,
+                            "truncated": truncated
+                        });
+                        if auto_window {
+                            // The model never saw a size hint, so say plainly
+                            // what happened to the file it asked for whole.
+                            meta["note"] = json!(format!(
+                                "file is {} bytes, above the 32768-byte whole-file bound; showing the first window — pass a later offset for the rest",
+                                metadata.len()
+                            ));
+                        }
+                        (window, meta)
                     } else {
                         (text.clone(), Value::Null)
                     };

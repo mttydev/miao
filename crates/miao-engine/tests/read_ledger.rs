@@ -111,7 +111,7 @@ async fn the_ledger_measures_what_a_task_paid_for_reads() {
 }
 
 #[tokio::test]
-async fn a_large_file_refuses_wholesale_and_still_deduplicates_windows() {
+async fn a_large_file_returns_its_first_window_and_still_deduplicates_windows() {
     let dir = tempfile::tempdir().unwrap();
     let body = (0..5000)
         .map(|index| format!("line {index}\n"))
@@ -126,8 +126,14 @@ async fn a_large_file_refuses_wholesale_and_still_deduplicates_windows() {
             CancellationToken::new(),
         )
         .await
-        .unwrap_err();
-    assert!(whole.to_string().contains("offset"), "{whole}");
+        .unwrap();
+    assert_eq!(whole["truncated"], json!(true));
+    assert!(
+        whole["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("first window")),
+        "{whole}"
+    );
 
     let window = read(&tools, json!({"path":"big.txt","offset":100,"limit":3})).await;
     assert_eq!(window["text"], json!("line 99\nline 100\nline 101"));
@@ -136,7 +142,7 @@ async fn a_large_file_refuses_wholesale_and_still_deduplicates_windows() {
     assert_eq!(repeated["unchanged"], json!(true));
 
     let ledger = tools.read_ledger();
-    assert_eq!(ledger["reads"], json!(2));
+    assert_eq!(ledger["reads"], json!(3));
     assert_eq!(ledger["duplicate_reads"], json!(1));
 }
 
