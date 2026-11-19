@@ -14,6 +14,7 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 ## [0.3.99] - 2026-11-19
 
 ### Fixed
+- **tui**: keep pasted pictures attached to their drafts (#3230) (`490e0d4de9`)
 - **engine**: correct a fabricated exhausted-window claim with the measured occupancy (#3229) (`9c2a63296e`)
 
 ## [0.3.98] - 2026-11-19
