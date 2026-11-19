@@ -11,6 +11,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.miao.app.ui.MiaoRoot
 import dev.miao.app.ui.MiaoTheme
+import dev.miao.app.ui.ThemePrefs
 import dev.miao.core.ClientScenePhase
 
 class MainActivity : ComponentActivity() {
@@ -18,6 +19,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ThemePrefs.load(applicationContext)
         setContent {
             MiaoTheme {
                 val lifecycle = LocalLifecycleOwner.current.lifecycle
