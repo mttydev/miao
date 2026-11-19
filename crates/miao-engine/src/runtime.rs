@@ -53,6 +53,10 @@ const MAX_IDENTICAL_REFUSALS: u32 = 3;
 /// shapes that stop cannot see.
 const MAX_FLAT_CONTINUATIONS: usize = 24;
 
+/// Corrections a drain spends on a fabricated exhausted-window claim before
+/// the drain stops correcting and pauses naming the engine's own measurement.
+const CONTEXT_CLAIM_CORRECTIONS: u32 = 2;
+
 /// How often a dispatched-but-unsettled tool call re-announces itself on the
 /// ephemeral progress channel. Long reads, language servers, MCP servers and
 /// approval prompts can hold a turn for minutes without writing anything
@@ -3935,6 +3939,10 @@ async fn execute(
     let mut overflow_recoveries = 0;
     // Consecutive provider turns that produced neither text nor tool calls.
     let mut empty_completions = 0;
+    // Corrections spent on replies that claim the context window is exhausted
+    // while the engine's own occupancy says otherwise. Per drain, like the
+    // other leashes; a fresh operator input starts a fresh leash.
+    let mut context_claim_corrections = 0u32;
     // Consecutive failed completion checks for the configured verification.
     let mut verification_failures = 0;
     // One continuation, then a classified stop: an active goal forbids a
@@ -6467,7 +6475,86 @@ command: None,
                 } else {
                     None
                 };
-                if let Some(reason) = reason {
+                // A reply that announces the window is exhausted while the
+                // engine's own occupancy is under the threshold is describing
+                // text, not state: the trigger compacts before the window
+                // fills, so the loop corrects the claim with the measured
+                // figures instead of parking the Session on them. Past the
+                // correction bound the drain pauses naming the measurement,
+                // so the operator reads the claim as the model's rather than
+                // as engine state.
+                let reply_text = reply
+                    .content
+                    .as_array()
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter_map(|block| block["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                let context_claim = allowance != Some(0)
+                    && matches!(
+                        (pressure, compaction_threshold),
+                        (Some((_, counted)), Some(threshold)) if counted < threshold
+                    )
+                    && crate::context_trigger::claims_context_exhaustion(&reply_text);
+                if context_claim && context_claim_corrections < CONTEXT_CLAIM_CORRECTIONS {
+                    context_claim_corrections += 1;
+                    goal_last = Some(std::time::Instant::now());
+                    goal_iterations += 1;
+                    let input_id = continuation_input_id("context-claim", run, goal_iterations);
+                    let admission = inner
+                        .store
+                        .admit(Input {
+                            agent_references: Default::default(),
+                            command: None,
+                            session_id: session.into(),
+                            input_id: input_id.clone(),
+                            prompt: crate::context_trigger::context_claim_correction(
+                                pressure,
+                                compaction_threshold,
+                            ),
+                            delivery: crate::protocol::Delivery::Queue,
+                        })
+                        .await?;
+                    internal_inputs.insert(input_id.clone());
+                    inner
+                        .store
+                        .record(
+                            session,
+                            "loop.continuation",
+                            json!({"run_id":run,"input_id":input_id,"admitted_seq":admission.admitted_seq,"reason":"context-claim","correction":context_claim_corrections}),
+                        )
+                        .await?;
+                    promoted = inner.store.promote_fenced(session, true, lease).await?;
+                } else if context_claim {
+                    inner
+                        .store
+                        .record(
+                            session,
+                            "loop.stopped",
+                            json!({"run_id":run,"reason":"context-claim"}),
+                        )
+                        .await?;
+                    for input_id in internal_inputs.iter() {
+                        let _ = inner.store.cancel_input(session, input_id).await;
+                    }
+                    inner
+                        .store
+                        .inject(
+                            session,
+                            &format!("context-claim-{run}"),
+                            &crate::context_trigger::context_claim_pause(
+                                pressure,
+                                compaction_threshold,
+                            ),
+                            "engine",
+                        )
+                        .await?;
+                    return Ok(());
+                } else if let Some(reason) = reason {
                     goal_stopped_this_turn = true;
                     inner
                         .store
@@ -6943,6 +7030,7 @@ command: None,
                 input_corrections = 0;
                 transport_continuations = 0;
                 empty_completions = 0;
+                context_claim_corrections = 0;
                 verification_failures = 0;
                 repeats.clear();
                 // The refusal count is the other half of the same leash: an
