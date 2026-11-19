@@ -124,7 +124,9 @@ fn launch(args: impl Iterator<Item = String>) -> Result<miao_tui::Launch, String
     let mut prompt: Option<String> = None;
     let mut fork = false;
     let mut agent: Option<String> = None;
-    let mut auto = false;
+    // Approval-free is the default: interruptions lose the task's momentum.
+    // `--ask` restores per-call approvals for owners who want the gate.
+    let mut auto = true;
     let mut remote_host: Option<PathBuf> = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -154,8 +156,10 @@ fn launch(args: impl Iterator<Item = String>) -> Result<miao_tui::Launch, String
             // Three spellings the TypeScript entry carried for the same thing:
             // a launch-wide permission relaxation. They map onto the engine's
             // classifier-guarded auto mode, which still honours operator deny
-            // and ask rules.
+            // and ask rules. Auto is the default now; `--ask` restores the
+            // per-call approval gate.
             "--auto" | "--yolo" | "--dangerously-skip-permissions" => auto = true,
+            "--ask" => auto = false,
             // The TypeScript entry documented `--fork` as resume-time only.
             "--fork" => fork = true,
             "--remote-host" => remote_host = Some(PathBuf::from(value("--remote-host")?)),
@@ -7252,6 +7256,7 @@ mod tests {
         // The TypeScript entry carried three spellings for one behaviour; all
         // of them now parse and land in Launch.auto, which the TUI forwards as
         // the engine's --auto-approve (classifier-guarded, deny/ask stay put).
+        // Approval-free is the default; --ask restores the gate.
         for option in ["--auto", "--yolo", "--dangerously-skip-permissions"] {
             let launch = launch(
                 [
@@ -7265,7 +7270,17 @@ mod tests {
             assert!(launch.auto, "{option} must set auto");
         }
         let plain = launch(["--db", "/tmp/x.db"].into_iter().map(str::to_string)).unwrap();
-        assert!(!plain.auto);
+        assert!(plain.auto, "approval-free is the default");
+        let ask = launch(
+            [
+                "--db".to_string(),
+                "/tmp/x.db".to_string(),
+                "--ask".to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("--ask");
+        assert!(!ask.auto, "--ask restores the approval gate");
     }
     #[test]
     fn fork_requires_a_session_to_copy() {
