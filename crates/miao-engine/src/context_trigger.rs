@@ -1148,6 +1148,14 @@ impl Breaker {
         self.waited = 0;
     }
 
+    /// A committed pass. The streak is consecutive, so a summarizer that
+    /// answered starts clean: keeping the half-open allowance would let one
+    /// later rejection trip a breaker that had just succeeded, and `idle()`
+    /// could never become true again.
+    pub fn committed(&mut self) {
+        self.reset();
+    }
+
     /// Whether compaction may be attempted.
     pub fn allows(&self) -> bool {
         self.failures < self.threshold
@@ -1602,9 +1610,14 @@ impl Store {
                 return Ok(None);
             };
             let usage = &event["usage"];
+            // The prompt is the counted history. Every normalizer reports
+            // `inputTokens` as the whole request (cache reads included), and
+            // `through` is the last message that request carried. The reply
+            // lands after `through`, so `pending_context` already prices it;
+            // adding `outputTokens` here charged every turn's own reply twice
+            // and compacted that much early.
             let input = usage["inputTokens"].as_u64().unwrap_or(0);
-            let output = usage["outputTokens"].as_u64().unwrap_or(0);
-            Ok(Some((input.saturating_add(output), through)))
+            Ok(Some((input, through)))
         })
         .await
     }
@@ -2294,6 +2307,25 @@ mod tests {
         assert!(!breaker.allows());
         breaker.reset();
         assert!(breaker.allows());
+    }
+
+    // The streak is consecutive: a pass that committed means the summarizer is
+    // answering, so the next rejection must not trip a breaker that just
+    // succeeded — and `idle()` has to say so, or the stored breaker outlives
+    // the failure it described.
+    #[test]
+    fn a_committed_pass_clears_the_failure_streak() {
+        let mut breaker = Breaker::new(3);
+        for _ in 0..3 {
+            breaker.rejected(100_000);
+        }
+        assert!(!breaker.allows());
+        assert!(breaker.allows_at(200_000));
+        breaker.committed();
+        assert!(breaker.idle());
+        assert!(breaker.allows());
+        breaker.rejected(200_000);
+        assert!(breaker.allows(), "one failure is not a streak");
     }
 
     // A summarizer that failed once must not disable compaction for the rest of

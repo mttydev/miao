@@ -611,3 +611,25 @@ async fn an_interrupt_ends_the_pass_between_segments() {
         "an interrupt must not count against gate ⑤"
     );
 }
+
+/// The anchor is the prompt the provider counted, not that prompt plus the
+/// reply it produced. `through` already marks the last message of that prompt,
+/// so the reply sits in `pending_context` and gate ② prices it once; adding
+/// `outputTokens` here charged every turn's own reply twice and compacted that
+/// much early.
+#[tokio::test]
+async fn the_anchor_counts_the_prompt_without_the_reply_it_produced() {
+    let (_dir, store, _boundary, counted) = seeded().await;
+    store
+        .record(
+            "s",
+            "usage",
+            json!({"run_id":"run","step":0,"usage":{"inputTokens":700,"outputTokens":300},"context_message_seq":counted}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.context_anchor("s").await.unwrap(),
+        Some((700, counted))
+    );
+}
