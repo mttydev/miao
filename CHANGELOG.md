@@ -11,6 +11,24 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.98] - 2026-11-19
+
+### Added
+- **ios**: allow local tools by default (#3224) (`3fd4ad6b9c`)
+- **ios**: translate the interpolated UI strings (#3223) (`e9497f6bb0`)
+- **tui**: run approval-free by default; --ask restores the gate (#3225) (`535e073980`)
+- **dl**: mirror mtty releases on dl.mtty.dev (#3221) (`c00e2c4155`)
+- **ios**: localize the app (zh-hans source, en, follow system) (#3220) (`927fe15e73`)
+- **mobile**: localize the android app (zh default, en, follow system) (#3218) (`9b2e972225`)
+- **mobile**: show queued prompts and add share, copy and export (#3213) (`1c9756f83e`)
+- **android**: surface a background keep-alive reminder (#3211) (`7186a0077b`)
+- **android**: follow the system wallpaper with Material You color (#3212) (`8b9eb5d862`)
+
+### Fixed
+- **tui**: scrub DCS, SOS, PM, and APC payloads out of tool output (#3222) (`bf67e614a1`)
+- **tui**: stop wide glyphs and hard-break backslashes from painting stray characters (#3219) (`7aba4350e7`)
+- **tui**: keep wide glyphs off the sidebar divider (#3215) (`8e74f2f577`)
+
 ## [0.3.97] - 2026-11-19
 
 ### Fixed
