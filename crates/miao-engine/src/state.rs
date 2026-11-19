@@ -571,21 +571,22 @@ pub fn ledger_nudge(turns_since_write: u64) -> Option<&'static str> {
     )
 }
 
-/// A persisted list that still has open items and has not been rewritten for
-/// this many provider turns stops the drain.
+/// A persisted list that still has open items and has been carried through
+/// this many provider turns without being rewritten *and* without the Session
+/// executing a tool call it had not already made stops the drain.
 ///
 /// The text-only stall guard measures a repeated *reply*; a Session that keeps
 /// calling tools never reaches it. One such Session ran 176 turns with an
 /// untouched list while every turn carried `ledger_nudge`, so a reminder alone
 /// is not a bound: the operator reads the sidebar as current progress.
 ///
-/// The bound has to leave room for real work. At twelve turns it stopped two
-/// sessions that were editing files the whole time — one finishing a release,
-/// one implementing a single `in_progress` item across a dozen tool calls — and
-/// an operator had to send a message to continue work that was never adrift.
-/// Twenty-four still bounds the drift the guard exists for (the same failure
-/// now reports at 24 turns instead of 176) while a long implementation stretch
-/// is no longer mistaken for a stale list.
+/// The debt is counted only across turns that repeated themselves. An earlier
+/// bound of twelve turns measured how long the checklist had gone unwritten,
+/// which is bookkeeping: it stopped Sessions that were editing files and
+/// closing out a release, and an operator had to send a message to continue
+/// work that was never adrift. A turn that executed a new call clears the debt,
+/// so the bound reports the drift it exists for — a list left behind while the
+/// Session repeats itself — instead of the duration of real work.
 pub const TODO_STALE_STOP: u64 = 24;
 
 pub fn todo_stale(turns_since_write: u64, state: &Value) -> bool {
@@ -606,7 +607,7 @@ pub fn todo_stale(turns_since_write: u64, state: &Value) -> bool {
 /// that nothing is running, and the one move that continues.
 pub fn todo_stale_note(turns: u64) -> String {
     format!(
-        "Task paused: the persisted task list still has open items and has not been rewritten for {turns} provider turns, so it no longer describes this work. Nothing is running now and no message was dropped. Update it with todowrite — finished and verified work completed, the current item in_progress, everything else pending, waiting or blocked — then send a message or let the next event continue. The list is a reading of progress, not proof of it."
+        "Task paused: the persisted task list still has open items, and {turns} provider turns ran without rewriting it or running a tool call that was not already made, so it no longer describes this work. Nothing is running now and no message was dropped. Update it with todowrite — finished and verified work completed, the current item in_progress, everything else pending, waiting or blocked — then send a message or let the next event continue. The list is a reading of progress, not proof of it."
     )
 }
 
@@ -693,9 +694,10 @@ mod tests {
             "a finished list is not stale"
         );
         assert!(!super::todo_stale(64, &json!({"todos": null})));
-        let note = super::todo_stale_note(12);
+        let note = super::todo_stale_note(24);
         assert!(note.contains("todowrite"), "{note}");
-        assert!(note.contains("12 provider turns"), "{note}");
+        assert!(note.contains("24 provider turns"), "{note}");
+        assert!(note.contains("not already made"), "{note}");
     }
 
     /// Only Anthropic personas name `todowrite`, so every other model learns
