@@ -11,6 +11,13 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.94] - 2026-11-19
+
+### Fixed
+- **engine**: treat a new tool call as progress for the no-progress stop (#3197) (`e5f14732f8`)
+- **engine**: stop double-counting a turn's reply and clear the breaker on success (#3200) (`ccb0107916`)
+- **tui**: paint the sidebar rule after both columns (#3201) (`8cbf49f5f5`)
+
 ## [0.3.93] - 2026-11-19
 
 ### Fixed
