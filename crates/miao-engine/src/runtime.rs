@@ -6216,6 +6216,9 @@ command: None,
             )
             .await
             .unwrap_or(false);
+            if compacted {
+                breaker.committed();
+            }
             inner.keep_breaker(session, breaker).await;
             if compacted {
                 // The history itself shrank, so the per-step bound it needed is
