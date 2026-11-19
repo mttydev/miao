@@ -7,8 +7,6 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-#[cfg(not(windows))]
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::Terminal;
 use std::io::Write;
@@ -23,9 +21,9 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// is unsupported and implements `EnterAlternateScreen` as a console-buffer
 /// switch. That switch is not the screen the operator sees: the TUI keeps
 /// painting the visible buffer, and after exit the shell and the epilogue land
-/// on top of the leftover frame. The terminal itself does understand the xterm
-/// pair, so Windows writes it directly and flushes it before any mode restore
-/// that can fail.
+/// on top of the leftover frame. Unix writes exactly these bytes through
+/// crossterm, so both platforms use the pair directly and keep the same exit
+/// ordering: leave first, flush, then the mode restores that can fail.
 const ENTER_ALTERNATE: &[u8] = b"\x1b[?1049h";
 const LEAVE_ALTERNATE: &[u8] = b"\x1b[?1049l";
 
@@ -126,27 +124,13 @@ fn enter(preferences: Preferences) -> io::Result<()> {
 }
 
 fn enter_alternate(writer: &mut impl Write) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        writer.write_all(ENTER_ALTERNATE)?;
-        writer.flush()
-    }
-    #[cfg(not(windows))]
-    {
-        execute!(writer, EnterAlternateScreen)
-    }
+    writer.write_all(ENTER_ALTERNATE)?;
+    writer.flush()
 }
 
 fn leave_alternate(writer: &mut impl Write) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        writer.write_all(LEAVE_ALTERNATE)?;
-        writer.flush()
-    }
-    #[cfg(not(windows))]
-    {
-        execute!(writer, LeaveAlternateScreen)
-    }
+    writer.write_all(LEAVE_ALTERNATE)?;
+    writer.flush()
 }
 
 /// Fullscreen repaint without a cursor-position query. `Terminal::clear`
