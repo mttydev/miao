@@ -32,6 +32,15 @@ class RemoteSession(val summary: SessionSummary, private val client: HostClient)
     var error by mutableStateOf<String?>(null)
     var loading by mutableStateOf(true)
     var diff by mutableStateOf<JsonValue?>(null)
+
+    /**
+     * Accepted-but-still-queued prompts, oldest first. An entry lives until the
+     * engine promotes it; the transcript carrying the prompt as a user message
+     * is the promotion signal, so a queued row cannot outlive the message it
+     * became.
+     */
+    var queuedPrompts by mutableStateOf<List<QueuedPrompt>>(emptyList())
+        private set
     private var viewers = 0
     private var poll: Job? = null
     private var draftTail: Job? = null
@@ -91,6 +100,7 @@ class RemoteSession(val summary: SessionSummary, private val client: HostClient)
                     )
                     if (value.cursor != saved.cursor) throw ClientStateException(ClientStateException.Reason.INVALID_STORAGE)
                     timeline = value
+                    reconcileQueued()
                 }
                 if (draftRevision == revision) {
                     val saved = checkpoint.drafts.firstOrNull { it.address == captured }
@@ -118,6 +128,7 @@ class RemoteSession(val summary: SessionSummary, private val client: HostClient)
                         )
                         if (generation != epoch) return@launch
                         timeline = next
+                        reconcileQueued()
                     }
                     live = projection
                     loading = page["hasMore"]?.bool == true
@@ -163,7 +174,26 @@ class RemoteSession(val summary: SessionSummary, private val client: HostClient)
             OperationKind.Prompt,
             JsonValue.obj("text" to JsonValue.of(text), "delivery" to JsonValue.of(if (queue) "queue" else "steer")),
         )
-        if (accepted && draft == text) edit("")
+        if (accepted && draft == text) {
+            if (queue) {
+                queuedPrompts = queuedPrompts + QueuedPrompt(
+                    id = java.util.UUID.randomUUID().toString(),
+                    text = text,
+                    at = System.currentTimeMillis(),
+                )
+                reconcileQueued()
+            }
+            edit("")
+        }
+    }
+
+    /** A queued row leaves the list once the transcript carries it as a user message. */
+    private fun reconcileQueued() {
+        if (queuedPrompts.isEmpty()) return
+        val promoted = timeline.messages.mapNotNull { message ->
+            if (message["type"]?.string == "user") message["text"]?.string else null
+        }.toSet()
+        queuedPrompts = queuedPrompts.filterNot { promoted.contains(it.text) }
     }
 
     suspend fun command(method: RemoteMethod, kind: OperationKind, payload: JsonValue): Boolean {
@@ -206,3 +236,10 @@ class RemoteSession(val summary: SessionSummary, private val client: HostClient)
     fun pendingApprovals(): List<JsonValue> =
         (pending["permissions"]?.array ?: emptyList()) + (pending["questions"]?.array ?: emptyList())
 }
+
+/** One admitted, still-queued prompt; removed when the transcript promotes it. */
+data class QueuedPrompt(
+    val id: String,
+    val text: String,
+    val at: Long,
+)

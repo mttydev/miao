@@ -1,6 +1,8 @@
 package dev.miao.app.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -21,6 +23,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -48,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.miao.app.QueuedPrompt
 import dev.miao.app.RemoteSession
 import dev.miao.core.JsonValue
 import dev.miao.core.OperationKind
@@ -94,24 +99,63 @@ fun SessionScreen(remote: RemoteSession, onBack: () -> Unit) {
                     TextButton(onClick = { showSettings = true }) { Text("设置") }
                     TextButton(onClick = { showRename = true }) { Text("重命名") }
                     TextButton(onClick = { showDiff = true }) { Text("变更") }
+                    var menuExpanded by remember { mutableStateOf(false) }
+                    TextButton(onClick = { menuExpanded = true }) { Text("更多") }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        remote.summary.share?.let { share ->
+                            DropdownMenuItem(
+                                text = { Text("分享会话链接") },
+                                onClick = {
+                                    menuExpanded = false
+                                    val send = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, share)
+                                    }
+                                    context.startActivity(Intent.createChooser(send, "分享会话链接"))
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("复制会话链接") },
+                                onClick = {
+                                    menuExpanded = false
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("miao", share))
+                                },
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("导出对话") },
+                            onClick = {
+                                menuExpanded = false
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, transcriptMarkdown(remote.visibleMessages))
+                                }
+                                context.startActivity(Intent.createChooser(send, "导出对话"))
+                            },
+                        )
+                    }
                 },
             )
         },
         bottomBar = {
-            Composer(
-                remote = remote,
-                speechActive = speech,
-                onSpeech = {
-                    if (speech) {
-                        speech = false
-                        return@Composer
-                    }
-                    val granted = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
-                        PackageManager.PERMISSION_GRANTED
-                    if (granted) speech = true else permission.launch(Manifest.permission.RECORD_AUDIO)
-                },
-                onSend = { _, _ -> },
-            )
+            Column {
+                QueuedList(remote.queuedPrompts)
+                Composer(
+                    remote = remote,
+                    speechActive = speech,
+                    onSpeech = {
+                        if (speech) {
+                            speech = false
+                            return@Composer
+                        }
+                        val granted = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                            PackageManager.PERMISSION_GRANTED
+                        if (granted) speech = true else permission.launch(Manifest.permission.RECORD_AUDIO)
+                    },
+                    onSend = { _, _ -> },
+                )
+            }
         },
     ) { padding ->
         LazyColumn(
@@ -423,3 +467,53 @@ private fun renderDiff(value: JsonValue): String {
 }
 
 private fun Context.unused() = Unit
+
+/**
+ * The admitted-but-not-yet-promoted prompts of this session, absorbed from the
+ * dsh-go client: a visible queue instead of a toast that vanishes. A row
+ * leaves when the transcript carries the prompt as a user message.
+ */
+@Composable
+private fun QueuedList(prompts: List<QueuedPrompt>) {
+    if (prompts.isEmpty()) return
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Surface(tonalElevation = 2.dp) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(
+                    if (expanded) "已排队 ${prompts.size} 条（收起）" else "已排队 ${prompts.size} 条，本轮结束后依次发送",
+                    fontSize = 12.sp,
+                )
+            }
+            if (expanded) {
+                prompts.forEach { prompt ->
+                    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                        Text(prompt.text, fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(prompt.at)),
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Plain Markdown so the export reads well in any editor or chat. */
+private fun transcriptMarkdown(messages: List<Map<String, JsonValue>>): String =
+    messages.mapNotNull { message ->
+        when (message["type"]?.string) {
+            "user" -> "**我**\n\n" + textOf(message)
+            "assistant" -> {
+                val text = (message["content"]?.array ?: emptyList())
+                    .filter { it["type"]?.string == "text" }
+                    .joinToString("\n\n") { it["text"]?.string ?: "" }
+                text.ifBlank { null }?.let { "**miao**\n\n$it" }
+            }
+            "tool" -> "_[工具] " + (message["name"]?.string ?: "tool") + "_"
+            "shell" -> "```\n$ " + (message["command"]?.string ?: "") + "\n" + (message["output"]?.string ?: "") + "\n```"
+            else -> null
+        }
+    }.joinToString("\n\n---\n\n")
