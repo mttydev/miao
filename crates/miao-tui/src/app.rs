@@ -315,8 +315,10 @@ impl Live {
     /// The wait has gone long enough that the TS row turns its spinner
     /// warning-colored.
     fn alert(&self, now: Instant) -> bool {
-        matches!(self.phase, LivePhase::Waiting)
-            && now.duration_since(self.since) >= Duration::from_secs(30)
+        matches!(
+            self.phase,
+            LivePhase::Waiting | LivePhase::Compacting { .. }
+        ) && now.duration_since(self.since) >= Duration::from_secs(30)
     }
 }
 
@@ -604,6 +606,11 @@ pub struct App {
     drafts: HashMap<String, (String, Vec<Value>)>,
     /// Where a recall is standing; `prompt_history.len()` means "not recalling".
     history_index: usize,
+    /// The compaction count last seen for the open Session's transcript. A
+    /// snapshot that raises it means an automatic pass just completed: the
+    /// composer announces that once, because the transcript banner is the
+    /// durable record but not the moment.
+    compacted_seen: Option<(String, usize)>,
     /// Every root Session, archived included, for the Session dialog.
     catalog: Vec<SessionSummary>,
     /// The last time the open Sessions dialog asked the catalog to refresh.
@@ -835,6 +842,7 @@ impl App {
             prompt_history: Vec::new(),
             drafts: HashMap::new(),
             history_index: 0,
+            compacted_seen: None,
             catalog: Vec::new(),
             last_catalog_ask: None,
             pending_models: false,
@@ -5016,6 +5024,39 @@ impl App {
                 (None, None) => "Idle".to_string(),
             })
         };
+        // A compaction the transcript just gained announces itself once, in
+        // the composer where the operator is looking. The banner in the
+        // transcript is the durable record; the count keys the notice so a
+        // re-projection (a resync replays the same entries) stays quiet, and
+        // the first sighting of a Session only records its history.
+        let compactions = self
+            .shell
+            .transcript()
+            .map(|transcript| {
+                transcript
+                    .entries
+                    .iter()
+                    .filter(|entry| matches!(entry, Entry::Compacted { .. }))
+                    .count()
+            })
+            .unwrap_or(0);
+        let seen = self.compacted_seen.take();
+        let current_id = self.session.as_ref().map(|session| session.id.clone());
+        let same_session = seen
+            .as_ref()
+            .zip(current_id.as_ref())
+            .is_some_and(|(seen, current)| seen.0 == *current);
+        if same_session && compactions > seen.as_ref().map(|seen| seen.1).unwrap_or(0) {
+            // A direct field write: `live` borrows `self` across this region,
+            // so the notice helper (&mut self) cannot be called here.
+            self.shell.composer.notice =
+                Some("context compacted · earlier turns summarized".to_string());
+        }
+        if let Some(current_id) = current_id {
+            self.compacted_seen = Some((current_id, compactions));
+        } else {
+            self.compacted_seen = seen;
+        };
         // Which model answers, and what the Session has cost so far. A pin on
         // the Session wins, then the model the newest assistant message ran on,
         // labelled with the catalog's protocol so the strip names the provider
@@ -7640,6 +7681,44 @@ mod tests {
             .is_some_and(|notice| notice.contains("paste it again")));
     }
 
+    /// A compaction the transcript just gained announces itself once: the
+    /// banner is the durable record, the notice is the moment. A re-played
+    /// snapshot carries the same entries and must not re-notice.
+    #[test]
+    fn a_new_compaction_notices_once_and_a_replay_stays_quiet() {
+        let mut app = session_app();
+        let (handle, _requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        let opened = |compacted: bool| {
+            let mut transcript = Transcript::default();
+            if compacted {
+                transcript
+                    .entries
+                    .push(Entry::Compacted { summary_chars: 5 });
+            }
+            AppEvent::SessionOpened {
+                summary: Some(summary("ses_compact", 1)),
+                transcript: Box::new(transcript),
+                state: Box::new(SessionState::default()),
+            }
+        };
+        app.handle(opened(false));
+        assert!(
+            app.shell.composer.notice.is_none(),
+            "a compaction from before the open is history, not news"
+        );
+        app.handle(opened(true));
+        assert!(app
+            .shell
+            .composer
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("context compacted")));
+        let seen = app.compacted_seen.clone();
+        app.handle(opened(true));
+        assert_eq!(app.compacted_seen, seen, "a replay is not a new compaction");
+    }
+
     /// A Session refresh re-runs the draft swap for the Session already on
     /// screen (a transport resync arrives as the same event). The picture a
     /// paste attached must survive it with the marker naming it, or the next
@@ -7773,9 +7852,15 @@ mod tests {
             app.shell.composer.attachments().is_empty(),
             "the stashed picture left the composer"
         );
-        assert_eq!(app.stash.len(), 1);
-        assert_eq!(app.stash[0].attachments.len(), 1);
-        app.dialog_action(DialogAction::StashRestore(0));
+        // The state dir can carry entries a parallel test wrote (the env var
+        // is process-global), so the stashed draft is located by its text
+        // instead of assuming the stash holds exactly one entry.
+        let index = app
+            .stash
+            .iter()
+            .position(|entry| entry.text == "[Image 1] " && entry.attachments.len() == 1)
+            .expect("the stashed draft with its picture is in the stash");
+        app.dialog_action(DialogAction::StashRestore(index));
         assert_eq!(app.shell.composer.editor.text(), "[Image 1] ");
         assert_eq!(app.shell.composer.attachments().len(), 1);
     }

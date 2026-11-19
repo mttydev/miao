@@ -2171,18 +2171,23 @@ fn transcript_lines(
             }
             Entry::Compacted { summary_chars } => {
                 // The turns above are still the conversation the operator read;
-                // what changed is which of them the provider now sees. A rule
-                // across the transcript is the only thing that says so at a
-                // glance, and it names the summary that replaced them.
+                // what changed is which of them the provider now sees. The rule
+                // is painted in the warning color and says so in plain words:
+                // the old muted gray read as decoration, and operators
+                // reported never noticing automatic compaction had run.
                 inline_run = false;
                 rows.push(Row::plain(Line::default()));
                 rows.push(Row::plain(Line::from(vec![
-                    Span::styled("── ", Style::new().fg(palette.border)),
+                    Span::styled("── ", Style::new().fg(palette.warning)),
                     Span::styled(
-                        format!("conversation compacted · earlier turns summarized ({summary_chars} chars)"),
-                        Style::new().fg(palette.text_muted),
+                        format!(
+                            "context compacted · earlier turns summarized ({summary_chars} chars)"
+                        ),
+                        Style::new()
+                            .fg(palette.warning)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
                     ),
-                    Span::styled(" ──", Style::new().fg(palette.border)),
+                    Span::styled(" ──", Style::new().fg(palette.warning)),
                 ])));
                 rows.push(Row::plain(Line::default()));
             }
