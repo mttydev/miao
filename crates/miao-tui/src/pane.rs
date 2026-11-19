@@ -665,6 +665,20 @@ impl Shell {
             self.leader_hint.as_deref(),
             &self.transcript.theme,
         );
+        // The rule separates the columns; it is not part of either one. Paint it
+        // last, after every pane: a band that pads to its own edge, a wide glyph
+        // clipped at the last column, or any one-cell overflow then cannot leave
+        // a gap in the divider or tint it with that row's colour. That is what a
+        // Windows terminal showed as a broken rule with green remnants in it.
+        if let Some(area) = sidebar_area {
+            let style = Style::new()
+                .fg(self.transcript.theme.palette.text_muted)
+                .bg(self.transcript.theme.palette.background);
+            let buffer = frame.buffer_mut();
+            for y in area.y..area.y + area.height {
+                buffer[(area.x, y)].set_symbol("│").set_style(style);
+            }
+        }
     }
 }
 
@@ -9803,6 +9817,33 @@ mod final_layout_check {
                 holes.len(),
                 &holes[..holes.len().min(10)]
             );
+        }
+    }
+
+    /// The rule separates the columns, so the last paint of a frame owns it. A
+    /// band that padded to its own edge, or a wide glyph clipped at the last
+    /// column, used to overwrite that cell on Windows: the divider came back
+    /// broken and tinted with the row's colour.
+    #[test]
+    fn the_sidebar_rule_survives_every_row_of_a_frame() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let mut shell = Shell::new(std::path::Path::new("."), theme);
+        let width = 160u16;
+        let rule = body_columns(Rect::new(0, 0, width, 1)).0.width;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|frame| shell.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..24 {
+            let cell = &buffer[(rule, y)];
+            assert_eq!(cell.symbol(), "│", "row {y} lost the rule");
+            assert_eq!(cell.bg, palette.background, "row {y} tinted the rule");
         }
     }
 }
