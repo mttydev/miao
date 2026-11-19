@@ -11,10 +11,15 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.93] - 2026-11-19
+
+### Fixed
+- **tui**: clear the pause row when the session resumes (#3195) (`8c1161d402`)
+
 ## [0.3.92] - 2026-11-19
 
 ### Fixed
-- **engine**: count a new tool call as progress against the stale-list stop (#3194)
+- **engine**: count a new tool call as progress against the stale-list stop (#3194) (`1a46063c7d`)
 - **engine**: let a long implementation run past the stale-list stop (#3193) (`360f4e06c0`)
 - **tui**: keep one pause entry in the transcript instead of every replay (#3191) (`186023657e`)
 
