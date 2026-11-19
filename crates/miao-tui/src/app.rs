@@ -597,8 +597,11 @@ pub struct App {
     /// recovery expensive.
     prompt_history: Vec<String>,
     /// One draft per Session, so a prompt typed in one Session never appears in
-    /// another. Session removal drops its entry with the Session.
-    drafts: HashMap<String, String>,
+    /// another. The pending attachments travel beside the text: a `[Image N]`
+    /// marker restored without its bytes fails the submit with an error the
+    /// operator reads as "miao lost my picture". Session removal drops its
+    /// entry with the Session.
+    drafts: HashMap<String, (String, Vec<Value>)>,
     /// Where a recall is standing; `prompt_history.len()` means "not recalling".
     history_index: usize,
     /// Every root Session, archived included, for the Session dialog.
@@ -1220,7 +1223,10 @@ impl App {
             }
             AppEvent::EditorFinished(result) => match result {
                 Ok(Some(text)) => {
-                    self.shell.composer.restore(&text);
+                    // The round trip edits text only, so the attachments that
+                    // were waiting stay with the markers that name them.
+                    let attachments = self.shell.composer.attachments().to_vec();
+                    self.shell.composer.restore_with(&text, attachments);
                     self.shell.composer.notice = None;
                 }
                 Ok(None) => {}
@@ -2593,7 +2599,8 @@ impl App {
             DialogAction::StashRestore(index) => {
                 self.dialog = None;
                 if let Some(entry) = self.stash.get(index) {
-                    self.shell.composer.editor.set_text(&entry.text);
+                    let attachments = entry.attachments.clone();
+                    self.shell.composer.restore_with(&entry.text, attachments);
                     self.shell.composer.notice = Some("restored from stash".into());
                 }
                 self.stash = state::stash_remove(index);
@@ -2854,20 +2861,24 @@ impl App {
     }
 
     /// Keep one draft per Session: stash what the composer holds under the
-    /// Session being left, then restore whatever the next one had.
+    /// Session being left, then restore whatever the next one had. The
+    /// attachments travel beside the text — a Session refresh re-runs this
+    /// swap for the Session already on screen, and a draft whose `[Image N]`
+    /// markers lost their bytes submits into the "picture is gone" error.
     fn swap_draft(&mut self, next: Option<&str>) {
         let text = self.shell.composer.editor.text().to_string();
         if let Some(current) = self.session.as_ref().map(|session| session.id.clone()) {
-            if text.trim().is_empty() {
+            let attachments = self.shell.composer.attachments().to_vec();
+            if text.trim().is_empty() && attachments.is_empty() {
                 self.drafts.remove(&current);
             } else {
-                self.drafts.insert(current, text);
+                self.drafts.insert(current, (text, attachments));
             }
         }
-        let restored = next
+        let (text, attachments) = next
             .and_then(|id| self.drafts.get(id).cloned())
             .unwrap_or_default();
-        self.shell.composer.restore(&restored);
+        self.shell.composer.restore_with(&text, attachments);
     }
 
     /// The checkout a worktree action belongs to: the open Session's directory,
@@ -3602,9 +3613,12 @@ impl App {
             self.notice("nothing to stash");
             return;
         }
-        self.stash = state::stash_push(text);
-        self.shell.composer.editor.clear();
-        self.shell.composer.dismiss_completion();
+        let attachments = self.shell.composer.attachments().to_vec();
+        self.stash = state::stash_push(text, &attachments);
+        // The draft dies whole: the picture went into the stash entry, and a
+        // text-only leftover would invite an orphan `[Image N]` marker back
+        // through undo.
+        self.shell.composer.clear();
         if self.screen == Screen::Session {
             self.shell.composer.notice = Some("stashed".into());
         }
@@ -3913,8 +3927,9 @@ impl App {
         if self.keys.matches(keybinds::Action::InputClear, &key)
             && !self.shell.composer.editor.is_empty()
         {
-            self.shell.composer.editor.clear();
-            self.shell.composer.dismiss_completion();
+            // The draft dies whole: undoable text over cleared bytes would
+            // bring back `[Image N]` markers with nothing behind them.
+            self.shell.composer.clear();
             return;
         }
         if self.keys.matches(keybinds::Action::AppExit, &key) {
@@ -4019,8 +4034,9 @@ impl App {
             return;
         }
         if action(keybinds::Action::InputClear) && !self.shell.composer.editor.is_empty() {
-            self.shell.composer.editor.clear();
-            self.shell.composer.dismiss_completion();
+            // The draft dies whole: undoable text over cleared bytes would
+            // bring back `[Image N]` markers with nothing behind them.
+            self.shell.composer.clear();
             return;
         }
         // `app_exit` shares `ctrl+d` with `input_delete`; like the TypeScript
@@ -5461,10 +5477,13 @@ impl App {
                     self.read_clipboard(false);
                     return;
                 }
+                let orphan = markers - attachments.len();
                 self.held_prompt = None;
                 self.shell.composer.restore_with(&text, attachments);
                 self.notice(&format!(
-                    "[Image {markers}] has no attachment in this draft: paste the picture again or remove the marker"
+                    "{orphan} image marker{} in this draft {} no attachment: paste the picture again or remove the marker",
+                    if orphan == 1 { "" } else { "s" },
+                    if orphan == 1 { "has" } else { "have" },
                 ));
                 return;
             }
@@ -7619,6 +7638,146 @@ mod tests {
             .notice
             .as_deref()
             .is_some_and(|notice| notice.contains("paste it again")));
+    }
+
+    /// A Session refresh re-runs the draft swap for the Session already on
+    /// screen (a transport resync arrives as the same event). The picture a
+    /// paste attached must survive it with the marker naming it, or the next
+    /// submit errors with "no attachment" and the paste reads as lost.
+    #[test]
+    fn a_session_refresh_keeps_the_pasted_picture_with_its_marker() {
+        let mut app = session_app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        let opened = || AppEvent::SessionOpened {
+            summary: Some(summary("ses_refresh", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        };
+        app.handle(opened());
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Image {
+            mime: "image/png".into(),
+            data: "cG5n".into(),
+        })));
+        app.handle(opened());
+        assert_eq!(app.shell.composer.editor.text(), "[Image 1] ");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let (text, attachments) = control_requests(&mut requests)
+            .into_iter()
+            .find_map(|request| match request {
+                engine::Request::Prompt {
+                    text, attachments, ..
+                } => Some((text, attachments)),
+                _ => None,
+            })
+            .expect("the refreshed draft must submit");
+        assert_eq!(text.as_str(), "[Image 1] ");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["mime"], "image/png");
+    }
+
+    /// Switching Sessions stashes the draft per Session; the picture travels
+    /// with the text its marker names, both ways.
+    #[test]
+    fn switching_sessions_keeps_the_picture_with_the_marker_it_names() {
+        let mut app = session_app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        let opened = |id: &str| AppEvent::SessionOpened {
+            summary: Some(summary(id, 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        };
+        app.handle(opened("ses_a"));
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Image {
+            mime: "image/png".into(),
+            data: "cG5n".into(),
+        })));
+        app.handle(opened("ses_b"));
+        assert!(
+            app.shell.composer.attachments().is_empty(),
+            "the other Session starts from its own empty draft"
+        );
+        app.handle(opened("ses_a"));
+        assert_eq!(app.shell.composer.editor.text(), "[Image 1] ");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let (_, attachments) = control_requests(&mut requests)
+            .into_iter()
+            .find_map(|request| match request {
+                engine::Request::Prompt {
+                    text, attachments, ..
+                } => Some((text, attachments)),
+                _ => None,
+            })
+            .expect("the picture must come back with the Session");
+        assert_eq!(attachments.len(), 1);
+    }
+
+    /// Clearing the input discards the picture together with its marker: an
+    /// attachment without a marker would silently ride the next prompt.
+    #[test]
+    fn clearing_the_input_drops_the_picture_with_its_marker() {
+        let mut app = session_app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_clear", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Image {
+            mime: "image/png".into(),
+            data: "cG5n".into(),
+        })));
+        app.handle(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.shell.composer.editor.is_empty());
+        assert!(
+            app.shell.composer.attachments().is_empty(),
+            "a cleared draft leaves no picture behind"
+        );
+        app.handle(key(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let asked = control_requests(&mut requests);
+        assert!(
+            asked.iter().all(|request| match request {
+                engine::Request::Prompt { attachments, .. } => attachments.is_empty(),
+                _ => true,
+            }),
+            "no picture rides after the clear: {}",
+            asked.len()
+        );
+    }
+
+    /// Stashing a draft takes its picture along; restoring puts both back.
+    #[test]
+    fn a_stashed_draft_keeps_its_picture_until_the_restore() {
+        // stash.json lives in the state dir, so the test points it at a fresh
+        // one: another test's stashed prompts must not join the count.
+        let _env = crate::state::env_lock();
+        let dir = std::env::temp_dir().join(format!("miao-tui-app-stash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("MIAO_TUI_STATE_DIR", dir.join("state"));
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_stash", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        app.handle(AppEvent::Clipboard(Some(clipboard::Content::Image {
+            mime: "image/png".into(),
+            data: "cG5n".into(),
+        })));
+        app.run_builtin(Builtin::StashDraft);
+        assert!(app.shell.composer.editor.is_empty());
+        assert!(
+            app.shell.composer.attachments().is_empty(),
+            "the stashed picture left the composer"
+        );
+        assert_eq!(app.stash.len(), 1);
+        assert_eq!(app.stash[0].attachments.len(), 1);
+        app.dialog_action(DialogAction::StashRestore(0));
+        assert_eq!(app.shell.composer.editor.text(), "[Image 1] ");
+        assert_eq!(app.shell.composer.attachments().len(), 1);
     }
 
     /// The read a submit starts is a probe for the marker's missing picture,
