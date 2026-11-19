@@ -4433,6 +4433,10 @@ async fn execute(
         // Window and occupancy: the usage events and the pause note read these, so
         // they stay even though nothing announces the level any more.
         let mut pressure = None;
+        // The window itself does not depend on an anchor: a pass may leave no
+        // measured occupancy for a turn, and the client still has to know which
+        // ceiling that turn ran against.
+        let mut context_window = None;
         // Set when a request had to be bounded and the operator configured no
         // pruning: (payload chars, total chars, protected turns).
         let mut prune = None;
@@ -4455,6 +4459,7 @@ async fn execute(
                     None => None,
                 };
                 pressure = counted.map(|counted| (limits.window, counted));
+                context_window = Some(limits.window);
                 compaction_threshold = Some(limits.budget().threshold()).filter(|at| *at > 0);
                 prune = limits.prune_chars.is_none().then_some((
                     crate::context_trigger::DEFAULT_PRUNE_CHARS,
@@ -4924,12 +4929,13 @@ async fn execute(
                 // problem: the same request would loop again. Keep what the
                 // user already saw durable, but dispatch no tool call from it.
                 if let Some((channel, partial)) = error.repetition() {
+                    let prompt_tokens = partial.usage["inputTokens"].clone();
                     inner
                         .store
                         .record(
                             session,
                             "usage",
-                            json!({"run_id":run,"step":step,"usage":partial.usage,"partial":true,"model":model.as_deref(),"cache":crate::usage::cache_lineage(&partial.usage),"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":pressure.map(|(window,_)|json!(window)),"context_tokens":pressure.map(|(_,counted)|json!(counted))}),
+                            json!({"run_id":run,"step":step,"usage":partial.usage,"partial":true,"model":model.as_deref(),"cache":crate::usage::cache_lineage(&partial.usage),"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":context_window,"context_tokens":prompt_tokens}),
                         )
                         .await?;
                     if partial
@@ -4958,12 +4964,13 @@ async fn execute(
                         .await?;
                 }
                 if let Some((partial, unexecuted_calls)) = error.continuation() {
+                    let prompt_tokens = partial.usage["inputTokens"].clone();
                     inner
                         .store
                         .record(
                             session,
                             "usage",
-                            json!({"run_id":run,"step":step,"usage":partial.usage,"partial":true,"model":model.as_deref(),"cache":crate::usage::cache_lineage(&partial.usage),"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":pressure.map(|(window,_)|json!(window)),"context_tokens":pressure.map(|(_,counted)|json!(counted))}),
+                            json!({"run_id":run,"step":step,"usage":partial.usage,"partial":true,"model":model.as_deref(),"cache":crate::usage::cache_lineage(&partial.usage),"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":context_window,"context_tokens":prompt_tokens}),
                         )
                         .await?;
                     if partial
@@ -5160,16 +5167,19 @@ command: None,
         if !budgets.is_empty() {
             budgets.advance(&reply.usage, cost.as_ref());
         }
+        let prompt_tokens = reply.usage["inputTokens"].clone();
         inner
             .store
             .record(
                 session,
                 "usage",
-                // The window and the occupancy this provider call was planned
-                // against ride the same event as its billed usage, so a client
-                // can show how full the Session's context is without
-                // re-deriving the anchor or asking the runtime.
-                json!({"run_id":run,"step":step,"usage":reply.usage,"model":model.as_deref(),"route":route,"cost":cost,"cache":crate::usage::cache_lineage(&reply.usage),"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":pressure.map(|(window,_)|json!(window)),"context_tokens":pressure.map(|(_,counted)|json!(counted))}),
+                // The window this call ran against and what the call actually
+                // carried ride the same event as its billed usage. The carried
+                // count is the provider's own `inputTokens`, not the planning
+                // estimate: right after a compaction the estimate still holds
+                // the pre-pass history, and a client showing it read as though
+                // the pass had freed nothing.
+                json!({"run_id":run,"step":step,"usage":reply.usage,"model":model.as_deref(),"route":route,"cost":cost,"cache":crate::usage::cache_lineage(&reply.usage),"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":context_window,"context_tokens":prompt_tokens}),
             )
             .await?;
         billed_tokens_spent =

@@ -1594,13 +1594,24 @@ impl Store {
     /// plus the highest message seq that report counted. An event without the
     /// marker predates the anchor, so it reports `None` rather than inventing
     /// one; the trigger stays off until a later turn reports a marked usage.
+    ///
+    /// A report from before the newest compaction no longer describes what the
+    /// next request carries: the pass replaced that history with a summary.
+    /// Keeping it as the anchor made the turn after a pass plan against the
+    /// pre-compaction count, so the operator read the old figure beside a much
+    /// smaller request and every later decision inherited it.
     pub async fn context_anchor(&self, session: &str) -> Result<Option<(u64, u64)>, Error> {
         let session = session.to_owned();
         self.call(move |conn| {
+            let cut: u64 = conn.query_row(
+                "SELECT COALESCE((SELECT created_seq FROM engine_compaction WHERE session_id=?1 ORDER BY created_seq DESC LIMIT 1),0)",
+                [&session],
+                |row| row.get(0),
+            )?;
             let data: Option<String> = conn
                 .query_row(
-                    "SELECT data FROM engine_event WHERE session_id=?1 AND kind='usage' ORDER BY seq DESC LIMIT 1",
-                    [&session],
+                    "SELECT data FROM engine_event WHERE session_id=?1 AND kind='usage' AND seq>?2 ORDER BY seq DESC LIMIT 1",
+                    rusqlite::params![session, cut],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -2551,5 +2562,66 @@ mod tests {
             store.last_context_tokens("s").await.unwrap(),
             estimate_tokens(1_000)
         ));
+    }
+
+    /// A report from before the newest compaction no longer describes what the
+    /// next request carries: the pass replaced that history with a summary.
+    /// It used to stay the anchor, so the turn after a pass planned against the
+    /// pre-pass count and every client showing it read the pass as a no-op.
+    #[tokio::test]
+    async fn a_report_from_before_the_newest_compaction_is_not_the_anchor() {
+        use crate::protocol::{Delivery, Input};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+        store
+            .admit(Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "s".into(),
+                input_id: "one".into(),
+                prompt: "old task".into(),
+                delivery: Delivery::Steer,
+            })
+            .await
+            .unwrap();
+        store.promote("s", true).await.unwrap();
+        let boundary = store
+            .message(
+                "s",
+                "assistant",
+                json!([{"type":"text","text":"completed task"}]),
+            )
+            .await
+            .unwrap()
+            .seq;
+        store
+            .record(
+                "s",
+                "usage",
+                json!({"run_id":"run","step":0,"usage":{"inputTokens":600_000,"outputTokens":10},"context_message_seq":boundary}),
+            )
+            .await
+            .unwrap();
+        store
+            .compact("s", "cut", boundary, "summary".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.context_anchor("s").await.unwrap(),
+            None,
+            "the pre-compaction report cannot describe the compacted prefix"
+        );
+        store
+            .record(
+                "s",
+                "usage",
+                json!({"run_id":"run","step":1,"usage":{"inputTokens":21_000,"outputTokens":10},"context_message_seq":boundary}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.context_anchor("s").await.unwrap(),
+            Some((21_000, boundary))
+        );
     }
 }
