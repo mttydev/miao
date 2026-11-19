@@ -753,6 +753,8 @@ struct SessionSummary: Identifiable {
     /// Present in `time` only while archived; the wire omits the key otherwise.
     let archived: Bool
     let pinned: Bool
+    /// `Session.Info.share.url` when the host published the session; absent otherwise.
+    let share: String?
     /// `Session.Info.time` always carries both; the list uses updated for the
     /// "last active" line and for deciding what deserves attention first.
     let updated: Date?
@@ -763,6 +765,7 @@ struct SessionSummary: Identifiable {
         let time = value["time"]
         archived = time?["archived"] != nil
         pinned = time?["pinned"] != nil
+        share = value["share"]?["url"]?.string
         updated = time?["updated"]?.number.map { Date(timeIntervalSince1970: $0 / 1000) }
         created = time?["created"]?.number.map { Date(timeIntervalSince1970: $0 / 1000) }
     }
@@ -1030,6 +1033,15 @@ struct OutboxPrompt: Identifiable, Equatable {
     var retryable: Bool
 }
 
+/// One admitted, still-queued prompt. The entry lives until the engine promotes
+/// it into a user message; the transcript is the promotion signal, so a queued
+/// row cannot outlive the message it became.
+struct QueuedPrompt: Identifiable, Equatable {
+    let id: UUID
+    let text: String
+    let at: Date
+}
+
 @MainActor @Observable
 final class RemoteSession {
     let summary: SessionSummary
@@ -1048,6 +1060,9 @@ final class RemoteSession {
     var loading = true
     var diff: JSONValue?
     var outbox: [OutboxPrompt] = []
+    /// Accepted-but-still-queued prompts, newest last. Cleared when the
+    /// transcript shows the prompt promoted into a user message.
+    var queuedPrompts: [QueuedPrompt] = []
     private var viewers = 0
     private var poll: Task<Void, Never>?
     private var draftTail: Task<Void, Never>?
@@ -1106,6 +1121,20 @@ final class RemoteSession {
         live = projection
         displayed = projection?.displaying(value.messages) ?? value.messages
         revision += 1
+        reconcileQueued()
+    }
+
+    /// A queued prompt leaves the list when the engine promotes it: the
+    /// transcript then carries a user message with the same text. Matching by
+    /// text keeps the list honest without a queue RPC; identical texts clear
+    /// oldest first so duplicates still drain in order.
+    private func reconcileQueued() {
+        guard !queuedPrompts.isEmpty else { return }
+        let promoted = Set(timeline.messages.compactMap { message -> String? in
+            guard message["type"]?.string == "user" else { return nil }
+            return message["text"]?.string
+        })
+        queuedPrompts.removeAll { promoted.contains($0.text) }
     }
 
     func resume() {
@@ -1297,6 +1326,9 @@ final class RemoteSession {
                 target: OperationTarget(session: address),
                 payload: .object(payload),
                 operationID: item.id, retrying: retrying)
+            if item.queued {
+                queuedPrompts.append(QueuedPrompt(id: item.id, text: item.text, at: Date()))
+            }
             outbox.removeAll { $0.id == item.id }
             error = nil
         } catch {

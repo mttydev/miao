@@ -968,6 +968,14 @@ private struct SessionView: View {
                         Label("导出对话", systemImage: "square.and.arrow.up")
                     }
                     .disabled(session.displayed.isEmpty)
+                    if let share = session.summary.share {
+                        ShareLink(item: share) {
+                            Label("分享会话链接", systemImage: "link")
+                        }
+                        Button("复制会话链接") {
+                            UIPasteboard.general.string = share
+                        }
+                    }
                     Button("复制最后回复") {
                         if let text = lastAssistantText { UIPasteboard.general.string = text }
                     }
@@ -1089,6 +1097,9 @@ private struct SessionView: View {
                 Text(notice).font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("composerNotice")
+            }
+            if !session.queuedPrompts.isEmpty {
+                QueuedPromptsView(prompts: session.queuedPrompts)
             }
             if client.record.grant.permissions.contains(.prompt) {
                 if !attachments.isEmpty {
@@ -1908,5 +1919,49 @@ private struct SessionSelectionView: View {
                 choices = decoded
             } catch is CancellationError {} catch { failure = userMessage(error) }
         }
+    }
+}
+
+/// The admitted-but-not-yet-promoted prompts of this Session. The interaction
+/// comes from dsh-go: a visible queue instead of a toast that vanishes, so the
+/// operator can see what will still fire. Promotion — the transcript carrying
+/// the prompt as a user message — removes the row.
+private struct QueuedPromptsView: View {
+    let prompts: [QueuedPrompt]
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.snappy(duration: 0.18)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text("已排队 \(prompts.count) 条，本轮结束后依次发送")
+                        .font(.caption)
+                    Spacer()
+                }
+            }
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("queuedPromptsToggle")
+            if expanded {
+                ForEach(prompts) { prompt in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(prompt.text)
+                            .font(.caption)
+                            .lineLimit(3)
+                        Text(prompt.at, style: .time)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
+        .padding(8)
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
     }
 }

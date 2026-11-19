@@ -9,6 +9,8 @@ data class SessionSummary(
     val projectID: String,
     val archived: Boolean,
     val pinned: Boolean,
+    /** `Session.Info.share.url` when the host published the session; absent otherwise. */
+    val share: String? = null,
 ) {
     companion object {
         fun parse(value: JsonValue): SessionSummary = SessionSummary(
@@ -17,6 +19,7 @@ data class SessionSummary(
             projectID = value["projectID"]?.string ?: throw ProtocolIncompatibleException(),
             archived = value["time"]?.get("archived") != null,
             pinned = value["time"]?.get("pinned") != null,
+            share = value["share"]?.get("url")?.string,
         )
     }
 }
