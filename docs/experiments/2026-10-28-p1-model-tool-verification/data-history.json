@@ -48,7 +48,7 @@
         "crates/miao-engine/tests/concurrent_open.rs",
         "crates/miao-engine/tests/migration.rs",
         "packages/core/test/database-migration.test.ts",
-        "https://github.com/oxdingzg/miao/pull/1578"
+        "https://github.com/mttydev/miao/pull/1578"
       ]
     },
     {
@@ -69,9 +69,9 @@
         "crates/miao-engine/tests/transfer_history.rs",
         "crates/miao-engine/tests/transfer_activation.rs",
         "crates/miao-engine/tests/transfer_move.rs",
-        "https://github.com/oxdingzg/miao/pull/1568",
-        "https://github.com/oxdingzg/miao/pull/1569",
-        "https://github.com/oxdingzg/miao/pull/1573"
+        "https://github.com/mttydev/miao/pull/1568",
+        "https://github.com/mttydev/miao/pull/1569",
+        "https://github.com/mttydev/miao/pull/1573"
       ]
     },
     {

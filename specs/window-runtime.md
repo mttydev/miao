@@ -3,7 +3,7 @@
 状态：正确性复核、实现与平台验收已完成；正式发布见 #253；2026-10-06。调查基线：`7ee599413`。
 本文替代常驻 Runtime、空闲保活和版本化执行 worker 的路线。
 文档与代码交付分别记录；只有完成验收的代码 PR 才代表运行行为改变。
-实施跟踪：[GitHub #253](https://github.com/oxdingzg/miao/issues/253)，计划合并后保持打开，逐项验收后关闭。
+实施跟踪：[GitHub #253](https://github.com/mttydev/miao/issues/253)，计划合并后保持打开，逐项验收后关闭。
 
 ## 1. 产品契约
 
@@ -217,10 +217,10 @@ CLI #261、远程隔离 #265、不可变构建安装 #266、常驻路径清理 #
 双进程数据库及 Session 所有权、真实 A/B 构建与后续子进程固定版本、多窗口 remote 隔离、
 Swift/浏览器加密互通、原生账号与 Keychain、iPhone/iPad 及真实 Runtime 的 App 操作。
 
-仓库既有非阻塞 Windows 浏览器 E2E 在 [37429113184](https://github.com/oxdingzg/miao/actions/runs/37429113184)
+仓库既有非阻塞 Windows 浏览器 E2E 在 [37429113184](https://github.com/mttydev/miao/actions/runs/37429113184)
 有文件面板及工具投影 mock 用例超时；App/UI 实现和这些用例未改动，Linux 对应检查与本次 Windows 专项通过。
 保留该结果及原有合并门槛，不把它记为通过。
 
 0.1.15 发布准备见 #270；正式发布及日常命令安装结果记录于
-[tracking issue #253](https://github.com/oxdingzg/miao/issues/253)。
+[tracking issue #253](https://github.com/mttydev/miao/issues/253)。
 原排期表保留为调查时的估算基线，本轮已完成实施，没有延期等待该日期。

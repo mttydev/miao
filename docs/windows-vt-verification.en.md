@@ -20,7 +20,7 @@ This page is the on-device verification. Nothing here has a recorded result yet.
 
 ```powershell
 # Install via the PowerShell script
-irm https://raw.githubusercontent.com/oxdingzg/miao/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mttydev/miao/main/install.ps1 | iex
 # Or drop the miao.exe from miao-windows-x64.zip onto PATH
 miao --version
 ```

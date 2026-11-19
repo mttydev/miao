@@ -5,7 +5,7 @@ Item: `COST-02` (#1972). Tree: branch `feat/issue1972`, PR #2861, rebased onto
 declaration derived from configuration, the run-loop enforcement, the
 integration pins, and this record). Commands run from `crates/miao-engine` on
 the tree this PR's CI workflow builds; every observed cell below cites CI run
-[`42954059284`](https://github.com/oxdingzg/miao/actions/runs/42954059284) on
+[`42954059284`](https://github.com/mttydev/miao/actions/runs/42954059284) on
 head `89b87a2aee`, whose engine shards are the evidence. Rust is not compiled on
 the workstation, so CI is the only evidence this record can cite; this record's
 own commit changes no engine code, so the engine shards of that run are the ones

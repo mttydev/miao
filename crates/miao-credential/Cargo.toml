@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 publish = false
 license = "MIT"
-repository = "https://github.com/oxdingzg/miao"
+repository = "https://github.com/mttydev/miao"
 homepage = "https://mtty.dev/miao"
 description = "Standalone credential daemon: the single refresh writer for engine-owned credential rows"
 

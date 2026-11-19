@@ -12,7 +12,7 @@ and contributors for the terminal coding workflow and engineering foundation.
 miao is maintained as a separate project, with its own development direction,
 issue tracker and releases. The source relationship does not imply affiliation
 with or endorsement by the opencode maintainers. For miao support and releases,
-use [oxdingzg/miao](https://github.com/oxdingzg/miao).
+use [mttydev/miao](https://github.com/mttydev/miao).
 
 ## License and redistribution
 

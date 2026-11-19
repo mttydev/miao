@@ -24,7 +24,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(gh api repos/oxdingzg/miao/releases/latest --jq '.tag_name')
+          version=$(gh api repos/mttydev/miao/releases/latest --jq '.tag_name')
           echo "MIAO_VERSION=${version#v}" >> "$GITHUB_ENV"
       - name: Install with the bash installer
         run: bash install --no-modify-path --version "$MIAO_VERSION"
@@ -51,7 +51,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(gh api repos/oxdingzg/miao/releases/latest --jq '.tag_name')
+          version=$(gh api repos/mttydev/miao/releases/latest --jq '.tag_name')
           echo "MIAO_VERSION=${version#v}" >> "$GITHUB_ENV"
       - name: Install the latest release through irm | iex
         run: Get-Content -Raw ./install.ps1 | Invoke-Expression

@@ -22,7 +22,7 @@ type Diff = {
   message: string
 }
 
-const repo = process.env.GH_REPO ?? "oxdingzg/miao"
+const repo = process.env.GH_REPO ?? "mttydev/miao"
 // Keep the opencode entries: miao's history still contains upstream commits by
 // those accounts, and dropping them would leak bot commits into the changelog.
 const bot = ["actions-user", "github-actions[bot]", "opencode", "opencode-agent[bot]", "miao-agent[bot]"]

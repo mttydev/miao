@@ -329,7 +329,7 @@ async function main() {
   }
   const connection: Connection = {
     token,
-    repo: process.env.GH_REPO ?? process.env.GITHUB_REPOSITORY ?? "oxdingzg/miao",
+    repo: process.env.GH_REPO ?? process.env.GITHUB_REPOSITORY ?? "mttydev/miao",
     owner: process.env.ROADMAP_OWNER ?? "oxdingzg",
     ownerType: process.env.ROADMAP_OWNER_TYPE ?? "user",
     project: Number(process.env.ROADMAP_PROJECT ?? 1),

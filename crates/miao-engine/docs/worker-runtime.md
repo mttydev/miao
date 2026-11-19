@@ -26,7 +26,7 @@ worker configuration is rejected before the engine starts. Neither failure
 switches a native Session into the TypeScript provider loop.
 
 The compiled CLI self-execution entry and scoped manifests are addressed in
-[PR #1602](https://github.com/oxdingzg/miao/pull/1602). This diagnostic change is
+[PR #1602](https://github.com/mttydev/miao/pull/1602). This diagnostic change is
 independent and retains direct source execution. Full platform installation,
 third-party package compatibility and Rust-only product acceptance remain
 separate from these worker tests.

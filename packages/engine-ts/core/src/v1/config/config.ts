@@ -41,7 +41,7 @@ export const Info = Schema.Struct({
   }),
   command: Schema.optional(Schema.Record(Schema.String, ConfigCommandV1.Info)).annotate({
     description:
-      "Command configuration, see https://github.com/oxdingzg/miao/blob/main/packages/web/src/content/docs/commands.mdx",
+      "Command configuration, see https://github.com/mttydev/miao/blob/main/packages/web/src/content/docs/commands.mdx",
   }),
   skills: Schema.optional(ConfigSkillsV1.Info).annotate({ description: "Additional skill folder paths" }),
   references: Schema.optional(ConfigReference.Info).annotate({
@@ -109,7 +109,7 @@ export const Info = Schema.Struct({
     ),
   ).annotate({
     description:
-      "Agent configuration, see https://github.com/oxdingzg/miao/blob/main/packages/web/src/content/docs/agents.mdx",
+      "Agent configuration, see https://github.com/mttydev/miao/blob/main/packages/web/src/content/docs/agents.mdx",
   }),
   provider: Schema.optional(Schema.Record(Schema.String, ConfigProviderV1.Info)).annotate({
     description: "Custom provider configurations and model overrides",

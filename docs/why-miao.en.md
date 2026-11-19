@@ -119,7 +119,7 @@ and actual usage.
 - [Install and use](guide.en.md)
 - [Providers and models](providers.en.md)
 - [Open-source agent comparison](agent-comparison.en.md)
-- [Report an issue or suggestion](https://github.com/oxdingzg/miao/issues): include build version, configuration, task logs and expected/observed behavior
+- [Report an issue or suggestion](https://github.com/mttydev/miao/issues): include build version, configuration, task logs and expected/observed behavior
 
 Implementation references: [execution](../packages/engine-ts/core/src/session/runner/llm.ts),
 [input admission](../packages/engine-ts/core/src/session/input.ts),

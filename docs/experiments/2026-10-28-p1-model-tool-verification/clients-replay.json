@@ -33,7 +33,7 @@
         "packages/miao/test/cli/run/headless.test.ts",
         "packages/miao/test/cli/run/session-replay.test.ts",
         "packages/miao/test/engine/native-default-parity-http.test.ts",
-        "https://github.com/oxdingzg/miao/pull/1577"
+        "https://github.com/mttydev/miao/pull/1577"
       ]
     },
     {
@@ -56,7 +56,7 @@
         "crates/miao-engine/tests/acp_client_matrix.rs",
         "crates/miao-engine/docs/zed-acp-ui-acceptance-2026-10-23.md",
         "crates/miao-engine/docs/codecompanion-acp-ui-acceptance-2026-10-25.en.md",
-        "https://github.com/oxdingzg/miao/issues/1267"
+        "https://github.com/mttydev/miao/issues/1267"
       ]
     },
     {
@@ -78,7 +78,7 @@
         "packages/miao/test/server/httpapi-runtime.test.ts",
         "packages/miao/test/server/httpapi-v2-location.test.ts",
         "packages/miao/test/server/event-backpressure-http.test.ts",
-        "https://github.com/oxdingzg/miao/pull/1579"
+        "https://github.com/mttydev/miao/pull/1579"
       ]
     },
     {
@@ -100,7 +100,7 @@
         "packages/server/src/assembly.ts",
         "packages/protocol/src/api.ts",
         "packages/miao/test/server/httpapi-v2-location.test.ts",
-        "https://github.com/oxdingzg/miao/pull/1570"
+        "https://github.com/mttydev/miao/pull/1570"
       ]
     },
     {
@@ -138,7 +138,7 @@
         "Headless/fake-provider success and old editor receipts do not replace current manual-client acceptance."
       ],
       "evidence": [
-        "https://github.com/oxdingzg/miao/pull/1577",
+        "https://github.com/mttydev/miao/pull/1577",
         "packages/miao/test/cli/run/headless.test.ts",
         "packages/miao/test/engine/native-acp-sdk.test.ts",
         "crates/miao-engine/docs/zed-acp-ui-acceptance-2026-10-23.md",

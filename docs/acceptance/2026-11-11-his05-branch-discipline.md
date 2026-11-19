@@ -4,7 +4,7 @@ Item: `HIS-05` (#1985). Tree: the pull-request head for branch `feat/issue1985`
 (PR #2852), commit `9e37eda9c8`, parent `origin/main` `3fdf81b016`. Commands ran from
 `crates/miao-engine` on the macOS build host in a synced copy of this tree,
 `cargo 1.99.1`, debug profile, and the same tree's CI run
-[`42933518854`](https://github.com/oxdingzg/miao/actions/runs/42933518854) is green.
+[`42933518854`](https://github.com/mttydev/miao/actions/runs/42933518854) is green.
 A reviewer runs the same commands from the same directory anywhere. The commit that
 carries this record changes only this file and one comment, so the run for the branch tip
 is reported on the pull request rather than re-recorded here; the branch was afterwards
@@ -93,7 +93,7 @@ What this criterion still does not claim:
 | --- | --- |
 | implementation PR | #2852 (`feat/issue1985`), body opens `Implements HIS-05 (#1985): …` |
 | offline record | this file, with the receipts record it builds on |
-| CI tree | run [`42933518854`](https://github.com/oxdingzg/miao/actions/runs/42933518854) on `9e37eda9c8` |
+| CI tree | run [`42933518854`](https://github.com/mttydev/miao/actions/runs/42933518854) on `9e37eda9c8` |
 | target version | none claimed: no release contains this tree yet |
 | quality / cost / duration | none claimed: this change optimises nothing, so there is no measurement to attach |
 | live client acceptance | not exercised here — see below |

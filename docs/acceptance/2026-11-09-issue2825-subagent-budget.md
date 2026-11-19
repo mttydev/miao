@@ -27,7 +27,7 @@ unchanged, so a runaway child remains boundable by every existing mechanism.
 Local Rust compilation is barred on this workstation (rustc guard), so
 behaviour is verified by CI only.
 
-- `ci` run [`42847471956`](https://github.com/oxdingzg/miao/actions/runs/42847471956):
+- `ci` run [`42847471956`](https://github.com/mttydev/miao/actions/runs/42847471956):
   conclusion `success` at tree `1f0830f222`; `release-guard`
   (`42847471381`), `pr-management` (`42847470505`) and `pr-standards`
   (`42847471048`) all `success` on the same tree.

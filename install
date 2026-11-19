@@ -6,7 +6,7 @@ APP=miao
 # release paths (/releases/*, /raw/main/*) for networks that cannot reach
 # GitHub; GitHub itself stays as the fallback for every request.
 MIRROR_BASE="https://dl.mtty.dev"
-GITHUB_BASE="https://github.com/oxdingzg/miao"
+GITHUB_BASE="https://github.com/mttydev/miao"
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;;
@@ -43,8 +43,8 @@ Options:
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
 
 Examples:
-    curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash
-    curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash -s -- --version 0.0.1
+    curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash
+    curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash -s -- --version 0.0.1
     ./install --binary /path/to/miao
 EOF
 }
@@ -233,7 +233,7 @@ else
             http_status=$(curl -sI -o /dev/null -w "%{http_code}" "$GITHUB_BASE/releases/tag/v${requested_version}" || true)
             if [ "$http_status" = "404" ]; then
                 echo -e "${RED}Error: Release v${requested_version} not found${NC}"
-                echo -e "${MUTED}Available releases: https://github.com/oxdingzg/miao/releases${NC}"
+                echo -e "${MUTED}Available releases: https://github.com/mttydev/miao/releases${NC}"
                 exit 1
             fi
             # The mirror could not serve the tag page either; download from GitHub.
@@ -420,7 +420,7 @@ publish_binary() {
           try {
             $script = (Invoke-WebRequest -UseBasicParsing -Uri "https://dl.mtty.dev/raw/main/install.ps1").Content
           } catch {
-            $script = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/oxdingzg/miao/main/install.ps1").Content
+            $script = (Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/mttydev/miao/main/install.ps1").Content
           }
           & ([scriptblock]::Create($script)) -Binary $env:MIAO_BINARY -NoModifyPath
         '
@@ -563,6 +563,6 @@ echo -e ""
 echo -e "cd <project>  ${MUTED}# Open directory${NC}"
 echo -e "${ORANGE}miao${NC}      ${MUTED}# Run command${NC}"
 echo -e ""
-echo -e "${MUTED}For more information visit ${NC}https://github.com/oxdingzg/miao"
+echo -e "${MUTED}For more information visit ${NC}https://github.com/mttydev/miao"
 echo -e ""
 echo -e ""

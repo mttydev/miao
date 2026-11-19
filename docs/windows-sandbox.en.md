@@ -17,7 +17,7 @@ Add a Windows backend to `crates/miao-sandbox` so the guarantee matches macOS se
 2. **Git**: `winget install Git.Git`; `curl` ships with Windows 10+.
 3. **Clone** (public repo):
    ```powershell
-   git clone https://github.com/oxdingzg/miao
+   git clone https://github.com/mttydev/miao
    ```
 4. **Build and test** (only `miao-run` and `miao-sandbox` are needed; no need to build the whole native addon):
    ```powershell

@@ -30,9 +30,9 @@ jobs:
           CANDIDATE: ${{ inputs.candidate-version }}
         run: |
           curl --proto '=https' --tlsv1.2 --retry 5 --location --silent --show-error --fail \
-            -o prev.zip "https://github.com/oxdingzg/miao/releases/download/$PREVIOUS/miao-engine-darwin-x64.zip"
+            -o prev.zip "https://github.com/mttydev/miao/releases/download/$PREVIOUS/miao-engine-darwin-x64.zip"
           curl --proto '=https' --tlsv1.2 --retry 5 --location --silent --show-error --fail \
-            -o cand.zip "https://github.com/oxdingzg/miao/releases/download/$CANDIDATE/miao-engine-darwin-x64.zip"
+            -o cand.zip "https://github.com/mttydev/miao/releases/download/$CANDIDATE/miao-engine-darwin-x64.zip"
           mkdir prev cand
           ditto -x -k prev.zip prev
           ditto -x -k cand.zip cand

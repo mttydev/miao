@@ -5,7 +5,7 @@
 //! `engine_message`. Retention moves that tail out of the database — into a
 //! JSONL snapshot next to the ledger — only after every reader that could
 //! still want a row has been accounted for: the reader audit on
-//! oxdingzg/miao#2178 found the message-history INNER JOIN (fixed by
+//! mttydev/miao#2178 found the message-history INNER JOIN (fixed by
 //! materialising `engine_message.kind`), the input-command resolution (kept
 //! safe by never deleting `input.admitted`), and the export cursor (kept safe
 //! by the cut-point record this module writes and `export` honours).

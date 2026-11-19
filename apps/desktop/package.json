@@ -7,7 +7,7 @@
   "homepage": "https://mtty.dev/miao",
   "author": {
     "name": "miao",
-    "url": "https://github.com/oxdingzg/miao"
+    "url": "https://github.com/mttydev/miao"
   },
   "scripts": {
     "typecheck": "tsgo -b",

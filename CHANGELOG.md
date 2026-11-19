@@ -5652,7 +5652,7 @@ Existing windows and active tasks continue running while the installed program i
 
 ## [0.1.2] - 2026-10-04
 
-Published release: [v0.1.2](https://github.com/oxdingzg/miao/releases/tag/v0.1.2).
+Published release: [v0.1.2](https://github.com/mttydev/miao/releases/tag/v0.1.2).
 
 ### Fixed
 
@@ -5691,7 +5691,7 @@ Published release: [v0.1.2](https://github.com/oxdingzg/miao/releases/tag/v0.1.2
 
 ## [0.0.35] - 2026-10-03
 
-Published release: [v0.0.35](https://github.com/oxdingzg/miao/releases/tag/v0.0.35).
+Published release: [v0.0.35](https://github.com/mttydev/miao/releases/tag/v0.0.35).
 
 ### Removed
 
@@ -6151,7 +6151,7 @@ Published release: [v0.0.35](https://github.com/oxdingzg/miao/releases/tag/v0.0.
 
 ## [0.0.15] - 2026-09-30
 
-Published release: [v0.0.15](https://github.com/oxdingzg/miao/releases/tag/v0.0.15).
+Published release: [v0.0.15](https://github.com/mttydev/miao/releases/tag/v0.0.15).
 
 ### Fixed
 
@@ -6179,7 +6179,7 @@ Published release: [v0.0.15](https://github.com/oxdingzg/miao/releases/tag/v0.0.
 
 ## [0.0.12] - 2026-09-29
 
-Published release: [v0.0.12](https://github.com/oxdingzg/miao/releases/tag/v0.0.12). Release notes for 0.0.5–0.0.12 are available on GitHub.
+Published release: [v0.0.12](https://github.com/mttydev/miao/releases/tag/v0.0.12). Release notes for 0.0.5–0.0.12 are available on GitHub.
 
 ## [0.0.4] - 2026-09-27
 
@@ -6228,5 +6228,5 @@ Published release: [v0.0.12](https://github.com/oxdingzg/miao/releases/tag/v0.0.
 
 ### Added
 
-- Initial miao release, forked from opencode: independent versioning and update source (`oxdingzg/miao`), rebrand, and the `install` script.
+- Initial miao release, forked from opencode: independent versioning and update source (`mttydev/miao`), rebrand, and the `install` script.
 - **native** (PoC, opt-in): the `miao-native` addon with the landlock sandbox backend.

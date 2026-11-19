@@ -38,8 +38,8 @@
         "packages/core/test/project-registry.test.ts",
         "packages/miao/test/server/workspace-routing.test.ts",
         "packages/miao/test/server/httpapi-workspace.test.ts",
-        "https://github.com/oxdingzg/miao/pull/1579",
-        "https://github.com/oxdingzg/miao/pull/1573"
+        "https://github.com/mttydev/miao/pull/1579",
+        "https://github.com/mttydev/miao/pull/1573"
       ]
     },
     {
@@ -58,7 +58,7 @@
         "packages/core/src/project/worktree.ts",
         "packages/core/src/workspace-live.ts",
         "packages/core/test/project-worktree.test.ts",
-        "https://github.com/oxdingzg/miao/pull/1579"
+        "https://github.com/mttydev/miao/pull/1579"
       ]
     },
     {
@@ -74,11 +74,11 @@
         "The current daily stable command was not overwritten by the isolated verification. Open preview pairing/CI fixes #1577/#1578 are outside this release."
       ],
       "evidence": [
-        "https://github.com/oxdingzg/miao/releases/tag/v0.3.14",
-        "https://github.com/oxdingzg/miao/actions/runs/40640751458",
+        "https://github.com/mttydev/miao/releases/tag/v0.3.14",
+        "https://github.com/mttydev/miao/actions/runs/40640751458",
         "install",
         "script/install-engine.sh",
-        "https://github.com/oxdingzg/miao/pull/1577"
+        "https://github.com/mttydev/miao/pull/1577"
       ]
     },
     {
@@ -95,8 +95,8 @@
       ],
       "evidence": [
         "script/install-local.sh",
-        "https://github.com/oxdingzg/miao/pull/1577",
-        "https://github.com/oxdingzg/miao/releases/tag/v0.3.14"
+        "https://github.com/mttydev/miao/pull/1577",
+        "https://github.com/mttydev/miao/releases/tag/v0.3.14"
       ]
     }
   ]

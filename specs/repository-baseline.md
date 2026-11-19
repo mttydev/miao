@@ -2,7 +2,7 @@
 
 `packages/miao/src/engine/repository-baseline.ts` defines a separate version-one
 repository contract. It does not change the existing suite-v6 tasks or report
-identities. The first snapshot is `oxdingzg/miao` at commit
+identities. The first snapshot is `mttydev/miao` at commit
 `8ac61a6629b88939afec35d907b5570a6ce5e37a`, tree
 `c94f5e0ebfce193819d4cbecfe5ab6758327bb1f`.
 

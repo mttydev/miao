@@ -12,5 +12,5 @@ Refreshed 2026-10-04.
   at most 1600 px wide; short GIFs are 960 px, 2 fps, and under 175 KB each.
 - The website uses responsive WebP stills and smaller, controllable MP4 demos.
 
-The [shared media notes](https://github.com/oxdingzg/mtty.dev/blob/main/docs/media.md)
+The [shared media notes](https://github.com/mttydev/mtty.dev/blob/main/docs/media.md)
 describe capture isolation, feature coverage, dimensions and size budgets.

@@ -147,7 +147,7 @@ function Install-MiaoEngine {
       # the latest-release fallback below decides what that means.
       $urls = @(
         "https://dl.mtty.dev/releases/download/v$Version/$asset",
-        "https://github.com/oxdingzg/miao/releases/download/v$Version/$asset"
+        "https://github.com/mttydev/miao/releases/download/v$Version/$asset"
       )
       $downloaded = $false
       foreach ($candidate in $urls) {
@@ -161,7 +161,7 @@ function Install-MiaoEngine {
       }
       if (-not $downloaded) {
         $fallback = $true
-        $url = "https://github.com/oxdingzg/miao/releases/latest/download/$asset"
+        $url = "https://github.com/mttydev/miao/releases/latest/download/$asset"
         try {
           Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive -TimeoutSec 300
         } catch {
@@ -220,7 +220,7 @@ function Install-Miao {
   # PowerShell 5.1 may still default to TLS 1.0, which GitHub refuses.
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-  $repo = "oxdingzg/miao"
+  $repo = "mttydev/miao"
   $installDir = if ($env:MIAO_INSTALL_DIR) { $env:MIAO_INSTALL_DIR } else { Join-Path $HOME ".miao\bin" }
   $exe = Join-Path $installDir "miao.exe"
 

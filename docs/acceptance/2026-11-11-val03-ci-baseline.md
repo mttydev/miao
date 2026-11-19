@@ -1,7 +1,7 @@
 # Acceptance record — VAL-03's six baselines, read from a CI run
 
 Item: `VAL-03` (#1910). Tree: `1806d88151`, the head of `feat/issue1910` that CI run
-[`43012403931`](https://github.com/oxdingzg/miao/actions/runs/43012403931) verified
+[`43012403931`](https://github.com/mttydev/miao/actions/runs/43012403931) verified
 green; squash-merged as `97e3e8bb6e`. Criterion, quoted from the item:
 
 > Measure six user tasks: startup, finding a session, editing input, approval,
@@ -28,7 +28,7 @@ cargo test --locked --no-fail-fast \
   -- --nocapture --test-threads=1
 ```
 
-Run [`43012403931`](https://github.com/oxdingzg/miao/actions/runs/43012403931), job
+Run [`43012403931`](https://github.com/mttydev/miao/actions/runs/43012403931), job
 `tui / tui (ubuntu-latest)`, step 9 `VAL-03 baselines`: `success`. Each binary reported
 `1 passed; 0 failed` (`startup_latency`: `2 passed`), and printed:
 

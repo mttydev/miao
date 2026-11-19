@@ -25,7 +25,7 @@ This file tracks what still fails so the Windows jobs can become blocking again.
 once a fix is merged and a green Windows run proves it; make the `blocking: true` Windows
 entries in `.github/workflows/test.yml` blocking again once the table is empty.
 
-Evidence comes from runs 36954126870 and 36954890353 on `oxdingzg/miao` (first runs of the test
+Evidence comes from runs 36954126870 and 36954890353 on `mttydev/miao` (first runs of the test
 workflow on `main`). Upstream `anomalyco/opencode` is green on Windows, but runs on
 `blacksmith-4vcpu-windows-2025`; miao uses GitHub's `windows-2025` image. Later baselines:
 run 43222581978 (2026-11-12 nightly, pre-#2938: 8 core failures) and run 43363882232

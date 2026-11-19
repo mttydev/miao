@@ -104,7 +104,7 @@
   "homepage": "https://mtty.dev/miao",
   "repository": {
     "type": "git",
-    "url": "https://github.com/oxdingzg/miao"
+    "url": "https://github.com/mttydev/miao"
   },
   "license": "MIT",
   "prettier": {

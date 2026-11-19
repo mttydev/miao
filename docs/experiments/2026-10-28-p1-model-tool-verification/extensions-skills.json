@@ -88,8 +88,8 @@
         "crates/miao-engine/tests/formatter.rs",
         "crates/miao-engine/src/lsp.rs",
         "crates/miao-engine/src/formatter.rs",
-        "https://github.com/oxdingzg/miao/pull/1557",
-        "https://github.com/oxdingzg/miao/pull/1572"
+        "https://github.com/mttydev/miao/pull/1557",
+        "https://github.com/mttydev/miao/pull/1572"
       ]
     }
   ]

@@ -51,7 +51,7 @@ jobs:
 
       - name: Install miao
         if: steps.author.outputs.skip != 'true' && steps.model.outputs.enabled == 'true'
-        run: curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash
+        run: curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash
 
       - name: Check duplicates and compliance
         if: steps.author.outputs.skip != 'true' && steps.model.outputs.enabled == 'true'
@@ -199,7 +199,7 @@ jobs:
 
       - name: Install miao
         if: steps.author.outputs.skip != 'true' && steps.model.outputs.enabled == 'true'
-        run: curl -fsSL https://raw.githubusercontent.com/oxdingzg/miao/main/install | bash
+        run: curl -fsSL https://raw.githubusercontent.com/mttydev/miao/main/install | bash
 
       - name: Recheck compliance
         if: steps.author.outputs.skip != 'true' && steps.model.outputs.enabled == 'true'

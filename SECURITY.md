@@ -65,7 +65,7 @@ bridges and `miao remote` have been removed.
 ## Reporting a Security Issue
 
 Use the GitHub Security Advisory
-["Report a Vulnerability"](https://github.com/oxdingzg/miao/security/advisories/new)
+["Report a Vulnerability"](https://github.com/mttydev/miao/security/advisories/new)
 tab. It stays private until it is published.
 
 You will get an answer saying what happens next, and after that, how the fix is
