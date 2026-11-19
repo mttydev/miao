@@ -6,9 +6,9 @@ use crossterm::event::{
     EnableFocusChange, EnableMouseCapture,
 };
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+#[cfg(not(windows))]
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::Terminal;
 use std::io::Write;
@@ -16,6 +16,18 @@ use std::io::Write;
 use crate::config::{Cursor, CursorShape};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+/// The xterm sequences for the alternate screen.
+///
+/// Windows Terminal hands the app a ConPTY pipe, where crossterm decides ANSI
+/// is unsupported and implements `EnterAlternateScreen` as a console-buffer
+/// switch. That switch is not the screen the operator sees: the TUI keeps
+/// painting the visible buffer, and after exit the shell and the epilogue land
+/// on top of the leftover frame. The terminal itself does understand the xterm
+/// pair, so Windows writes it directly and flushes it before any mode restore
+/// that can fail.
+const ENTER_ALTERNATE: &[u8] = b"\x1b[?1049h";
+const LEAVE_ALTERNATE: &[u8] = b"\x1b[?1049l";
 
 /// Present one frame atomically. Streaming turns repaint the transcript many
 /// times a second, and terminals that apply partial updates mid-frame show
@@ -71,9 +83,13 @@ pub fn init(preferences: Preferences) -> io::Result<Tui> {
 /// Mouse capture and the cursor shape are terminal state, so they are turned
 /// off on the way out whether or not they were on.
 pub fn restore() {
+    let mut stdout = io::stdout();
+    // Leave the screen on its own and flush it first: `execute!` stops at the
+    // first failing command, so a Windows mode restore queued after the leave
+    // could abort before the leave reached the terminal.
+    let _ = leave_alternate(&mut stdout);
     let _ = execute!(
-        io::stdout(),
-        LeaveAlternateScreen,
+        stdout,
         DisableBracketedPaste,
         DisableFocusChange,
         DisableMouseCapture,
@@ -99,12 +115,38 @@ pub fn resume(terminal: &mut Tui, preferences: Preferences) -> io::Result<()> {
 /// entry points used to spell out.
 fn enter(preferences: Preferences) -> io::Result<()> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    let mut stdout = io::stdout();
+    enter_alternate(&mut stdout)?;
+    execute!(stdout, EnableBracketedPaste)?;
     if preferences.focus_reporting {
         execute!(io::stdout(), EnableFocusChange)?;
     }
     apply(preferences);
     Ok(())
+}
+
+fn enter_alternate(writer: &mut impl Write) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        writer.write_all(ENTER_ALTERNATE)?;
+        writer.flush()
+    }
+    #[cfg(not(windows))]
+    {
+        execute!(writer, EnterAlternateScreen)
+    }
+}
+
+fn leave_alternate(writer: &mut impl Write) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        writer.write_all(LEAVE_ALTERNATE)?;
+        writer.flush()
+    }
+    #[cfg(not(windows))]
+    {
+        execute!(writer, LeaveAlternateScreen)
+    }
 }
 
 /// Fullscreen repaint without a cursor-position query. `Terminal::clear`
@@ -178,5 +220,20 @@ mod tests {
             cursor_style(cursor(CursorShape::Default, true)),
             SetCursorStyle::DefaultUserShape
         ));
+    }
+
+    /// The alternate screen is what hides the frame from the shell. The pair
+    /// has to be written explicitly on Windows, because crossterm's console
+    /// buffer fallback is not the screen the terminal shows; the exit half is
+    /// flushed before the mode restores that can fail.
+    #[test]
+    fn the_alternate_screen_is_written_and_flushed_as_the_xterm_pair() {
+        let mut entered = Vec::new();
+        enter_alternate(&mut entered).expect("enter the alternate screen");
+        assert_eq!(entered, ENTER_ALTERNATE);
+
+        let mut left = Vec::new();
+        leave_alternate(&mut left).expect("leave the alternate screen");
+        assert_eq!(left, LEAVE_ALTERNATE);
     }
 }
