@@ -7,13 +7,113 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size};
 use ratatui::Terminal;
 use std::io::Write;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::{Cursor, CursorShape};
 
-pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub type Tui = Terminal<WidthAwareBackend<CrosstermBackend<Stdout>>>;
+
+/// Wraps a backend whose cursor prediction advances one column per printed
+/// cell. A wide glyph advances the real terminal cursor by two, so within one
+/// frame every changed cell printed after it lands one column to the right —
+/// on Windows that was the gapped sidebar divider and the detached glyphs
+/// mid-transcript (#3216). The frame's changed cells are emitted in runs that
+/// end after a wide glyph; each new run makes the inner backend start with its
+/// own cursor move, which re-syncs the prediction at the true cell.
+pub struct WidthAwareBackend<B> {
+    inner: B,
+}
+
+impl<B> WidthAwareBackend<B> {
+    pub fn new(inner: B) -> Self {
+        Self { inner }
+    }
+
+    /// Hands the wrapped backend back, so a caller can reach the writer it
+    /// owns.
+    pub fn into_inner(self) -> B {
+        self.inner
+    }
+}
+
+impl<B: Backend> Backend for WidthAwareBackend<B> {
+    type Error = B::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        let mut run = Vec::new();
+        for cell in content {
+            let wide = cell.2.symbol().width() > 1;
+            run.push(cell);
+            if wide {
+                self.inner.draw(run.drain(..))?;
+            }
+        }
+        if !run.is_empty() {
+            self.inner.draw(run.drain(..))?;
+        }
+        Ok(())
+    }
+
+    fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
+        self.inner.append_lines(n)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Backend::flush(&mut self.inner)
+    }
+}
+
+/// `draw_frame` writes the synchronized-update markers straight through the
+/// backend's writer, so the wrapper passes `io::Write` through too.
+impl<W: io::Write> io::Write for WidthAwareBackend<CrosstermBackend<W>> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.inner)
+    }
+}
 
 /// The xterm sequences for the alternate screen.
 ///
@@ -75,7 +175,7 @@ pub struct Preferences {
 
 pub fn init(preferences: Preferences) -> io::Result<Tui> {
     enter(preferences)?;
-    Terminal::new(CrosstermBackend::new(io::stdout()))
+    Terminal::new(WidthAwareBackend::new(CrosstermBackend::new(io::stdout())))
 }
 
 /// Mouse capture and the cursor shape are terminal state, so they are turned
@@ -174,6 +274,8 @@ pub fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
 
     #[test]
@@ -219,5 +321,63 @@ mod tests {
         let mut left = Vec::new();
         leave_alternate(&mut left).expect("leave the alternate screen");
         assert_eq!(left, LEAVE_ALTERNATE);
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("shared buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SharedBuf {
+        fn data(&self) -> Vec<u8> {
+            self.0.lock().expect("shared buffer").clone()
+        }
+    }
+
+    /// One frame whose diff is `中 a b` on one row. The real terminal advances
+    /// two columns for the glyph; with the runs split after it, `a` and `b`
+    /// print on their own columns instead of drifting one to the right. An
+    /// emulator, not the buffer, is what judges the byte stream — this is the
+    /// failure class `TestBackend` cannot see.
+    #[test]
+    fn the_cell_after_a_wide_glyph_prints_at_its_own_column() {
+        let shared = SharedBuf::default();
+        let mut backend = WidthAwareBackend::new(CrosstermBackend::new(shared.clone()));
+        let mut cells = [Cell::default(), Cell::default(), Cell::default()];
+        cells[0].set_symbol("中");
+        cells[1].set_symbol("a");
+        cells[2].set_symbol("b");
+        let content = [
+            (0u16, 0u16, &cells[0]),
+            (1u16, 0u16, &cells[1]),
+            (2u16, 0u16, &cells[2]),
+        ];
+        backend.draw(content.into_iter()).expect("draw one row");
+        let bytes = shared.data();
+
+        assert!(
+            bytes.windows(6).any(|window| window == b"\x1b[1;2H"),
+            "a cursor move must separate the glyph from the next cell: {bytes:?}"
+        );
+        let mut parser = vt100::Parser::new(1, 10, 0);
+        parser.process(&bytes);
+        let screen = parser.screen();
+        // The emulator owns the overlap at the glyph itself: printing into the
+        // glyph's second half may erase it, and `cell(0, 0)` then reads empty.
+        // What the fix guarantees is that nothing drifts — `a` and `b` land on
+        // the columns the app set, not one to the right of the glyph's
+        // two-column advance.
+        assert_eq!(screen.cell(0, 1).expect("cell").contents(), "a");
+        assert_eq!(screen.cell(0, 2).expect("cell").contents(), "b");
+        assert_eq!(screen.cell(0, 3).expect("cell").contents(), "");
     }
 }
