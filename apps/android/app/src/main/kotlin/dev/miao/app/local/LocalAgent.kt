@@ -119,7 +119,7 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
         } catch (failure: Throwable) {
             mcpTools = emptyList()
             mcp = null
-            mcpError = if (failure is McpException) failure.text else "MCP 连接失败"
+            mcpError = if (failure is McpException) failure.text else context.getString(R.string.local_mcp_connect_failed)
         }
     }
 
@@ -285,9 +285,9 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
             active.execute().use { response ->
                 if (!response.isSuccessful) {
                     val preview = response.body?.bytes()?.take(400)?.toByteArray()?.toString(Charsets.UTF_8) ?: ""
-                    throw LocalAgentException("服务商返回 ${response.code}：$preview")
+                    throw LocalAgentException(context.getString(R.string.local_error_provider_status, response.code, preview))
                 }
-                val source = response.body?.source() ?: throw LocalAgentException("模型返回了无法解析的内容")
+                val source = response.body?.source() ?: throw LocalAgentException(context.getString(R.string.local_error_unparseable_response))
                 while (!source.exhausted()) {
                     if (!busy) break
                     val line = source.readUtf8Line() ?: break
@@ -342,13 +342,13 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
                 ),
                 streamed = streamed,
             )
-            else -> Reply(text.ifEmpty { "（模型没有返回内容）" }, null, streamed)
+            else -> Reply(text.ifEmpty { context.getString(R.string.local_error_empty_reply) }, null, streamed)
         }
     }
 
     private fun endpoint(provider: LocalProvider): String {
         val trimmed = provider.baseURL.trim()
-        if (trimmed.isEmpty()) throw LocalAgentException("接口地址无效")
+        if (trimmed.isEmpty()) throw LocalAgentException(context.getString(R.string.local_error_invalid_endpoint))
         val base = if (trimmed.endsWith("/")) trimmed.dropLast(1) else trimmed
         return if (base.endsWith("/chat/completions")) base else "$base/chat/completions"
     }
@@ -427,7 +427,7 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
     }
 
     private suspend fun perform(call: ToolCall) {
-        updateMessages { it.add(LocalMessage(role = LocalMessage.Role.Tool, text = "调用 ${call.name}", toolName = call.name)) }
+        updateMessages { it.add(LocalMessage(role = LocalMessage.Role.Tool, text = context.getString(R.string.local_tool_calling, call.name), toolName = call.name)) }
         persist()
         val arguments = try {
             CanonicalJson.parse(call.arguments).objectMap ?: emptyMap()
@@ -436,7 +436,7 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
         }
         val result = try {
             if (!allowed(call)) {
-                "用户拒绝了这次操作。"
+                context.getString(R.string.local_tool_denied)
             } else {
                 if (mcpTools.any { it.name == call.name }) {
                     callMcp(call)
@@ -446,12 +446,12 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
                         "read_file" -> read(arguments["path"]?.string ?: "")
                         "write_file" -> write(arguments["path"]?.string ?: "", arguments["content"]?.string ?: "")
                         "fetch_url" -> fetch(arguments["url"]?.string ?: "")
-                        else -> "未知工具：${call.name}"
+                        else -> context.getString(R.string.local_tool_unknown, call.name)
                     }
                 }
             }
         } catch (failure: Throwable) {
-            "失败：${message(failure)}"
+            context.getString(R.string.local_tool_failed, message(failure))
         }
         updateMessages { it.add(LocalMessage(role = LocalMessage.Role.Tool, text = result, toolName = call.name)) }
         persist()
@@ -463,22 +463,22 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
         val base = workspace.canonicalPath
         val target = candidate.canonicalPath
         if (target != base && !target.startsWith(base + File.separator)) {
-            throw LocalAgentException("路径超出了本机工作区")
+            throw LocalAgentException(context.getString(R.string.local_error_path_outside))
         }
         return File(target)
     }
 
     private fun list(path: String): String {
         val entries = resolve(path).list()?.sorted() ?: emptyList()
-        return entries.ifEmpty { listOf("（空目录）") }.joinToString("\n")
+        return entries.ifEmpty { listOf(context.getString(R.string.local_list_empty)) }.joinToString("\n")
     }
 
     private fun read(path: String): String {
         val file = resolve(path)
-        if (!file.isFile) throw LocalAgentException("文件不存在")
+        if (!file.isFile) throw LocalAgentException(context.getString(R.string.local_error_file_missing))
         val bytes = file.inputStream().use { it.readNBytes(200_000) }
         val text = String(bytes, Charsets.UTF_8)
-        return text.ifEmpty { "（空文件）" }
+        return text.ifEmpty { context.getString(R.string.local_file_empty) }
     }
 
     private fun write(path: String, content: String): String {
@@ -488,25 +488,25 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
         temporary.writeText(content)
         if (!temporary.renameTo(file)) {
             file.delete()
-            if (!temporary.renameTo(file)) throw LocalAgentException("写入失败")
+            if (!temporary.renameTo(file)) throw LocalAgentException(context.getString(R.string.local_error_write_failed))
         }
-        return "已写入 ${file.name}（${content.toByteArray().size} 字节）"
+        return context.getString(R.string.local_write_done, file.name, content.toByteArray().size)
     }
 
     private suspend fun callMcp(call: ToolCall): String {
-        val client = mcp ?: return "MCP 未连接"
+        val client = mcp ?: return context.getString(R.string.local_error_mcp_not_connected)
         val arguments = try {
             CanonicalJson.parse(call.arguments)
         } catch (_: JsonParseException) {
             JsonValue.obj()
         }
         val result = client.callTool(call.name, arguments)
-        return if (result.isError) "失败：${result.content}" else result.content
+        return if (result.isError) context.getString(R.string.local_tool_failed, result.content) else result.content
     }
 
     private fun fetch(value: String): String = java.net.URI(value).let { uri ->
         val scheme = uri.scheme?.lowercase()
-        if (scheme != "https" && scheme != "http") throw LocalAgentException("接口地址无效")
+        if (scheme != "https" && scheme != "http") throw LocalAgentException(context.getString(R.string.local_error_invalid_endpoint))
         val request = Request.Builder().url(value).get().build()
         val active = client.newCall(request)
         call = active
@@ -521,7 +521,7 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
     }
 
     private fun message(failure: Throwable): String =
-        if (failure is LocalAgentException) failure.text else failure.message ?: "本机助手暂时不可用"
+        if (failure is LocalAgentException) failure.text else failure.message ?: context.getString(R.string.local_error_unavailable)
 
     private fun updateMessages(transform: (MutableList<LocalMessage>) -> Unit) {
         val session = sessions.firstOrNull { it.id == currentID } ?: return
@@ -587,7 +587,7 @@ class LocalAgent(private val context: Context, private val scope: CoroutineScope
         temporary.writeBytes(bytes)
         if (!temporary.renameTo(file)) {
             file.delete()
-            if (!temporary.renameTo(file)) throw LocalAgentException("保存失败")
+            if (!temporary.renameTo(file)) throw LocalAgentException(context.getString(R.string.local_error_save_failed))
         }
     }
 
