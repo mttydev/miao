@@ -969,19 +969,11 @@ impl Transcript {
     /// a snapshot, which is the engine's own projection and cannot drift from
     /// the journal; only the display diff and the terminal failure live on
     /// events alone, so both are carried here.
-    /// Forget a classified stop and the row it painted. A pause is a state, not
-    /// a message: once the loop re-arms or a new drain starts, the Session is
-    /// not paused any more, and a lingering `paused:` row beside a finished
-    /// turn reads as though it still were.
+    /// Forget a classified stop. A pause is a state, not a message: it says
+    /// what the loop is waiting on right now, and it ends the moment the loop
+    /// re-arms or the next drain starts.
     fn clear_pause(&mut self) {
         self.paused = None;
-        self.entries.retain(|entry| {
-            !matches!(
-                entry,
-                Entry::Context { source, text }
-                    if source == "engine" && text.starts_with("paused: ")
-            )
-        });
     }
 
     pub fn apply_event(&mut self, seq: u64, kind: &str, data: &Value) {
@@ -992,26 +984,20 @@ impl Transcript {
             "tool.completed" => self.push_display(data),
             // A classified stop is a status fact, not a message: the engine
             // already persists the full notice as an injected-context message,
-            // so this only marks where the loop paused. A session that pauses
-            // once per turn would otherwise paint one identical block per
-            // pause on every resume, which buried the conversation; the newest
-            // entry replaces the previous one, so exactly one pause stays.
+            // so this only records what the loop is waiting on. It is painted
+            // beside the composer, not in the transcript: a row there would be
+            // re-synthesized at every drain end and read as a message that
+            // never clears while a background job is still running.
             "loop.stopped" if self.paused.as_ref().is_none_or(|(at, _)| *at < seq) => {
                 let reason = data["reason"].as_str().unwrap_or("stopped");
                 let text = match data["item"].as_str() {
                     Some(item) => format!("{reason} · {item}"),
                     None => reason.to_string(),
                 };
-                self.clear_pause();
-                self.entries.push(Entry::Context {
-                    source: "engine".into(),
-                    text: format!("paused: {text}"),
-                });
                 self.paused = Some((seq, text));
             }
-            // The row marked a state that has ended: the loop re-armed itself,
-            // or the next drain started. The engine's own notice stays in the
-            // history, so the row is only worth showing while it is current.
+            // The state ended: the loop re-armed itself, or the next drain
+            // started. The engine's own notice stays in the history.
             "loop.continuation" | "loop.armed" | "run.started" => self.clear_pause(),
             _ => {}
         }
@@ -1619,45 +1605,47 @@ mod tests {
     }
 
     /// A drain can end for a reason the operator must be able to read: blocked
-    /// item, unchanged list, goal still open. The engine records it, so the
-    /// view has to show it instead of looking idle.
+    /// item, unchanged list, goal still open. It is a state, so the transcript
+    /// records it instead of painting a message: the engine already keeps its
+    /// own notice in history, and a synthesized row was rebuilt at every drain
+    /// end for as long as the reason held, reading like a message that never
+    /// cleared.
     #[test]
-    fn a_classified_stop_reaches_the_transcript_with_its_reason() {
+    fn a_classified_stop_is_a_state_not_a_transcript_row() {
         let mut transcript = Transcript::default();
         transcript.apply_event(
             7,
             "loop.stopped",
             &json!({"reason": "blocked", "item": "memory domain"}),
         );
-        let Entry::Context { source, text } = transcript.entries.last().expect("a row") else {
-            panic!("a stop is context, not a message: {:?}", transcript.entries);
-        };
-        assert_eq!(source, "engine");
+        let (at, text) = transcript.paused.clone().expect("a pause");
+        assert_eq!(at, 7);
         assert!(text.contains("blocked"), "{text}");
         assert!(text.contains("memory domain"), "{text}");
+        assert!(
+            transcript.entries.is_empty(),
+            "a stop is state, not a message: {:?}",
+            transcript.entries
+        );
 
-        // A replay of the same event must not paint a second row, and a
-        // continuation clears the state because the Session is moving again.
+        // Replaying the same event keeps one state, and a continuation clears
+        // it because the Session is moving again.
         transcript.apply_event(
             7,
             "loop.stopped",
             &json!({"reason": "blocked", "item": "memory domain"}),
         );
-        assert_eq!(transcript.entries.len(), 1, "{:?}", transcript.entries);
+        assert_eq!(transcript.paused.as_ref().map(|(at, _)| *at), Some(7));
         transcript.apply_event(9, "loop.continuation", &json!({}));
         assert!(transcript.paused.is_none());
-        assert!(
-            transcript.entries.is_empty(),
-            "the row marks a state that ended: {:?}",
-            transcript.entries
-        );
+        assert!(transcript.entries.is_empty(), "{:?}", transcript.entries);
     }
 
-    /// The pause row is a state, not a message. A "waiting" stop that
-    /// auto-resumed used to leave `paused: waiting` above the composer for the
-    /// rest of the Session, beside a turn that had already finished.
+    /// The pause is a state, not a message. A "waiting" stop that auto-resumed
+    /// used to leave `paused: waiting` above the composer for the rest of the
+    /// Session, beside a turn that had already finished.
     #[test]
-    fn a_new_run_clears_the_pause_row_it_supersedes() {
+    fn a_new_run_clears_the_pause_it_supersedes() {
         let mut transcript = Transcript::default();
         transcript.apply_event(4, "loop.stopped", &json!({"reason": "waiting"}));
         assert!(transcript.paused.is_some());
@@ -1671,10 +1659,8 @@ mod tests {
     }
 
     /// A session that pauses once per turn records one stop each time, and a
-    /// resume replays all of them. Each replay used to add its own block, so a
-    /// session that waited on background work came back as a wall of identical
-    /// rows. Only the newest pause stays; the engine's own notice still keeps
-    /// the detail in history.
+    /// resume replays all of them. Only the newest pause survives; the engine's
+    /// own notice still keeps the detail in history.
     #[test]
     fn replaying_many_stops_keeps_only_the_newest_pause() {
         let mut transcript = Transcript::default();
@@ -1682,19 +1668,13 @@ mod tests {
         transcript.apply_event(8, "loop.continuation", &json!({}));
         transcript.apply_event(12, "loop.stopped", &json!({"reason": "todo-stale"}));
         transcript.apply_event(19, "loop.stopped", &json!({"reason": "waiting"}));
-        let pauses: Vec<&str> = transcript
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::Context { source, text }
-                    if source == "engine" && text.starts_with("paused: ") =>
-                {
-                    Some(text.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(pauses, ["paused: waiting"], "{:?}", transcript.entries);
+        assert_eq!(
+            transcript.paused,
+            Some((19, "waiting".to_string())),
+            "{:?}",
+            transcript.entries
+        );
+        assert!(transcript.entries.is_empty(), "{:?}", transcript.entries);
     }
 
     #[test]
