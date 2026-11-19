@@ -4,7 +4,7 @@ use std::process::ExitCode;
 const USAGE: &str =
     "usage: miao-tui [--workspace <dir>] [--db <engine.db>] [--model <provider/model>]
                   [--config-dir <dir>] [--session <id>] [--continue] [--prompt <text>]
-                  [--auto] [--fork] [--remote-host <control.json>]";
+                  [--ask] [--fork] [--remote-host <control.json>]";
 
 /// The release build injects the product version; a source build falls back to
 /// the crate's own version.
@@ -122,7 +122,9 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Invocation, String> {
     let mut session: Option<String> = None;
     let mut continue_last = false;
     let mut prompt: Option<String> = None;
-    let mut auto = false;
+    // Approval-free is the default: interruptions lose the task's momentum.
+    // `--ask` restores per-call approvals for owners who want the gate.
+    let mut auto = true;
     let mut fork = false;
     let mut agent: Option<String> = None;
     let mut remote_host: Option<PathBuf> = None;
@@ -160,6 +162,12 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Invocation, String> {
                     return Err("--auto takes no value".into());
                 }
                 auto = true;
+            }
+            "--ask" => {
+                if inline.is_some() {
+                    return Err("--ask takes no value".into());
+                }
+                auto = false;
             }
             "--fork" => {
                 if inline.is_some() {
@@ -251,5 +259,22 @@ mod tests {
             panic!("expected a run");
         };
         assert_eq!(options.remote_host, Some(PathBuf::from("control.json")));
+    }
+
+    /// Approval-free is the product default: a plain launch forwards
+    /// `--auto-approve`, and `--ask` is the only way back to per-call gates.
+    #[test]
+    fn a_plain_launch_runs_approval_free_and_ask_restores_the_gate() {
+        let parsed = parse(std::iter::empty().map(str::to_string)).expect("empty parses");
+        let Invocation::Run(options) = parsed else {
+            panic!("expected a run");
+        };
+        assert!(options.auto, "approval-free is the default");
+
+        let parsed = parse(["--ask"].into_iter().map(str::to_string)).expect("--ask parses");
+        let Invocation::Run(options) = parsed else {
+            panic!("expected a run");
+        };
+        assert!(!options.auto, "--ask restores the approval gate");
     }
 }
