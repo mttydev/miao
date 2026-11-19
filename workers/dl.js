@@ -1,11 +1,11 @@
-// dl.mtty.dev — a GitHub-shaped release mirror for miao.
+// dl.mtty.dev — a GitHub-shaped release mirror for miao and mtty.
 //
 // Operators on networks that cannot reach github.com still install and
 // upgrade through the published `install` script and `miao upgrade`; both
-// speak GitHub release paths, so this worker mirrors the repository's
-// release surface instead of inventing a second URL scheme. Only two path
-// families are proxied — everything else is refused, keeping the worker
-// from becoming a general github.com proxy:
+// speak GitHub release paths, so this worker mirrors the repositories'
+// release surfaces instead of inventing a second URL scheme. Only the path
+// families below are proxied — everything else is refused, keeping the
+// worker from becoming a general github.com proxy:
 //
 //   /releases/latest            resolves the tag here and redirects to the
 //                               mirror's own tag path, so `curl -I` Location
@@ -19,6 +19,8 @@
 //                               updater's redirect follow)
 //   /raw/main/install{,.ps1}    the install scripts, served straight from
 //                               raw.githubusercontent.com
+//   /mtty/releases/…            the mtty release surface, the same shapes
+//                               as /releases/… one level deeper
 //
 // Deploy from this directory with a Cloudflare account that owns the
 // mtty.dev zone: `wrangler deploy` binds dl.mtty.dev as a custom domain.
@@ -28,8 +30,12 @@ export default {
     const path = url.pathname;
     const origin = `${url.protocol}//${url.host}`;
 
-    if (path === "/releases/latest") {
-      const upstream = await fetch("https://github.com/mttydev/miao/releases/latest", {
+    const mtty = path.startsWith("/mtty/");
+    const route = mtty ? path.slice("/mtty".length) : path;
+    const repo = mtty ? "mtty" : "miao";
+
+    if (route === "/releases/latest") {
+      const upstream = await fetch(`https://github.com/mttydev/${repo}/releases/latest`, {
         redirect: "manual",
       });
       const location = upstream.headers.get("location");
@@ -37,14 +43,14 @@ export default {
         return new Response("mirror: upstream did not redirect", { status: 502 });
       }
       const tag = location.split("/").pop();
-      return Response.redirect(`${origin}/releases/tag/${tag}`, 302);
+      return Response.redirect(`${origin}${mtty ? "/mtty" : ""}/releases/tag/${tag}`, 302);
     }
 
     let upstream;
-    if (path.startsWith("/releases/")) {
-      upstream = `https://github.com/mttydev/miao${path}`;
-    } else if (path === "/raw/main/install" || path === "/raw/main/install.ps1") {
-      upstream = `https://raw.githubusercontent.com/mttydev/miao/main${path.slice("/raw/main".length)}`;
+    if (route.startsWith("/releases/")) {
+      upstream = `https://github.com/mttydev/${repo}${route}`;
+    } else if (!mtty && (route === "/raw/main/install" || route === "/raw/main/install.ps1")) {
+      upstream = `https://raw.githubusercontent.com/mttydev/miao/main${route.slice("/raw/main".length)}`;
     } else {
       return new Response("not found", { status: 404 });
     }
