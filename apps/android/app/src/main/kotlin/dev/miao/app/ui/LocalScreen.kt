@@ -200,6 +200,15 @@ fun LocalScreen(agent: LocalAgent) {
                     Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    val themeContext = LocalContext.current
+                    Text("外观", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row {
+                        androidx.compose.material3.Checkbox(
+                            checked = ThemePrefs.dynamic,
+                            onCheckedChange = { ThemePrefs.set(themeContext, it) },
+                        )
+                        Text("跟随系统壁纸取色（Material You，Android 12+）", fontSize = 12.sp)
+                    }
                     Text("工作区：${agent.workspace.path}", fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                     Row {
                         androidx.compose.material3.Checkbox(
