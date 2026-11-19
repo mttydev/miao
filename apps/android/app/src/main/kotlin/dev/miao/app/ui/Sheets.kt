@@ -27,6 +27,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -36,6 +37,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import dev.miao.app.AppModel
 import dev.miao.app.HostClient
 import dev.miao.app.ModelChoice
+import dev.miao.app.R
 import kotlinx.coroutines.launch
 
 @Composable
@@ -47,32 +49,32 @@ fun AccountDialog(model: AppModel, onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (model.accountSignedIn) "中继账号" else "登录中继") },
+        title = { Text(if (model.accountSignedIn) stringResource(R.string.relay_account) else stringResource(R.string.relay_signin_title)) },
         text = {
             Column(
                 modifier = Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (!model.accountSignedIn) {
-                    Text("中继地址（留空使用默认 ${model.defaultAccountURL}）", fontSize = 12.sp)
+                    Text(stringResource(R.string.account_relay_url_hint, model.defaultAccountURL), fontSize = 12.sp)
                     OutlinedTextField(
                         value = origin,
                         onValueChange = { origin = it },
-                        label = { Text("HTTPS 中继地址") },
+                        label = { Text(stringResource(R.string.account_relay_url_label)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
                         value = email,
                         onValueChange = { email = it },
-                        label = { Text("邮箱") },
+                        label = { Text(stringResource(R.string.account_email)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
                         value = password,
                         onValueChange = { password = it },
-                        label = { Text("密码") },
+                        label = { Text(stringResource(R.string.account_password)) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth(),
@@ -84,26 +86,27 @@ fun AccountDialog(model: AppModel, onDismiss: () -> Unit) {
                             password = ""
                         },
                         enabled = !model.accountBusy && email.isNotBlank() && password.isNotBlank(),
-                    ) { Text(if (model.accountBusy) "登录中…" else "登录") }
+                    ) { Text(if (model.accountBusy) stringResource(R.string.account_signing_in) else stringResource(R.string.account_sign_in)) }
                     return@Column
                 }
                 Text(model.accountURL, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                 model.accountError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { model.refreshDirectory() }) { Text("刷新电脑") }
-                    OutlinedButton(onClick = { model.signOut() }, enabled = !model.accountBusy) { Text("退出登录") }
+                    OutlinedButton(onClick = { model.refreshDirectory() }) { Text(stringResource(R.string.refresh_computers)) }
+                    OutlinedButton(onClick = { model.signOut() }, enabled = !model.accountBusy) { Text(stringResource(R.string.account_sign_out)) }
                 }
                 if (model.discoveredHosts.isNotEmpty()) {
-                    Text("账号电脑", style = MaterialTheme.typography.titleSmall)
+                    Text(stringResource(R.string.account_hosts_header), style = MaterialTheme.typography.titleSmall)
                     model.discoveredHosts.forEach { host ->
-                        Text("${host.name} · " + if (host.online) "在线" else "离线", fontSize = 12.sp)
+                        val status = if (host.online) stringResource(R.string.host_online) else stringResource(R.string.host_offline)
+                        Text("${host.name} · $status", fontSize = 12.sp)
                     }
                 }
                 HorizontalDivider()
                 Row {
-                    Text("同账号设备注册", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.enrollment_header), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                     TextButton(onClick = { showEnrollment = !showEnrollment }) {
-                        Text(if (showEnrollment) "收起" else "展开")
+                        Text(if (showEnrollment) stringResource(R.string.common_collapse) else stringResource(R.string.common_expand))
                     }
                 }
                 if (!showEnrollment) return@Column
@@ -112,49 +115,49 @@ fun AccountDialog(model: AppModel, onDismiss: () -> Unit) {
                         checked = model.enrollmentSignerConsent,
                         onCheckedChange = { model.enrollmentSignerConsent = it },
                     )
-                    Text("我确认在电脑上把此设备选为账号签名设备", fontSize = 12.sp)
+                    Text(stringResource(R.string.enrollment_confirm_statement), fontSize = 12.sp)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = { model.initializeAccountSigner() },
                         enabled = model.enrollmentSignerConsent && !model.enrollmentBusy,
-                    ) { Text("初始化签名设备") }
+                    ) { Text(stringResource(R.string.enrollment_init_signer)) }
                     OutlinedButton(onClick = { model.createEnrollmentRequest() }, enabled = !model.enrollmentBusy) {
-                        Text("生成注册码")
+                        Text(stringResource(R.string.enrollment_gen_code))
                     }
                 }
                 if (model.enrollmentSigner.isNotEmpty()) {
-                    Text("签名公钥：${model.enrollmentSigner}", fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    Text(stringResource(R.string.enrollment_signer_key, model.enrollmentSigner), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                 }
                 if (model.enrollmentRequest.isNotEmpty()) {
-                    Text("本机注册码（交给已信任设备）", fontSize = 11.sp)
+                    Text(stringResource(R.string.enrollment_local_code), fontSize = 11.sp)
                     Text(model.enrollmentRequest, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                 }
                 OutlinedTextField(
                     value = model.enrollmentIncoming,
                     onValueChange = { model.enrollmentIncoming = it },
-                    label = { Text("新设备注册码（批准用）") },
+                    label = { Text(stringResource(R.string.enrollment_new_code_label)) },
                     modifier = Modifier.fillMaxWidth(),
                     maxLines = 4,
                 )
                 OutlinedButton(onClick = { model.approveEnrollmentRequest() }, enabled = !model.enrollmentBusy) {
-                    Text("批准新设备")
+                    Text(stringResource(R.string.enrollment_approve_device))
                 }
                 if (model.enrollmentResponse.isNotEmpty()) {
-                    Text("批准结果（交给新设备）", fontSize = 11.sp)
+                    Text(stringResource(R.string.enrollment_result_label), fontSize = 11.sp)
                     Text(model.enrollmentResponse, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                 }
                 OutlinedTextField(
                     value = model.enrollmentApproved,
                     onValueChange = { model.enrollmentApproved = it },
-                    label = { Text("新设备：粘贴批准结果") },
+                    label = { Text(stringResource(R.string.enrollment_paste_result)) },
                     modifier = Modifier.fillMaxWidth(),
                     maxLines = 4,
                 )
                 OutlinedTextField(
                     value = model.enrollmentPin,
                     onValueChange = { model.enrollmentPin = it },
-                    label = { Text("批准设备的签名公钥") },
+                    label = { Text(stringResource(R.string.enrollment_signer_key_label)) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                 )
@@ -163,43 +166,45 @@ fun AccountDialog(model: AppModel, onDismiss: () -> Unit) {
                         checked = model.enrollmentIndependentPin,
                         onCheckedChange = { model.enrollmentIndependentPin = it },
                     )
-                    Text("我已通过独立渠道核对签名公钥", fontSize = 12.sp)
+                    Text(stringResource(R.string.enrollment_verify_statement), fontSize = 12.sp)
                 }
                 OutlinedButton(onClick = { model.receiveEnrollmentApproval() }, enabled = !model.enrollmentBusy) {
-                    Text("完成注册")
+                    Text(stringResource(R.string.enrollment_finish))
                 }
                 model.enrollmentError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
-                if (model.enrollmentComplete) Text("注册完成", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
-                if (model.enrollmentBusy) Text("处理中…", fontSize = 12.sp)
+                if (model.enrollmentComplete) Text(stringResource(R.string.enrollment_done), color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                if (model.enrollmentBusy) Text(stringResource(R.string.enrollment_busy), fontSize = 12.sp)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } },
     )
 }
 
 @Composable
 fun PairingDialog(model: AppModel, initialLink: String, onDismiss: () -> Unit) {
     var link by rememberSaveable { mutableStateOf(initialLink) }
-    var label by rememberSaveable { mutableStateOf("Android 设备") }
+    val defaultLabel = stringResource(R.string.pairing_default_device)
+    var label by rememberSaveable { mutableStateOf(defaultLabel) }
+    val scanPrompt = stringResource(R.string.pairing_scan_prompt)
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let { link = it }
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("配对电脑") },
+        title = { Text(stringResource(R.string.pairing_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = link,
                     onValueChange = { link = it },
-                    label = { Text("配对链接（miao://pair#…）") },
+                    label = { Text(stringResource(R.string.pairing_link_label)) },
                     modifier = Modifier.fillMaxWidth(),
                     maxLines = 3,
                 )
                 OutlinedTextField(
                     value = label,
                     onValueChange = { label = it },
-                    label = { Text("设备名称") },
+                    label = { Text(stringResource(R.string.pairing_device_label)) },
                     singleLine = true,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -207,20 +212,20 @@ fun PairingDialog(model: AppModel, initialLink: String, onDismiss: () -> Unit) {
                         scanLauncher.launch(
                             ScanOptions().apply {
                                 setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                setPrompt("扫描电脑上的配对二维码")
+                                setPrompt(scanPrompt)
                                 setBeepEnabled(false)
                                 setOrientationLocked(false)
                             },
                         )
-                    }) { Text("扫描二维码") }
+                    }) { Text(stringResource(R.string.pairing_scan)) }
                     Button(
                         onClick = { model.pair(link, label) },
                         enabled = link.isNotBlank() && !model.pairingBusy(),
-                    ) { Text("开始配对") }
+                    ) { Text(stringResource(R.string.pairing_start)) }
                 }
                 model.pairing?.let { Text(it, fontSize = 13.sp) }
                 model.fingerprint?.let {
-                    Text("设备指纹：$it", fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    Text(stringResource(R.string.pairing_fingerprint, it), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                 }
             }
         },
@@ -228,7 +233,7 @@ fun PairingDialog(model: AppModel, initialLink: String, onDismiss: () -> Unit) {
             TextButton(onClick = {
                 model.cancelPairing()
                 onDismiss()
-            }) { Text("取消") }
+            }) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }
@@ -242,10 +247,10 @@ fun ProvidersDialog(client: HostClient, onDismiss: () -> Unit) {
     if (keyProvider != null) {
         AlertDialog(
             onDismissRequest = { keyProvider = null },
-            title = { Text("连接密钥") },
+            title = { Text(stringResource(R.string.providers_title)) },
             text = {
                 Column {
-                    Text("密钥只通过加密信道发送一次，不会保存到本机。", fontSize = 12.sp)
+                    Text(stringResource(R.string.providers_key_note), fontSize = 12.sp)
                     OutlinedTextField(
                         value = apiKey,
                         onValueChange = { apiKey = it },
@@ -261,20 +266,20 @@ fun ProvidersDialog(client: HostClient, onDismiss: () -> Unit) {
                     keyProvider = null
                     if (provider != null) scope.launch { client.connectProviderKey(provider, apiKey) }
                     apiKey = ""
-                }) { Text("保存") }
+                }) { Text(stringResource(R.string.common_save)) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     keyProvider = null
                     apiKey = ""
-                }) { Text("取消") }
+                }) { Text(stringResource(R.string.common_cancel)) }
             },
         )
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Providers and models") },
+        title = { Text(stringResource(R.string.providers_list_title)) },
         text = {
             Column(
                 modifier = Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
@@ -283,32 +288,32 @@ fun ProvidersDialog(client: HostClient, onDismiss: () -> Unit) {
                 client.providersError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
                 val directory = client.providers
                 if (directory == null) {
-                    Text("正在读取…", fontSize = 12.sp)
+                    Text(stringResource(R.string.diff_loading), fontSize = 12.sp)
                     return@Column
                 }
                 directory.providers.forEach { provider ->
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(provider.name, style = MaterialTheme.typography.titleSmall)
+                            val status = if (provider.connected) stringResource(R.string.provider_status_connected) else stringResource(R.string.provider_status_disconnected)
                             Text(
-                                (if (provider.connected) "已连接" else "未连接") +
-                                    if (provider.allowsKey) " · 可用密钥" else "",
+                                status + if (provider.allowsKey) stringResource(R.string.provider_has_key) else "",
                                 fontSize = 11.sp,
                             )
                             if (provider.editable) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    OutlinedButton(onClick = { keyProvider = provider.id }) { Text("连接密钥") }
+                                    OutlinedButton(onClick = { keyProvider = provider.id }) { Text(stringResource(R.string.providers_connect_key)) }
                                     OutlinedButton(onClick = {
                                         scope.launch { client.disconnectProvider(provider.id) }
-                                    }) { Text("断开") }
+                                    }) { Text(stringResource(R.string.local_mcp_disconnect)) }
                                 }
                             }
                         }
                     }
                 }
                 HorizontalDivider()
-                Text("默认模型", style = MaterialTheme.typography.titleSmall)
-                directory.selected?.let { Text("当前：${it.name}", fontSize = 12.sp) }
+                Text(stringResource(R.string.providers_default_model), style = MaterialTheme.typography.titleSmall)
+                directory.selected?.let { Text(stringResource(R.string.providers_current, it.name), fontSize = 12.sp) }
                 directory.providers.forEach { provider ->
                     val models = directory.modelsOf(provider.id)
                     if (models.isEmpty()) return@forEach
@@ -322,6 +327,6 @@ fun ProvidersDialog(client: HostClient, onDismiss: () -> Unit) {
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } },
     )
 }

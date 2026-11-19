@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import dev.miao.app.R
 import dev.miao.core.CanonicalJson
 import dev.miao.core.JsonParseException
 import dev.miao.core.JsonValue
@@ -33,7 +34,7 @@ data class LocalApproval(val tool: String, val detail: String)
  * and runs its tools against the app's own sandbox. No computer, account or
  * relay is involved.
  */
-class LocalAgent(context: Context, private val scope: CoroutineScope) {
+class LocalAgent(private val context: Context, private val scope: CoroutineScope) {
     var providers by mutableStateOf<List<LocalProvider>>(emptyList())
         private set
     var selectedID by mutableStateOf<String?>(null)
@@ -163,7 +164,7 @@ class LocalAgent(context: Context, private val scope: CoroutineScope) {
             it.add(
                 LocalMessage(
                     role = LocalMessage.Role.User,
-                    text = prompt.ifEmpty { "（图片）" },
+                    text = prompt.ifEmpty { context.getString(R.string.local_image_placeholder) },
                     images = attached,
                 ),
             )
@@ -247,7 +248,7 @@ class LocalAgent(context: Context, private val scope: CoroutineScope) {
             perform(tool)
         }
         updateMessages {
-            it.add(LocalMessage(role = LocalMessage.Role.Assistant, text = "（工具调用次数达到上限，先停在这里）"))
+            it.add(LocalMessage(role = LocalMessage.Role.Assistant, text = context.getString(R.string.local_tool_limit)))
         }
         persist()
     }

@@ -46,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,6 +55,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import dev.miao.app.AppModel
 import dev.miao.app.KeepAlive
+import dev.miao.app.R
 import dev.miao.app.local.LocalAgent
 import dev.miao.app.HostClient
 import dev.miao.app.InboxEntry
@@ -115,13 +117,13 @@ fun MiaoRoot(model: AppModel) {
                 selected = tab == 0,
                 onClick = { tab = 0 },
                 icon = {},
-                label = { Text("本机") },
+                label = { Text(stringResource(R.string.tab_local)) },
             )
             NavigationBarItem(
                 selected = tab == 1,
                 onClick = { tab = 1 },
                 icon = {},
-                label = { Text("电脑") },
+                label = { Text(stringResource(R.string.tab_computer)) },
             )
         }
     }
@@ -164,17 +166,17 @@ fun RemoteScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("电脑") },
+                title = { Text(stringResource(R.string.tab_computer)) },
                 actions = {
-                    TextButton(onClick = onOpenAccount) { Text("账号") }
+                    TextButton(onClick = onOpenAccount) { Text(stringResource(R.string.account)) }
                     TextButton(onClick = { hostsExpanded = !hostsExpanded }) {
-                        Text(if (hostsExpanded) "收起" else "展开")
+                        Text(if (hostsExpanded) stringResource(R.string.common_collapse) else stringResource(R.string.common_expand))
                     }
                 },
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = onPair) { Text("配对") }
+            FloatingActionButton(onClick = onPair) { Text(stringResource(R.string.pair)) }
         },
     ) { padding ->
         if (!model.accountSignedIn) {
@@ -212,7 +214,7 @@ fun RemoteScreen(
     model.error?.let { message ->
         AlertDialog(
             onDismissRequest = { model.error = null },
-            confirmButton = { TextButton(onClick = { model.error = null }) { Text("知道了") } },
+            confirmButton = { TextButton(onClick = { model.error = null }) { Text(stringResource(R.string.error_dismiss)) } },
             text = { Text(message) },
         )
     }
@@ -225,14 +227,14 @@ private fun SignInPrompt(padding: PaddingValues, onOpenAccount: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("登录中继", style = MaterialTheme.typography.headlineSmall)
+        Text(stringResource(R.string.relay_signin_title), style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(8.dp))
         Text(
-            "手机通过电脑使用的中继访问你的会话。登录后即可扫码配对或接入同账号电脑。",
+            stringResource(R.string.relay_signin_body),
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(16.dp))
-        Button(onClick = onOpenAccount) { Text("登录账号") }
+        Button(onClick = onOpenAccount) { Text(stringResource(R.string.relay_signin_account)) }
     }
 }
 
@@ -240,12 +242,12 @@ private fun SignInPrompt(padding: PaddingValues, onOpenAccount: () -> Unit) {
 private fun AccountSummary(model: AppModel) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("中继账号", style = MaterialTheme.typography.titleSmall)
+            Text(stringResource(R.string.relay_account), style = MaterialTheme.typography.titleSmall)
             Text(model.accountURL, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             model.accountError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { model.refreshDirectory() }) { Text("刷新电脑") }
-                OutlinedButton(onClick = { model.connectAccountDevices() }) { Text("接入同账号电脑") }
+                OutlinedButton(onClick = { model.refreshDirectory() }) { Text(stringResource(R.string.refresh_computers)) }
+                OutlinedButton(onClick = { model.connectAccountDevices() }) { Text(stringResource(R.string.adopt_computers)) }
             }
         }
     }
@@ -255,9 +257,9 @@ private fun AccountSummary(model: AppModel) {
 private fun EmptyHosts() {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("还没有电脑", style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.no_computers), style = MaterialTheme.typography.titleMedium)
             Text(
-                "在电脑上运行 /remote-control 并扫码配对；同账号电脑可在一键接入后直接出现。",
+                stringResource(R.string.no_computers_body),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -268,7 +270,7 @@ private fun EmptyHosts() {
 private fun InboxCard(entries: List<InboxEntry>) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("等待你的处理", style = MaterialTheme.typography.titleSmall)
+            Text(stringResource(R.string.pending_yours), style = MaterialTheme.typography.titleSmall)
             entries.forEach { entry ->
                 Text(
                     "${entry.title} · ${entry.summary}",
@@ -325,9 +327,9 @@ private fun HostCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "会话") }
-                if (client.canConfigureProviders) TextButton(onClick = onProviders) { Text("模型") }
-                TextButton(onClick = onForget) { Text("移除") }
+                TextButton(onClick = onToggle) { Text(if (expanded) stringResource(R.string.common_collapse) else stringResource(R.string.sidebar_sessions)) }
+                if (client.canConfigureProviders) TextButton(onClick = onProviders) { Text(stringResource(R.string.settings_models_header)) }
+                TextButton(onClick = onForget) { Text(stringResource(R.string.remove)) }
             }
             if (!expanded) return@Card
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -337,23 +339,23 @@ private fun HostCard(
                         search = it
                         scope.launch { client.refreshLists(search = it.ifEmpty { null }) }
                     },
-                    label = { Text("搜索会话") },
+                    label = { Text(stringResource(R.string.search_sessions)) },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                 )
                 FilterChip(
                     selected = showArchived,
                     onClick = { showArchived = !showArchived },
-                    label = { Text("归档") },
+                    label = { Text(stringResource(R.string.archived_filter)) },
                 )
             }
             if (sessions.isEmpty()) {
-                Text("没有可显示的会话", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.no_sessions), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             sessions.forEach { summary ->
                 DropdownMenu(expanded = menuFor?.id == summary.id, onDismissRequest = { menuFor = null }) {
                     DropdownMenuItem(
-                        text = { Text(if (summary.pinned) "取消置顶" else "置顶") },
+                        text = { Text(if (summary.pinned) stringResource(R.string.unpin) else stringResource(R.string.pin)) },
                         onClick = {
                             menuFor = null
                             scope.launch {
@@ -363,7 +365,7 @@ private fun HostCard(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text(if (summary.archived) "取消归档" else "归档") },
+                        text = { Text(if (summary.archived) stringResource(R.string.unarchive) else stringResource(R.string.archive)) },
                         onClick = {
                             menuFor = null
                             scope.launch {
@@ -374,7 +376,7 @@ private fun HostCard(
                     )
                     if (RemotePermission.SessionDelete in client.record.grant.permissions) {
                         DropdownMenuItem(
-                            text = { Text("永久删除") },
+                            text = { Text(stringResource(R.string.delete_forever)) },
                             onClick = {
                                 menuFor = null
                                 scope.launch {
@@ -385,7 +387,7 @@ private fun HostCard(
                         )
                     }
                     DropdownMenuItem(
-                        text = { Text("重命名") },
+                        text = { Text(stringResource(R.string.common_rename)) },
                         onClick = {
                             menuFor = null
                             showRename = summary
@@ -401,18 +403,18 @@ private fun HostCard(
                     Column(Modifier.padding(vertical = 6.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (summary.pinned) {
-                                AssistChip(onClick = {}, label = { Text("置顶") })
+                                AssistChip(onClick = {}, label = { Text(stringResource(R.string.pin)) })
                                 Spacer(Modifier.width(6.dp))
                             }
                             Text(summary.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         if (client.sending(summary.id)) {
-                            Text("发送中…", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(stringResource(R.string.sending), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
             }
-            TextButton(onClick = { showCreate = true }) { Text("新建会话") }
+            TextButton(onClick = { showCreate = true }) { Text(stringResource(R.string.new_session)) }
         }
     }
 
@@ -420,7 +422,7 @@ private fun HostCard(
         var title by remember(summary.id) { mutableStateOf(summary.title) }
         AlertDialog(
             onDismissRequest = { showRename = null },
-            title = { Text("重命名会话") },
+            title = { Text(stringResource(R.string.session_rename_title)) },
             text = { OutlinedTextField(value = title, onValueChange = { title = it }, singleLine = true) },
             confirmButton = {
                 TextButton(onClick = {
@@ -429,9 +431,9 @@ private fun HostCard(
                         client.session(summary).rename(title)
                         client.refreshLists()
                     }
-                }) { Text("保存") }
+                }) { Text(stringResource(R.string.common_save)) }
             },
-            dismissButton = { TextButton(onClick = { showRename = null }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { showRename = null }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
 
@@ -447,11 +449,11 @@ private fun CreateSessionDialog(client: HostClient, onDismiss: () -> Unit) {
     val directories = project?.get("directories")?.array ?: emptyList()
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("新建会话") },
+        title = { Text(stringResource(R.string.new_session)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 projects.forEach { value ->
-                    val name = value["name"]?.string ?: value["id"]?.string ?: "项目"
+                    val name = value["name"]?.string ?: value["id"]?.string ?: stringResource(R.string.project_fallback)
                     FilterChip(
                         selected = project === value,
                         onClick = { selectedProject = value },
@@ -481,6 +483,6 @@ private fun CreateSessionDialog(client: HostClient, onDismiss: () -> Unit) {
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) } },
     )
 }
