@@ -969,6 +969,21 @@ impl Transcript {
     /// a snapshot, which is the engine's own projection and cannot drift from
     /// the journal; only the display diff and the terminal failure live on
     /// events alone, so both are carried here.
+    /// Forget a classified stop and the row it painted. A pause is a state, not
+    /// a message: once the loop re-arms or a new drain starts, the Session is
+    /// not paused any more, and a lingering `paused:` row beside a finished
+    /// turn reads as though it still were.
+    fn clear_pause(&mut self) {
+        self.paused = None;
+        self.entries.retain(|entry| {
+            !matches!(
+                entry,
+                Entry::Context { source, text }
+                    if source == "engine" && text.starts_with("paused: ")
+            )
+        });
+    }
+
     pub fn apply_event(&mut self, seq: u64, kind: &str, data: &Value) {
         match kind {
             "stop_failure" => self.failure = failure_of(seq, data),
@@ -987,20 +1002,17 @@ impl Transcript {
                     Some(item) => format!("{reason} · {item}"),
                     None => reason.to_string(),
                 };
-                self.entries.retain(|entry| {
-                    !matches!(
-                        entry,
-                        Entry::Context { source, text }
-                            if source == "engine" && text.starts_with("paused: ")
-                    )
-                });
+                self.clear_pause();
                 self.entries.push(Entry::Context {
                     source: "engine".into(),
                     text: format!("paused: {text}"),
                 });
                 self.paused = Some((seq, text));
             }
-            "loop.continuation" | "loop.armed" => self.paused = None,
+            // The row marked a state that has ended: the loop re-armed itself,
+            // or the next drain started. The engine's own notice stays in the
+            // history, so the row is only worth showing while it is current.
+            "loop.continuation" | "loop.armed" | "run.started" => self.clear_pause(),
             _ => {}
         }
     }
@@ -1634,6 +1646,28 @@ mod tests {
         assert_eq!(transcript.entries.len(), 1, "{:?}", transcript.entries);
         transcript.apply_event(9, "loop.continuation", &json!({}));
         assert!(transcript.paused.is_none());
+        assert!(
+            transcript.entries.is_empty(),
+            "the row marks a state that ended: {:?}",
+            transcript.entries
+        );
+    }
+
+    /// The pause row is a state, not a message. A "waiting" stop that
+    /// auto-resumed used to leave `paused: waiting` above the composer for the
+    /// rest of the Session, beside a turn that had already finished.
+    #[test]
+    fn a_new_run_clears_the_pause_row_it_supersedes() {
+        let mut transcript = Transcript::default();
+        transcript.apply_event(4, "loop.stopped", &json!({"reason": "waiting"}));
+        assert!(transcript.paused.is_some());
+        transcript.apply_event(9, "run.started", &json!({}));
+        assert!(transcript.paused.is_none());
+        assert!(
+            transcript.entries.is_empty(),
+            "a resumed run is not paused: {:?}",
+            transcript.entries
+        );
     }
 
     /// A session that pauses once per turn records one stop each time, and a
