@@ -1582,6 +1582,7 @@ impl Composer {
         self.attachments.clear();
         self.attachment_markers.clear();
         self.next_image = 0;
+        self.pastes.clear();
         self.mode = Mode::Normal;
         self.completion = Completion::default();
     }
@@ -1644,7 +1645,10 @@ impl Composer {
             .map(|(_, _, _, inner)| format!("[{inner}]"))
             .collect::<Vec<_>>();
         let kept = self.attachments.len().min(markers.len());
-        self.next_image = markers[..kept]
+        // Every attachment marker on screen holds its number even when its
+        // bytes did not make it back: the next paste must not reuse the number
+        // of a marker the draft still shows.
+        self.next_image = markers
             .iter()
             .filter_map(|marker| marker.strip_prefix("[Image "))
             .filter_map(|number| number.strip_suffix(']'))

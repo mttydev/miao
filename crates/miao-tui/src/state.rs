@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// `MIAO_TUI_STATE_DIR` first (tests and channel isolation), then the XDG data
 /// directory, then the plain home fallback.
@@ -88,10 +89,14 @@ pub fn save_terminal_title(enabled: bool) {
 
 /// A prompt the operator set aside. Stash lives only in the TUI's own state
 /// directory: losing it must never cost Session data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StashEntry {
     pub text: String,
     pub saved_at_ms: u64,
+    /// The attachments riding with the text: a stashed `[Image N]` marker
+    /// without its bytes is a picture the operator cannot get back.
+    #[serde(default)]
+    pub attachments: Vec<Value>,
 }
 
 const FAVORITE_LIMIT: usize = 32;
@@ -121,9 +126,9 @@ pub fn save_stash(entries: &[StashEntry]) {
 
 /// Put one prompt at the top of the list. Stashing the same text twice moves
 /// the existing entry instead of duplicating it.
-pub fn stash_push(text: &str) -> Vec<StashEntry> {
+pub fn stash_push(text: &str, attachments: &[Value]) -> Vec<StashEntry> {
     let mut entries = stash();
-    push_entry(&mut entries, text, now_ms());
+    push_entry(&mut entries, text, attachments, now_ms());
     save_stash(&entries);
     entries
 }
@@ -135,13 +140,14 @@ pub fn stash_remove(index: usize) -> Vec<StashEntry> {
     entries
 }
 
-fn push_entry(entries: &mut Vec<StashEntry>, text: &str, now: u64) {
+fn push_entry(entries: &mut Vec<StashEntry>, text: &str, attachments: &[Value], now: u64) {
     entries.retain(|entry| entry.text != text);
     entries.insert(
         0,
         StashEntry {
             text: text.to_string(),
             saved_at_ms: now,
+            attachments: attachments.to_vec(),
         },
     );
     entries.truncate(STASH_LIMIT);
@@ -176,9 +182,9 @@ mod tests {
     #[test]
     fn pushing_moves_an_existing_prompt_to_the_top() {
         let mut entries = Vec::new();
-        push_entry(&mut entries, "first", 1);
-        push_entry(&mut entries, "second", 2);
-        push_entry(&mut entries, "first", 3);
+        push_entry(&mut entries, "first", &[], 1);
+        push_entry(&mut entries, "second", &[], 2);
+        push_entry(&mut entries, "first", &[], 3);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].text, "first");
         assert_eq!(entries[0].saved_at_ms, 3);
@@ -188,10 +194,27 @@ mod tests {
     fn the_stash_keeps_at_most_fifty_prompts() {
         let mut entries = Vec::new();
         for index in 0..60 {
-            push_entry(&mut entries, &format!("prompt {index}"), index as u64);
+            push_entry(&mut entries, &format!("prompt {index}"), &[], index as u64);
         }
         assert_eq!(entries.len(), STASH_LIMIT);
         assert_eq!(entries[0].text, "prompt 59");
+    }
+
+    #[test]
+    fn a_stashed_entry_keeps_the_attachments_its_markers_stand_for() {
+        let mut entries = Vec::new();
+        push_entry(
+            &mut entries,
+            "describe this [Image 1]",
+            &[serde_json::json!({"mime": "image/png", "data": "cG5n"})],
+            1,
+        );
+        push_entry(&mut entries, "plain", &[], 2);
+        // The newest entry is first: "plain" displaced the picture entry.
+        assert_eq!(entries[0].text, "plain");
+        assert!(entries[0].attachments.is_empty());
+        assert_eq!(entries[1].attachments.len(), 1);
+        assert_eq!(entries[1].attachments[0]["mime"], "image/png");
     }
 
     #[test]
@@ -199,6 +222,7 @@ mod tests {
         let mut entries = vec![StashEntry {
             text: "only".into(),
             saved_at_ms: 1,
+            attachments: Vec::new(),
         }];
         remove_entry(&mut entries, 9);
         assert_eq!(entries.len(), 1);
