@@ -66,9 +66,10 @@ final class LocalAgent {
     var error: String?
     /// A tool the owner has not yet allowed. The run waits here.
     private(set) var approval: LocalApproval?
-    /// Owner opt-in: run tools without asking. Writes and the network still
-    /// stay inside the sandbox either way.
-    var autoAllowTools = UserDefaults.standard.bool(forKey: "localAutoAllowTools") {
+    /// Tools run without asking by default — interruptions lose the task's
+    /// momentum. Turn the toggle off to gate writes and network calls behind
+    /// per-call approvals; they stay inside the sandbox either way.
+    var autoAllowTools = (UserDefaults.standard.object(forKey: "localAutoAllowTools") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(autoAllowTools, forKey: "localAutoAllowTools") }
     }
     private var decision: CheckedContinuation<Bool, Never>?
