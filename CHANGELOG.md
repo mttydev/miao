@@ -11,6 +11,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.96] - 2026-11-19
+
+### Fixed
+- **tui**: show a classified stop beside the composer, not in the transcript (#3207) (`70615d2826`)
+- **tui**: leave the alternate screen on Windows (#3206) (`b28016f830`)
+
 ## [0.3.95] - 2026-11-19
 
 ### Fixed
