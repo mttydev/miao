@@ -17,6 +17,7 @@ use crate::editor::{Action, Mode};
 use crate::engine;
 use crate::event::{AppEvent, Bus};
 use crate::keybinds::{self, Keymap};
+use crate::lang::Lang;
 use crate::pane::{render_dialog, Home, Panel, PanelKind, Shell, StatusHint};
 use crate::platform::attention::{self, Attention};
 use crate::platform::{clipboard, editor, zed};
@@ -255,12 +256,14 @@ impl Live {
     /// capitalized the way the TS row spells it. The elapsed time is not part
     /// of it — the TS row right-aligns that value — and neither is the escape
     /// hint, which lives in the status strip.
-    fn state(&self, now: Instant) -> String {
+    fn state(&self, now: Instant, lang: Lang) -> String {
         let elapsed = now.duration_since(self.since);
         match &self.phase {
-            LivePhase::Waiting if self.silent(now) => format!(
-                "Waiting for model · no engine signal {}",
-                crate::pane::duration_ms(now.duration_since(self.signal).as_millis() as u64)
+            LivePhase::Waiting if self.silent(now) => lang.tf(
+                "live.waiting_silent",
+                &[&crate::pane::duration_ms(
+                    now.duration_since(self.signal).as_millis() as u64,
+                )],
             ),
             // A reasoning model can legitimately think for minutes before the
             // first token; past half a minute of waiting, say so instead of
@@ -271,12 +274,12 @@ impl Live {
             // raises. The window is at least three minutes for the first byte
             // before any size allowance, so this is true rather than a guess.
             LivePhase::Waiting if elapsed >= Duration::from_secs(90) => {
-                "Waiting for model · still inside the provider window · Esc interrupts".to_string()
+                lang.t("live.waiting_window").to_string()
             }
             LivePhase::Waiting if elapsed >= Duration::from_secs(30) => {
-                "Waiting for model · the model may reason before the first token".to_string()
+                lang.t("live.waiting_reasoning").to_string()
             }
-            LivePhase::Waiting => "Waiting for model".to_string(),
+            LivePhase::Waiting => lang.t("live.waiting").to_string(),
             // A pause with a known length counts down: a static "30.0s from
             // Retry-After" leaves the operator re-reading the same number to
             // learn whether the wait is moving, which is the whole reason a
@@ -290,25 +293,25 @@ impl Live {
                 let left = pause.saturating_sub(elapsed);
                 let left = crate::pane::duration_ms(left.as_millis() as u64);
                 match detail.is_empty() {
-                    true => format!("Retrying · attempt {attempt} · {left} left"),
-                    false => format!("Retrying · attempt {attempt} · {left} left · {detail}"),
+                    true => lang.tf("live.retrying_left", &[&attempt.to_string(), &left]),
+                    false => lang.tf(
+                        "live.retrying_left_detail",
+                        &[&attempt.to_string(), &left, detail],
+                    ),
                 }
             }
             LivePhase::Retrying {
                 attempt, detail, ..
-            } if detail.is_empty() => {
-                format!("Retrying · attempt {attempt}")
-            }
+            } if detail.is_empty() => lang.tf("live.retrying", &[&attempt.to_string()]),
             LivePhase::Retrying {
                 attempt, detail, ..
-            } => {
-                format!("Retrying · attempt {attempt} · {detail}")
-            }
-            LivePhase::Tool { name } => format!("Running {}", tool_label(name)),
+            } => lang.tf("live.retrying_detail", &[&attempt.to_string(), detail]),
+            LivePhase::Tool { name } => lang.tf("status.running", &[&tool_label(name)]),
             LivePhase::Compacting { segment, total } if *total > 1 => {
-                format!("Compacting context · segment {segment} of {total}")
+                let (segment, total) = (segment.to_string(), total.to_string());
+                lang.tf("live.compacting_segments", &[&segment, &total])
             }
-            LivePhase::Compacting { .. } => "Compacting context".to_string(),
+            LivePhase::Compacting { .. } => lang.t("live.compacting").to_string(),
         }
     }
 
@@ -963,6 +966,13 @@ impl App {
     /// Session goes idle.
     pub fn configure_predict_next(&mut self, predict_next: bool) {
         self.predict_next = predict_next;
+    }
+
+    /// The chrome language resolved at startup (`tui.json`'s `language`,
+    /// falling back to the locale when `auto`): the labels paint in it from
+    /// the first frame, and `/lang` re-picks it live.
+    pub fn configure_language(&mut self, lang: Lang) {
+        self.shell.set_lang(lang);
     }
 
     /// How long the leader chord stays armed, from `tui.json`.
@@ -2022,6 +2032,7 @@ impl App {
             Builtin::Recall => {
                 self.notice("/recall <tool_use_id> restores an archived tool output")
             }
+            Builtin::Lang => self.run_lang(""),
             Builtin::Goal => self.notice("/goal budget <turns> raises this Session's Goal budget"),
             Builtin::TurnTimings => self.open_turn_timings(),
             Builtin::Tag => match self.session.as_ref() {
@@ -3714,6 +3725,30 @@ impl App {
         }
     }
 
+    /// What `/lang` asked for: show the current language, or switch to a
+    /// parsed one and record how it persists (`auto` keeps following the
+    /// locale; `en`/`zh` write themselves).
+    fn run_lang(&mut self, arguments: &str) {
+        let current = self.shell.lang();
+        match resolve_lang_change(arguments) {
+            Ok(LangChange::Show) => self.notice(&current.tf("lang.current", &[current.label()])),
+            Ok(LangChange::Set(lang, persisted)) => {
+                self.shell.set_lang(lang);
+                if let Err(error) = crate::config::persist_language(persisted) {
+                    self.notice(&current.tf("lang.persist_failed", &[&error]));
+                    return;
+                }
+                let message = if persisted == "auto" {
+                    lang.tf("lang.auto", &[lang.label()])
+                } else {
+                    lang.tf("lang.set", &[lang.label()])
+                };
+                self.notice(&message);
+            }
+            Err(value) => self.notice(&current.tf("lang.invalid", &[&value])),
+        }
+    }
+
     fn notice(&mut self, message: &str) {
         match self.screen {
             Screen::Home => self.home.set_notice(Some(message.to_string())),
@@ -4845,16 +4880,26 @@ impl App {
         // rather than on the engine, so it outranks whatever the last frame
         // said: a stale "running bash" would hide the only thing the operator
         // has to act on.
+        let lang = self.shell.lang();
         let blocking = match (self.state.approvals.len(), self.state.questions.len()) {
             (0, 0) => None,
-            (1, 0) => Some(format!("needs approval · {}", self.state.approvals[0].tool)),
-            (approvals, 0) => Some(format!("needs approval · {approvals} waiting")),
-            (0, 1) => Some("needs an answer".to_string()),
-            (0, questions) => Some(format!("needs an answer · {questions} waiting")),
-            (approvals, questions) => Some(format!(
-                "needs you · {approvals} approval{} · {questions} question{}",
-                plural(approvals),
-                plural(questions)
+            (1, 0) => Some(lang.tf(
+                "status.needs_approval_one",
+                &[&self.state.approvals[0].tool],
+            )),
+            (approvals, 0) => {
+                Some(lang.tf("status.needs_approval_many", &[&approvals.to_string()]))
+            }
+            (0, 1) => Some(lang.t("status.needs_answer").to_string()),
+            (0, questions) => Some(lang.tf("status.needs_answer_many", &[&questions.to_string()])),
+            (approvals, questions) => Some(lang.tf(
+                "status.needs_you",
+                &[
+                    &approvals.to_string(),
+                    plural(approvals),
+                    &questions.to_string(),
+                    plural(questions),
+                ],
             )),
         };
         self.mtty_state.update(crate::mtty_state::State::of(
@@ -4909,13 +4954,16 @@ impl App {
             // An operator wait outranks it in turn — the turn may be stalled
             // in the pipe, but the one thing the operator must act on wins.
             None if self.backpressure.is_some() => (
-                format!("Engine backlog · {} queued", self.backpressure.unwrap_or(0)),
+                lang.tf(
+                    "status.backlog",
+                    &[&self.backpressure.unwrap_or(0).to_string()],
+                ),
                 None,
                 false,
             ),
             None => match (self.state.active_run.as_ref(), live) {
                 (Some(_), Some(live)) => (
-                    live.state(now),
+                    live.state(now, lang),
                     Some(crate::pane::duration_ms(
                         now.duration_since(live.since).as_millis() as u64,
                     )),
@@ -4933,7 +4981,7 @@ impl App {
                     // cases: name it and let its own clock run, because the
                     // command outlives the answer that queued it.
                     (Some(tool), _) => (
-                        format!("Running {}", tool_label(&tool.name)),
+                        lang.tf("status.running", &[&tool_label(&tool.name)]),
                         Some(crate::pane::duration_ms(
                             now.duration_since(tool.since).as_millis() as u64,
                         )),
@@ -4945,25 +4993,25 @@ impl App {
                     // spinner at stream end; the frozen total is miao's extra
                     // honesty while a stalled projection holds the run open).
                     (None, Some(frozen)) => (
-                        "Done".to_string(),
+                        lang.t("status.done").to_string(),
                         Some(crate::pane::duration_ms(frozen.as_millis() as u64)),
                         false,
                     ),
                     (None, None) => (
-                        "Working".to_string(),
+                        lang.t("status.working").to_string(),
                         run_elapsed
                             .map(|waited| crate::pane::duration_ms(waited.as_millis() as u64)),
                         run_elapsed.is_some_and(|waited| waited >= Duration::from_secs(30)),
                     ),
                 },
-                (None, _) => ("Idle".to_string(), None, false),
+                (None, _) => (lang.t("status.idle").to_string(), None, false),
             },
         };
         let status = match (&self.state.active_run, self.state.pending) {
-            (Some(_), 0) => format!("{phase} · Esc interrupt"),
-            (Some(_), queued) => format!("{phase} · {queued} queued · Esc interrupt and send"),
+            (Some(_), 0) => format!("{phase}{}", lang.t("status.esc")),
+            (Some(_), queued) => lang.tf("status.queued_esc", &[&phase, &queued.to_string()]),
             (None, 0) => phase.clone(),
-            (None, queued) => format!("{phase} · {queued} queued"),
+            (None, queued) => lang.tf("status.queued", &[&queued.to_string()]),
         };
         // A delegated child works on a Session of its own, so without this the
         // strip reads "Idle" while two subagents are still busy. The count goes
@@ -4971,8 +5019,8 @@ impl App {
         let working = self.subagents.iter().filter(|row| row.busy).count();
         let status = match working {
             0 => status,
-            1 => format!("{status} · 1 subagent"),
-            working => format!("{status} · {working} subagents"),
+            1 => format!("{status}{}", lang.t("status.subagent_one")),
+            working => lang.tf("status.subagents", &[&status, &working.to_string()]),
         };
         self.shell
             .title
@@ -4992,8 +5040,8 @@ impl App {
         };
         self.shell.composer.phase_alert = alert && self.shell.composer.phase.is_some();
         self.shell.composer.phase_action = match (&self.state.active_run, self.state.pending) {
-            (Some(_), 0) => Some("Esc interrupt".to_string()),
-            (Some(_), _) => Some("Esc interrupt and send".to_string()),
+            (Some(_), 0) => Some(lang.t("status.esc_bare").to_string()),
+            (Some(_), _) => Some(lang.t("status.esc_send_bare").to_string()),
             (None, _) => None,
         };
         // The title outlives the phase: once the run settles, say what it did
@@ -5007,21 +5055,21 @@ impl App {
             .shell
             .transcript()
             .and_then(|transcript| transcript.paused.as_ref())
-            .map(|(_, reason)| format!("paused: {reason}"));
+            .map(|(_, reason)| lang.tf("status.paused", &[reason]));
         self.shell.composer.idle = if self.shell.composer.phase.is_some() {
             None
         } else {
             let worked = self.last_worked.map(|worked| {
-                format!(
-                    "Worked for {}",
-                    crate::pane::duration_ms(worked.as_millis() as u64)
+                lang.tf(
+                    "status.worked_for",
+                    &[&crate::pane::duration_ms(worked.as_millis() as u64)],
                 )
             });
             Some(match (worked, pause) {
                 (Some(worked), Some(pause)) => format!("{worked} · {pause}"),
                 (Some(worked), None) => worked,
                 (None, Some(pause)) => pause,
-                (None, None) => "Idle".to_string(),
+                (None, None) => lang.t("status.idle").to_string(),
             })
         };
         // A compaction the transcript just gained announces itself once, in
@@ -5439,6 +5487,10 @@ impl App {
                     return;
                 }
                 engine.recall(&session_id, handle);
+                return;
+            }
+            if Builtin::from_name(&name) == Some(Builtin::Lang) {
+                self.run_lang(&arguments);
                 return;
             }
             if let Some(builtin) = Builtin::from_name(&name) {
@@ -11683,6 +11735,60 @@ mod tests {
         assert!(!app.shell.composer.editor.is_empty());
     }
 
+    /// `/lang zh` re-labels the chrome in place: the notice answers in the new
+    /// language, the pick persists for the next start, and the painted sidebar
+    /// reads it without a restart.
+    #[test]
+    fn lang_zh_switches_the_chrome_and_repaints_the_sidebar() {
+        let _env = crate::state::env_lock();
+        let dir = std::env::temp_dir().join(format!("miao-tui-lang-zh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("MIAO_CONFIG_DIR", &dir);
+        let mut app = engine_session_app();
+        app.shell.composer.editor.set_text("/lang zh");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.shell.lang(), Lang::Zh);
+        assert_eq!(
+            app.shell.composer.notice.as_deref(),
+            Some("界面语言已切换为 中文")
+        );
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("tui.json")).expect("persisted tui.json"),
+        )
+        .unwrap();
+        assert_eq!(value["language"], "zh");
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("draw");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        // A wide CJK glyph owns two cells in the buffer, so the painted text
+        // carries a blank after every character; compare without the blanks.
+        assert!(text.replace(' ', "").contains("待办"), "{text}");
+        std::env::remove_var("MIAO_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A spelling the catalog does not know is named, and the language stays.
+    #[test]
+    fn an_unknown_lang_value_is_named_in_the_notice() {
+        let mut app = engine_session_app();
+        app.shell.composer.editor.set_text("/lang fr");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.shell.lang(), Lang::En);
+        assert_eq!(
+            app.shell.composer.notice.as_deref(),
+            Some("/lang accepts en, zh, or auto — got \"fr\"")
+        );
+    }
+
     /// An open Session whose transcript holds two user turns, with a handle
     /// that records what the UI asks the engine to do.
     /// The rust-only TUI is the host on this path and has no title model, so it
@@ -12313,6 +12419,32 @@ enum DeviceAction {
     Approve,
     Reject,
     Revoke,
+}
+
+/// What a `/lang` invocation asks for.
+enum LangChange {
+    /// Bare `/lang`: name the current language and the accepted spellings.
+    Show,
+    /// Switch now, and persist this spelling: `"auto"` keeps following the
+    /// locale, `en`/`zh` pin one.
+    Set(Lang, &'static str),
+}
+
+/// Bare `/lang` shows, `auto` (case-free) follows the locale again, and
+/// anything `Lang::parse` accepts switches. An unknown spelling comes back
+/// for the notice instead of being silently ignored.
+fn resolve_lang_change(arguments: &str) -> Result<LangChange, String> {
+    let value = arguments.trim();
+    if value.is_empty() {
+        return Ok(LangChange::Show);
+    }
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(LangChange::Set(Lang::from_env(), "auto"));
+    }
+    match Lang::parse(value) {
+        Some(lang) => Ok(LangChange::Set(lang, lang.code())),
+        None => Err(value.to_string()),
+    }
 }
 
 /// Rows without a name are dropped rather than drawn as broken lines.

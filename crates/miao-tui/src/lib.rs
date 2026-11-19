@@ -18,6 +18,7 @@ pub mod event;
 pub mod highlight;
 pub mod input;
 pub mod keybinds;
+pub mod lang;
 pub mod markdown;
 pub mod mtty_state;
 pub mod pane;
@@ -87,6 +88,10 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
     for warning in &warnings {
         eprintln!("miao-tui: {warning}");
     }
+    let language = match config.language.as_str() {
+        "auto" => lang::Lang::from_env(),
+        value => lang::Lang::parse(value).unwrap_or_else(lang::Lang::from_env),
+    };
     let startup = Startup {
         session: launch.session.clone(),
         continue_last: launch.continue_last,
@@ -118,6 +123,7 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
     app.configure_animations(config.animations);
     app.configure_auto_effort(config.auto_effort);
     app.configure_predict_next(config.predict_next);
+    app.configure_language(language);
     let preferences = terminal::Preferences {
         mouse: config.mouse,
         cursor: config.cursor,

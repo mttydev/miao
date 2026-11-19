@@ -80,6 +80,10 @@ pub struct Config {
     /// text. Off by default: it spends a model call the operator did not ask
     /// for.
     pub predict_next: bool,
+    /// `language`: the chrome language the TUI paints its labels in.
+    /// `"auto"` follows the terminal locale; `/lang` persists the operator's
+    /// pick here for the next start. Values are `auto`, `en`, or `zh`.
+    pub language: String,
 }
 
 /// `prompt.max_width` from `tui.json`.
@@ -124,6 +128,7 @@ impl Default for Config {
             prompt_max_width: PromptWidth::default(),
             auto_effort: false,
             predict_next: false,
+            language: "auto".to_string(),
         }
     }
 }
@@ -268,6 +273,53 @@ pub fn persist_sandbox_in(dir: &Path, enabled: bool) -> Result<PathBuf, String> 
     Ok(path)
 }
 
+/// Persist `/lang`: set the chrome language as the top-level `language` key in
+/// the global config directory, so the next start paints the same labels. The
+/// search works the way `persist_sandbox_in` does — the last existing
+/// plain-JSON document wins, a JSONC document keeps its comments, and a
+/// directory with no readable document starts a fresh `tui.json`. Returns the
+/// file written.
+pub fn persist_language(value: &str) -> Result<PathBuf, String> {
+    let dir = global_dir().ok_or("no global config directory")?;
+    persist_language_in(&dir, value)
+}
+
+/// The worker behind `persist_language`, split out so tests can pass a
+/// temporary directory instead of pointing `MIAO_CONFIG_DIR` at one.
+pub fn persist_language_in(dir: &Path, language: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    for path in FILE_NAMES.iter().rev().map(|name| dir.join(name)) {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // A document that is not plain JSON keeps its comments because
+        // rewriting it would strip them, so the search moves on.
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(object) = value.as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            "language".to_string(),
+            serde_json::Value::String(language.to_string()),
+        );
+        let text = serde_json::to_string_pretty(&value)
+            .map_err(|error| format!("config encode failed: {error}"))?;
+        std::fs::write(&path, format!("{text}\n"))
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        return Ok(path);
+    }
+    // No readable document exists: start a fresh `tui.json`.
+    let path = dir.join("tui.json");
+    let value = serde_json::json!({ "language": language });
+    let text =
+        serde_json::to_string_pretty(&value).map_err(|error| format!("encode failed: {error}"))?;
+    std::fs::write(&path, format!("{text}\n"))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(path)
+}
+
 fn merge(text: &str, path: &Path, config: &mut Config, warnings: &mut Vec<String>) {
     let value: serde_json::Value = match serde_json::from_str(&crate::theme::strip_jsonc(text)) {
         Ok(value) => value,
@@ -360,6 +412,9 @@ fn merge(text: &str, path: &Path, config: &mut Config, warnings: &mut Vec<String
             )),
         }
     }
+    if let Some(value) = field("language") {
+        merge_language(value, path, config, warnings);
+    }
     if let Some(keybinds) = field("keybinds") {
         merge_keybinds(keybinds, path, config, warnings);
     }
@@ -416,6 +471,34 @@ fn merge(text: &str, path: &Path, config: &mut Config, warnings: &mut Vec<String
     }
 }
 
+/// `language`: the chrome language. `"auto"` follows the terminal locale;
+/// `en` and `zh` pin one. Anything else is named and ignored rather than
+/// silently painting labels in a language the operator cannot read.
+fn merge_language(
+    value: &serde_json::Value,
+    path: &Path,
+    config: &mut Config,
+    warnings: &mut Vec<String>,
+) {
+    let Some(text) = value.as_str() else {
+        warnings.push(format!(
+            "tui config {}: language must be a string, ignoring",
+            path.display()
+        ));
+        return;
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "auto" => config.language = "auto".to_string(),
+        parsed if crate::lang::Lang::parse(parsed).is_some() => {
+            config.language = parsed.to_string();
+        }
+        _ => warnings.push(format!(
+            "tui config {}: language accepts \"auto\", \"en\", or \"zh\", ignoring \"{text}\"",
+            path.display()
+        )),
+    }
+}
+
 /// Top-level `tui.json` fields the TypeScript host understands. The ones this
 /// loader does not read belong to another loader or are not mirrored yet, but
 /// none of them is an unknown field.
@@ -437,6 +520,7 @@ pub(crate) const KNOWN_FIELDS: &[&str] = &[
     "animations",
     "focus_reporting",
     "auto_effort",
+    "language",
     "predict_next",
 ];
 
@@ -1151,5 +1235,55 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
         assert_eq!(value["sandbox"]["mode"], "workspace-write");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn language_accepts_auto_en_and_zh_and_warns_on_other_values() {
+        let dir = temp_dir("language");
+        for (text, expected) in [
+            ("auto", "auto"),
+            ("en", "en"),
+            ("zh", "zh"),
+            (" EN ", "en"),
+            ("zh-CN", "zh-cn"),
+        ] {
+            let (config, warnings) = merge_at(&format!(r#"{{"language": "{text}"}}"#), &dir);
+            assert!(warnings.is_empty(), "{text}: {warnings:?}");
+            assert_eq!(config.language, expected, "{text}");
+        }
+
+        let (config, warnings) = merge_at(r#"{"language": "fr"}"#, &dir);
+        assert_eq!(config.language, "auto", "a bad value keeps the default");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("language"), "{warnings:?}");
+
+        let (config, warnings) = merge_at(r#"{"language": 42}"#, &dir);
+        assert_eq!(config.language, "auto", "a non-string keeps the default");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("must be a string"), "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_language_sets_the_key_and_keeps_other_keys() {
+        let dir = temp_dir("persist-language");
+        std::fs::write(dir.join("miao.json"), r#"{"model":"x"}"#).unwrap();
+        let written = persist_language_in(&dir, "zh").unwrap();
+        assert_eq!(written, dir.join("miao.json"));
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
+        assert_eq!(value["language"], "zh");
+        assert_eq!(value["model"], "x");
+
+        // No readable document starts a fresh `tui.json`, the file this
+        // loader reads back on the next start.
+        let fresh = temp_dir("persist-language-fresh");
+        let written = persist_language_in(&fresh, "en").unwrap();
+        assert_eq!(written, fresh.join("tui.json"));
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
+        assert_eq!(value["language"], "en");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fresh);
     }
 }
