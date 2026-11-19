@@ -11,6 +11,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.3.92] - 2026-11-19
+
+### Fixed
+- **engine**: let a long implementation run past the stale-list stop (#3193) (`360f4e06c0`)
+- **tui**: keep one pause entry in the transcript instead of every replay (#3191) (`186023657e`)
+
 ## [0.3.91] - 2026-11-18
 
 ### Fixed
