@@ -1449,6 +1449,18 @@ fn strip_ansi(text: &str) -> String {
                     }
                 }
             }
+            // DCS, SOS, PM, and APC: terminated by ST, like OSC without BEL.
+            // The tmux passthrough miao itself emits is a DCS, so tool output
+            // echoed from inside tmux carries these too.
+            Some('P' | 'X' | '^' | '_') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Other escapes end at the introducer byte the match consumed.
             _ => {}
         }
     }
@@ -2104,6 +2116,26 @@ mod tests {
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
         assert!(rendered.contains(&"  │ red".to_string()));
+    }
+
+    /// DCS, SOS, PM, and APC carry their own payload up to ST. Tool output
+    /// echoed from inside tmux carries the passthrough form miao itself emits,
+    /// and its payload used to paint as literal transcript text.
+    #[test]
+    fn dcs_and_apc_payloads_never_reach_the_render() {
+        let part = tool(
+            "bash",
+            json!({"command": "ls"}),
+            Some(
+                json!({"stdout": "\u{1b}Ptmux;hidden\u{1b}\\ \u{1b}_apcpayload\u{1b}\\visible\n", "exit_code": 0}),
+            ),
+            false,
+        );
+        let rendered = rendered(&lines(&part, None, &theme(), false, None));
+        assert!(rendered.iter().any(|line| line.contains("visible")));
+        assert!(!rendered.iter().any(|line| line.contains("hidden")));
+        assert!(!rendered.iter().any(|line| line.contains("tmux")));
+        assert!(!rendered.iter().any(|line| line.contains("apcpayload")));
     }
 
     #[test]
