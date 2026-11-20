@@ -13,6 +13,14 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-20
+
+### Fixed
+- **engine**: apply the self-maintained model overlay to the engine's catalog snapshot (#3243) (`7cdf18de85`)
+- **media**: tell the operator why an image was dropped, and document how to declare image input (#3241) (`05bed7ec1b`)
+- **tui**: answer with the macOS system language when the shell states none (#3238) (`35f08a45c8`)
+- **core**: restore image input for Volcengine's DeepSeek V4.1 Flash (#3240) (`2e987172b6`)
+
 ## [0.4.0] - 2026-11-20
 
 ### Added
