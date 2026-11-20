@@ -600,6 +600,12 @@ fn main() {
             }
             "snapshot" | "hang" => {}
             "exit" => return,
+            // The strip's mode flip asks the engine to re-derive its policy;
+            // the real engine answers with the reload summary, so the fixture
+            // echoes the same shape and the flip can be exercised end to end.
+            "auto_approve" => {
+                send(&mut out, json!({"id":id,"result":{"accepted":true}}));
+            }
             "shutdown" => {
                 send(&mut out, json!({"id":id,"result":{"accepted":true}}));
                 return;

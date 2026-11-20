@@ -306,6 +306,9 @@ impl Host {
                 .await
                 .map(|_| json!({ "accepted": true })),
             Command::ConfigReload => runtime.reload_config().await,
+            Command::AutoApprove { auto_approve } => {
+                runtime.set_auto_approve(auto_approve).await
+            }
             Command::ConfigNormalized => runtime.normalized_config().await,
             Command::State { session_id } => runtime.store().state(&session_id).await,
             Command::Usage { session_id } => runtime.store().usage_report(&session_id).await,
