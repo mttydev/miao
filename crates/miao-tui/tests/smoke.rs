@@ -131,6 +131,10 @@ impl Harness {
         };
         cmd.cwd(&dir);
         cmd.env("TERM", "xterm-256color");
+        // The suite asserts the English catalog's strings. Pin the locale so a
+        // Chinese-language host — the self-hosted macOS runner — cannot flip
+        // the vocabulary through the system-language fallback.
+        cmd.env("LC_ALL", "en_US.UTF-8");
         cmd.env("MIAO_TUI_STATE_DIR", dir.join("state"));
         // A store per test: the sign-in prompt writes the real credential file,
         // and a test must never reach the developer's own one.
