@@ -145,7 +145,7 @@ impl Shell {
             composer_text: None,
             drag: None,
             footer_hits: Vec::new(),
-            embedded_footer: crate::mtty_state::host_footer_enabled(),
+            embedded_footer: crate::mtty_state::host_footer_active(),
             queued: PaintedCells::default(),
         }
     }
@@ -1722,7 +1722,7 @@ impl Home {
             warning: None,
             prompt_width: crate::config::PromptWidth::default(),
             footer_hits: Vec::new(),
-            embedded_footer: crate::mtty_state::host_footer_enabled(),
+            embedded_footer: crate::mtty_state::host_footer_active(),
             last_input: Instant::now(),
             composer_text: None,
             composer_drag: false,
@@ -2690,23 +2690,17 @@ fn render_composer_status(
         area,
     );
     // A leader that is still waiting keeps its chords even under an embedded
-    // host: they are transient input feedback, not chrome the host carries.
-    // The facts hide, but the hit geometry is laid out exactly as painted,
-    // so a synthesized press from the host lands on the same handler.
+    // host: they are transient input feedback, not chrome the host carries,
+    // so the row must not go silent while the menu waits. The wire still
+    // hides, so the host shows no facts behind the chords.
     let painted = match leader {
-        Some(menu) => {
-            if embedded {
-                None
-            } else {
-                Some(Line::from(Span::styled(
-                    format!(
-                        "  {} ",
-                        fit_chords(menu, facts_width.saturating_sub(3) as usize)
-                    ),
-                    Style::new().fg(palette.primary),
-                )))
-            }
-        }
+        Some(menu) => Some(Line::from(Span::styled(
+            format!(
+                "  {} ",
+                fit_chords(menu, facts_width.saturating_sub(3) as usize)
+            ),
+            Style::new().fg(palette.primary),
+        ))),
         None => {
             let mut pairs = composer_status_spans(status, theme);
             match pairs.is_empty() {
@@ -10086,6 +10080,18 @@ mod draft_gap_tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
+        // The chords stay on the row even under an embedded host: they are
+        // the only feedback that a leader is armed, and the host carries no
+        // equivalent.
+        let last: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(80)
+            .last()
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .unwrap_or_default();
+        assert!(last.contains("ctrl+x"), "the chords vanished: {last:?}");
         assert_eq!(shell.footer_wire(), None);
     }
 
