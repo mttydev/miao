@@ -37,7 +37,6 @@ impl Lang {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
         if let Some(lang) = platform_language() {
             return lang;
         }
@@ -234,15 +233,13 @@ fn apple_platform_language() -> Option<Lang> {
         .args(["read", "-g", "AppleLanguages"])
         .output()
         .ok()
-        .map(|output| String::from_utf8(output.stdout).ok())
-        .flatten()?;
+        .and_then(|output| String::from_utf8(output.stdout).ok())?;
     apple_language(&output).or_else(|| {
         let output = std::process::Command::new("defaults")
             .args(["read", "-g", "AppleLocale"])
             .output()
             .ok()
-            .map(|output| String::from_utf8(output.stdout).ok())
-            .flatten()?;
+            .and_then(|output| String::from_utf8(output.stdout).ok())?;
         apple_language(&output)
     })
 }
@@ -294,7 +291,12 @@ fn linux_system_language(conf: &str) -> Option<Lang> {
     let line = conf
         .lines()
         .find(|line| line.trim_start().starts_with("LANG="))?;
-    primary_language(line.trim_start().strip_prefix("LANG=")?.trim().trim_matches('"'))
+    primary_language(
+        line.trim_start()
+            .strip_prefix("LANG=")?
+            .trim()
+            .trim_matches('"'),
+    )
 }
 
 #[cfg(test)]
