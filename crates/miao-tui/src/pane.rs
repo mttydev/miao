@@ -156,12 +156,14 @@ impl Shell {
     }
 
     /// The strip facts the embedded host's footer should show now: the
-    /// clickable ranges as the last paint laid them out. `None` while the
-    /// leader menu owns the row.
+    /// The facts the embedded host renders, read straight from the strip:
+    /// labels only, no cells. The host's row is its own surface, and a press
+    /// there arrives as the operator's own chord, so the geometry stays zero.
+    /// `None` while the leader menu owns the row.
     pub fn footer_wire(&self) -> Option<Vec<FooterWireSeg>> {
         match self.leader_hint.is_some() {
             true => None,
-            false => wire_from_hits(&self.footer_hits, &self.status),
+            false => wire_from_status(&self.status, false),
         }
     }
 
@@ -681,18 +683,43 @@ impl Shell {
             false => body_columns(frame.area()),
         };
         let queued_height = queued_rows(&self.transcript.pending_prompts) as u16;
-        let [body_area, panel_area, queued_area, composer_area, status_area] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(panel_height),
-            Constraint::Length(queued_height),
-            Constraint::Length(composer_height(
-                &self.composer,
-                composer_column(conversation_area.width),
-                frame.area().height,
-            )),
-            Constraint::Length(1),
-        ])
-        .areas(conversation_area);
+        let composer_constraint = Constraint::Length(composer_height(
+            &self.composer,
+            composer_column(conversation_area.width),
+            frame.area().height,
+        ));
+        // The embedded host carries the facts on its own row: the terminal
+        // reclaims the line for the conversation and the box keeps its bottom
+        // edge. A plain terminal keeps the facts row exactly as it has always
+        // been — the two layouts are deliberately different treatments.
+        let (body_area, panel_area, queued_area, composer_area, status_area) =
+            if self.embedded_footer {
+                let [body_area, panel_area, queued_area, composer_area] = Layout::vertical([
+                    Constraint::Min(1),
+                    Constraint::Length(panel_height),
+                    Constraint::Length(queued_height),
+                    composer_constraint,
+                ])
+                .areas(conversation_area);
+                (body_area, panel_area, queued_area, composer_area, None)
+            } else {
+                let [body_area, panel_area, queued_area, composer_area, status_area] =
+                    Layout::vertical([
+                        Constraint::Min(1),
+                        Constraint::Length(panel_height),
+                        Constraint::Length(queued_height),
+                        composer_constraint,
+                        Constraint::Length(1),
+                    ])
+                    .areas(conversation_area);
+                (
+                    body_area,
+                    panel_area,
+                    queued_area,
+                    composer_area,
+                    Some(status_area),
+                )
+            };
         self.transcript.render(frame, body_area);
         if let (Some(sidebar), Some(sidebar_area)) = (self.sidebar.as_mut(), sidebar_area) {
             sidebar.render(frame, sidebar_area);
@@ -722,15 +749,16 @@ impl Shell {
         // The facts get their own row under the box: the state is the box's
         // title, while the model and any exception the run raised are read as
         // one line the border no longer has to carry.
-        render_composer_status(
-            frame,
-            status_area,
-            &self.status,
-            self.leader_hint.as_deref(),
-            &mut self.footer_hits,
-            &self.transcript.theme,
-            self.embedded_footer,
-        );
+        if let Some(status_area) = status_area {
+            render_composer_status(
+                frame,
+                status_area,
+                &self.status,
+                self.leader_hint.as_deref(),
+                &mut self.footer_hits,
+                &self.transcript.theme,
+            );
+        }
         // The rule separates the columns; it is not part of either one. Paint it
         // last, after every pane: a band that pads to its own edge, a wide glyph
         // clipped at the last column, or any one-cell overflow then cannot leave
@@ -1741,10 +1769,11 @@ impl Home {
         self.embedded_footer = on;
     }
 
-    /// The landing facts the embedded host's footer should show now. `None`
-    /// while nothing is on screen for the host to show.
+    /// The landing facts the embedded host's footer should show now, read
+    /// straight from the strip: labels only, no cells. `None` while nothing
+    /// is on screen for the host to show.
     pub fn footer_wire(&self, status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
-        wire_from_hits(&self.footer_hits, status)
+        wire_from_status(status, true)
     }
 
     /// The strip fact a press at this position acts on, if the last paint
@@ -2523,6 +2552,11 @@ pub struct FooterWireSeg {
     pub row: u16,
     pub start: u16,
     pub end: u16,
+    /// The chord a press on this fact answers to, in the keymap's own
+    /// spelling (`ctrl+x m`): the host sends it as keystrokes, so the press
+    /// works no matter which surface the facts render on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chord: Option<String>,
 }
 
 /// What a hint reads like painted: a warning keeps its glyph, so the host's
@@ -2534,34 +2568,49 @@ fn hint_label(hint: &StatusHint) -> String {
     }
 }
 
-/// The wire for one painted strip: the clickable ranges as the last paint
-/// laid them out, labelled with the facts a press on them acts on. `None`
-/// when nothing is on screen for the host to show.
-fn wire_from_hits(hits: &[FooterHit], status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
-    if hits.is_empty() {
-        return None;
+/// The wire the embedded host renders, read straight from the strip: the
+/// approval hint, then the model, then — on the landing screen — the
+/// provider · protocol tail. Labels only: the host's row is its own surface
+/// and a press there arrives as the operator's own chord, so the geometry
+/// stays zero and an older host that still synthesizes by cell refuses the
+/// press instead of landing it on the transcript.
+fn wire_from_status(status: &StatusStrip, usage: bool) -> Option<Vec<FooterWireSeg>> {
+    let mut segs: Vec<FooterWireSeg> = status
+        .hints
+        .iter()
+        .filter(|hint| hint.segment == Some(FooterSegment::ApprovalMode))
+        .map(|hint| FooterWireSeg {
+            id: FooterSegment::ApprovalMode.id(),
+            text: hint_label(hint),
+            row: 0,
+            start: 0,
+            end: 0,
+            chord: None,
+        })
+        .collect();
+    if let Some(model) = &status.model {
+        segs.push(FooterWireSeg {
+            id: FooterSegment::Model.id(),
+            text: model.clone(),
+            row: 0,
+            start: 0,
+            end: 0,
+            chord: None,
+        });
     }
-    let text = |segment: FooterSegment| match segment {
-        FooterSegment::ApprovalMode => status
-            .hints
-            .iter()
-            .find(|hint| hint.segment == Some(segment))
-            .map(hint_label)
-            .unwrap_or_default(),
-        FooterSegment::Model => status.model.clone().unwrap_or_default(),
-        FooterSegment::Provider => status.usage.clone().unwrap_or_default(),
-    };
-    Some(
-        hits.iter()
-            .map(|hit| FooterWireSeg {
-                id: hit.segment.id(),
-                text: text(hit.segment),
-                row: hit.row,
-                start: hit.start,
-                end: hit.end,
-            })
-            .collect(),
-    )
+    if usage {
+        if let Some(usage) = &status.usage {
+            segs.push(FooterWireSeg {
+                id: FooterSegment::Provider.id(),
+                text: usage.clone(),
+                row: 0,
+                start: 0,
+                end: 0,
+                chord: None,
+            });
+        }
+    }
+    (!segs.is_empty()).then_some(segs)
 }
 
 /// What the landing prompt's bottom rule carries: the facts the status strip
@@ -2681,7 +2730,6 @@ fn render_composer_status(
     leader: Option<&str>,
     hits: &mut Vec<FooterHit>,
     theme: &Theme,
-    embedded: bool,
 ) {
     let palette = theme.palette;
     let muted = Style::new().fg(palette.text_muted);
@@ -2690,17 +2738,14 @@ fn render_composer_status(
     let facts_width = area.width.saturating_sub(version_width + 1);
     // The row sits on the page, not on the box's border: paint its whole
     // width, or a cell the text does not reach falls back to the terminal's
-    // own background and reads as a hole in the layout. Under an embedded
-    // host the same paint blanks the row: the host merges these facts into
-    // its own chrome, and painting them too would show the line twice.
+    // own background and reads as a hole in the layout.
     frame.render_widget(
         Block::new().style(Style::new().bg(palette.background)),
         area,
     );
-    // A leader that is still waiting keeps its chords even under an embedded
-    // host: they are transient input feedback, not chrome the host carries,
-    // so the row must not go silent while the menu waits. The wire still
-    // hides, so the host shows no facts behind the chords.
+    // A leader that is still waiting takes the row over with its chords, the
+    // way it took the strip over: discoverable exactly where the facts it
+    // replaces usually sit.
     let painted = match leader {
         Some(menu) => Some(Line::from(Span::styled(
             format!(
@@ -2734,10 +2779,7 @@ fn render_composer_status(
                         spans.push(span.clone());
                         col += width;
                     }
-                    match embedded {
-                        true => None,
-                        false => Some(Line::from(spans)),
-                    }
+                    Some(Line::from(spans))
                 }
             }
         }
@@ -2752,12 +2794,10 @@ fn render_composer_status(
             },
         );
     }
-    if !embedded {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(version, muted))).alignment(Alignment::Right),
-            area,
-        );
-    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(version, muted))).alignment(Alignment::Right),
+        area,
+    );
 }
 
 const COMPOSER_COMPLETION_ROWS: usize = 6;
@@ -6432,7 +6472,6 @@ mod tests {
                     None,
                     &mut hits,
                     &theme,
-                    false,
                 );
                 assert_eq!(
                     hits.len(),
@@ -7543,7 +7582,6 @@ mod tests {
                     leader,
                     &mut hits,
                     &theme,
-                    false,
                 );
             })
             .expect("draw");
@@ -10070,15 +10108,17 @@ mod draft_gap_tests {
         assert_eq!(ids, vec!["approval", "model"], "{wire:?}");
         assert_eq!(wire[0].text, "! auto", "{wire:?}");
         assert_eq!(wire[1].text, "deepseek-v4", "{wire:?}");
-        // The cells match the painted layout, not a guess: the lead-in is the
-        // strip's two-cell offset, and the ranges do not overlap.
-        assert!(wire[0].start >= 2, "{wire:?}");
-        assert!(wire[0].end <= wire[1].start, "{wire:?}");
-        assert!(wire[1].end < width, "{wire:?}");
+        // Labels only: the host's row is its own surface, so the cells stay
+        // zero — an older host that still synthesizes by cell refuses the
+        // press instead of landing it on the transcript.
+        assert_eq!(wire[0].row, 0, "{wire:?}");
+        assert_eq!(wire[0].start, 0, "{wire:?}");
+        assert_eq!(wire[0].end, 0, "{wire:?}");
     }
 
-    /// The armed leader still owns the row under an embedded host: the wire
-    /// hides, so the host's footer does not show facts behind the chords.
+    /// The armed leader hides the wire under an embedded host: the facts row
+    /// belongs to the conversation now, so the leader menu has no painted
+    /// surface and the host must not show facts behind it either.
     #[test]
     fn an_armed_leader_hides_the_wire() {
         let mut shell = Shell::new(Path::new("/tmp/pane-test"), strip_theme());
@@ -10088,18 +10128,17 @@ mod draft_gap_tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
-        // The chords stay on the row even under an embedded host: they are
-        // the only feedback that a leader is armed, and the host carries no
-        // equivalent.
-        let last: String = terminal
+        let painted: String = terminal
             .backend()
             .buffer()
             .content
-            .chunks(80)
-            .last()
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
-            .unwrap_or_default();
-        assert!(last.contains("ctrl+x"), "the chords vanished: {last:?}");
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            !painted.contains("deepseek-v4"),
+            "the facts leaked behind the leader menu: {painted}"
+        );
         assert_eq!(shell.footer_wire(), None);
     }
 

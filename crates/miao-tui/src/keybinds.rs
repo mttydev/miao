@@ -20,6 +20,9 @@ pub enum Action {
     CommandList,
     CopyMessage,
     ToolOutputToggle,
+    /// Flip the launch-wide approval policy. The strip names it and the
+    /// host's merged row can press it, so it owns a chord of its own.
+    ApprovalToggle,
     /// Show or hide the right column. The column names its own chord, so the
     /// way back to it is never a key the operator has to remember.
     SidebarToggle,
@@ -96,6 +99,7 @@ impl Action {
             Action::CommandList => "command_list",
             Action::CopyMessage => "messages_copy",
             Action::ToolOutputToggle => "session_toggle_generic_tool_output",
+            Action::ApprovalToggle => "approval_toggle",
             Action::SidebarToggle => "sidebar_toggle",
             Action::McpList => "mcp_list",
             Action::ProviderList => "provider_list",
@@ -170,6 +174,7 @@ const ACTIONS: &[Action] = &[
     Action::CommandList,
     Action::CopyMessage,
     Action::ToolOutputToggle,
+    Action::ApprovalToggle,
     Action::SidebarToggle,
     Action::McpList,
     Action::ProviderList,
@@ -258,6 +263,7 @@ const DEFAULTS: &[(Action, &str)] = &[
     (Action::SidebarToggle, "<leader>b"),
     (Action::McpList, "<leader>i"),
     (Action::ProviderList, "<leader>a"),
+    (Action::ApprovalToggle, "<leader>f"),
     (Action::SkillList, "<leader>k"),
     (Action::DeviceList, "<leader>D"),
     (Action::JobList, "<leader>j"),
