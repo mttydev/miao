@@ -490,6 +490,7 @@ mod tests {
             row: 23,
             start: 12,
             end: 23,
+            chord: None,
         }];
         // First sight sends; the same strip stays silent.
         let first = footer_update(&None, Some(&segs)).expect("first report");
@@ -510,6 +511,7 @@ mod tests {
                 row: 23,
                 start: 2,
                 end: 9,
+                chord: None,
             },
             FooterWireSeg {
                 id: "model",
@@ -517,6 +519,7 @@ mod tests {
                 row: 23,
                 start: 12,
                 end: 23,
+                chord: None,
             },
         ];
         let json = footer_json(true, &segs);

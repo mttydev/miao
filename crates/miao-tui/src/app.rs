@@ -1083,10 +1083,22 @@ impl App {
     /// in the host's chrome reaches the same handler a press on the painted
     /// strip would.
     fn footer_wire(&self) -> Option<Vec<FooterWireSeg>> {
-        match self.screen {
+        let mut wire = match self.screen {
             Screen::Home => self.home.footer_wire(&self.shell.status),
             Screen::Session => self.shell.footer_wire(),
+        }?;
+        // Each fact carries the chord it answers to, in the keymap's own
+        // spelling: the host sends it as keystrokes, so a press on the host's
+        // row lands on the same handler a press inside the terminal would.
+        for seg in &mut wire {
+            seg.chord = match seg.id {
+                "approval" => self.keys.chord(keybinds::Action::ApprovalToggle),
+                "model" => self.keys.chord(keybinds::Action::ModelList),
+                "provider" => self.keys.chord(keybinds::Action::ProviderList),
+                _ => None,
+            };
         }
+        Some(wire)
     }
 
     /// The armed leader's menu, while it still waits for its chord.
@@ -2030,6 +2042,7 @@ impl App {
     fn handle_leader(&mut self, key: KeyEvent) {
         match self.keys.leader_action(&key) {
             Some(keybinds::Action::ModelList) => self.run_builtin(Builtin::Models),
+            Some(keybinds::Action::ApprovalToggle) => self.toggle_auto_approve(),
             Some(keybinds::Action::ThemeList) => self.run_builtin(Builtin::Theme),
             Some(keybinds::Action::SessionList) => self.run_builtin(Builtin::Sessions),
             Some(keybinds::Action::SessionNew) => self.run_builtin(Builtin::NewSession),
