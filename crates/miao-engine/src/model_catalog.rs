@@ -18,9 +18,21 @@ use tokio_util::sync::CancellationToken;
 pub const MAX_ROUTES: usize = 1024;
 
 /// The full provider directory the install ships (`models.json`, the same
-/// file the TS catalog service reads): an explicit path, a snapshot beside the
-/// engine binary, the installer's shipped copy, then the user cache.
+/// file the TS catalog service reads), with the self-maintained model patches
+/// applied: an explicit path, a snapshot beside the engine binary, the
+/// installer's shipped copy, then the user cache.
 pub(crate) fn models_snapshot() -> Option<serde_json::Value> {
+    let mut snapshot = raw_snapshot()?;
+    // MIAO_MODELS_PATH selects an exact catalog (tests, air-gapped users), so
+    // the self-maintained overlay does not apply there — the same rule the TS
+    // catalog service applies.
+    if std::env::var_os("MIAO_MODELS_PATH").is_none() {
+        apply_overlay(&mut snapshot);
+    }
+    Some(snapshot)
+}
+
+fn raw_snapshot() -> Option<serde_json::Value> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("MIAO_MODELS_PATH") {
         candidates.push(std::path::PathBuf::from(path));
@@ -46,6 +58,67 @@ pub(crate) fn models_snapshot() -> Option<serde_json::Value> {
         .find_map(|path| std::fs::read(path).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
+
+/// The model patches miao maintains itself, mirrored from
+/// `packages/engine-ts/core/src/models-overlay.ts`. The TS catalog service
+/// merges that full table (provider identity, pricing) in memory, but the
+/// cache file it writes — the file this engine reads — stays the raw fetch,
+/// so an engine decision made from the snapshot alone only ever saw upstream
+/// data. That gap is how volcengine/deepseek-v4-1-flash-261017 lost pasted
+/// images on every route built from the snapshot: upstream marks the dated id
+/// text-only while Ark accepts an `image_url` part for it (checked against
+/// the live endpoint). Providers the snapshot does not name stay TS-side:
+/// inserting them is plugin identity and transport, not engine routing.
+fn apply_overlay(snapshot: &mut serde_json::Value) {
+    let Some(entries) = snapshot.as_object_mut() else {
+        return;
+    };
+    let patches = serde_json::json!({
+        "zhipuai-coding-plan": {
+            "glm-5.3": {
+                "cost": { "input": 1.19516, "output": 4.18306, "cache_read": 0.29879, "cache_write": 0 },
+            },
+            "glm-5.3-flash": {
+                "cost": { "input": 0.11952, "output": 0.41831, "cache_read": 0.03436, "cache_write": 0 },
+            },
+        },
+        "volcengine": {
+            "deepseek-v4-1-flash-261017": {
+                "modalities": { "input": ["text", "image"], "output": ["text"] },
+            },
+        },
+    });
+    let Some(patches) = patches.as_object() else {
+        return;
+    };
+    for (provider_id, models) in patches {
+        let Some(existing_models) = entries
+            .get_mut(provider_id.as_str())
+            .and_then(|provider| provider.get_mut("models"))
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(models) = models.as_object() else {
+            continue;
+        };
+        for (model_id, patch) in models {
+            match existing_models.get_mut(model_id.as_str()) {
+                Some(model) => {
+                    if let (Some(model), Some(patch)) = (model.as_object_mut(), patch.as_object()) {
+                        for (field, value) in patch {
+                            model.insert(field.clone(), value.clone());
+                        }
+                    }
+                }
+                None => {
+                    existing_models.insert(model_id.clone(), patch.clone());
+                }
+            }
+        }
+    }
+}
+
 /// The smallest context window each model id declares, across every provider in
 /// the shipped snapshot. The same id is often served by many providers with
 /// different declared windows; the smallest is the one every caller must assume.
@@ -483,7 +556,7 @@ impl Provider for Catalog {
 
 #[cfg(test)]
 mod window_tests {
-    use super::{index_windows, window_in_index};
+    use super::{apply_overlay, index_windows, window_in_index};
 
     fn document() -> serde_json::Value {
         serde_json::json!({
@@ -523,5 +596,68 @@ mod window_tests {
         assert_eq!(window_in_index(&index, "m-small-261017"), Some(64000));
         assert_eq!(window_in_index(&index, "m-unknown-261017"), None);
         assert_eq!(window_in_index(&index, "m-small"), Some(64000));
+    }
+
+    #[test]
+    fn the_overlay_restores_image_input_for_the_dated_volcengine_id() {
+        let mut snapshot = serde_json::json!({
+            "volcengine": {
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "deepseek-v4-1-flash-261017": {
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                    },
+                },
+            },
+        });
+        apply_overlay(&mut snapshot);
+        assert_eq!(
+            snapshot["volcengine"]["models"]["deepseek-v4-1-flash-261017"]["modalities"]["input"],
+            serde_json::json!(["text", "image"]),
+        );
+    }
+
+    #[test]
+    fn the_overlay_merges_field_wise_without_erasing_the_catalog_entry() {
+        let mut snapshot = serde_json::json!({
+            "volcengine": {
+                "models": {
+                    "deepseek-v4-1-flash-261017": {
+                        "name": "DeepSeek V4.1 Flash 1017",
+                        "limit": { "context": 1048576 },
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                    },
+                },
+            },
+        });
+        apply_overlay(&mut snapshot);
+        let model = &snapshot["volcengine"]["models"]["deepseek-v4-1-flash-261017"];
+        assert_eq!(model["name"], serde_json::json!("DeepSeek V4.1 Flash 1017"));
+        assert_eq!(model["limit"]["context"], serde_json::json!(1048576));
+        assert_eq!(
+            model["modalities"]["input"],
+            serde_json::json!(["text", "image"])
+        );
+        assert_eq!(model["modalities"]["output"], serde_json::json!(["text"]));
+    }
+
+    #[test]
+    fn the_overlay_adds_a_model_the_catalog_misses() {
+        let mut snapshot = serde_json::json!({ "volcengine": { "models": {} } });
+        apply_overlay(&mut snapshot);
+        assert_eq!(
+            snapshot["volcengine"]["models"]["deepseek-v4-1-flash-261017"]["modalities"]["input"],
+            serde_json::json!(["text", "image"]),
+        );
+    }
+
+    #[test]
+    fn the_overlay_skips_providers_the_snapshot_does_not_name() {
+        let mut snapshot = serde_json::json!({ "zhipuai": { "models": {} } });
+        apply_overlay(&mut snapshot);
+        assert!(snapshot.get("volcengine").is_none());
+        let mut empty = serde_json::json!({});
+        apply_overlay(&mut empty);
+        assert_eq!(empty, serde_json::json!({}));
     }
 }
