@@ -10,6 +10,8 @@
     "./engine": "./src/engine.ts"
   },
   "scripts": {
+    "generate": "bun run script/build.ts",
+    "check:generated": "bun run generate && git diff --exit-code -- src/generated src/generated-effect",
     "test": "bun test --timeout 5000",
     "typecheck": "tsgo --noEmit"
   },
@@ -26,6 +28,8 @@
     }
   },
   "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@miao/httpapi-codegen": "workspace:*",
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
     "@typescript/native-preview": "catalog:",
