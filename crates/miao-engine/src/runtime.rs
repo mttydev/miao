@@ -1839,11 +1839,7 @@ impl Runtime {
             let mut stored = self.inner.policy_origin.lock().await;
             match stored.as_mut() {
                 Some((_, _, flag)) => *flag = auto_approve,
-                None => {
-                    return Err(Error::Invalid(
-                        "no policy origin to update".into(),
-                    ))
-                }
+                None => return Err(Error::Invalid("no policy origin to update".into())),
             }
         }
         self.reload_config().await
