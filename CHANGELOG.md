@@ -4,12 +4,24 @@ All notable changes to **miao** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and miao adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+When any version component reaches 99, the next release carries to the next
+component (`0.3.99` → `0.4.0`); versions like `0.3.100` do not exist here.
 Releases are tagged `vX.Y.Z`. This changelog summarizes Conventional Commits;
 run `bun script/changelog.ts --version X.Y.Z --write` to add a section here.
 Published release bodies use the curated English and Simplified Chinese pair
 at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required.
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-11-20
+
+### Added
+- **tui**: speak the operator's language with /lang (#3236) (`a0e7118c2b`)
+- **tui**: make automatic compaction visible when it runs (#3235) (`34b31eeb68`)
+
+### Fixed
+- **tools**: a whole-file read of a large file returns its first window (#3234) (`558696733e`)
+- **engine**: arm auto-compaction at 95% of the window (#3233) (`b0fe23a6f1`)
 
 ## [0.3.99] - 2026-11-19
 
