@@ -2077,6 +2077,30 @@ impl App {
         }
     }
 
+    /// A slash command that runs without a Session: the chrome builtins. The
+    /// landing prompt hands everything it is given to a new Session, and
+    /// "/model" on a fresh install reached an engine that could not start —
+    /// so the commands that need no Session run where they were typed.
+    /// The Session-bound ones (goal, tag, recall) and unknown slash text stay
+    /// first prompts. Returns false when the text is not one of these.
+    fn run_home_command(&mut self, text: &str) -> bool {
+        let Some((name, arguments)) = commands::split(text) else {
+            return false;
+        };
+        match Builtin::from_name(&name) {
+            Some(Builtin::Goal | Builtin::Tag | Builtin::Recall) => false,
+            Some(Builtin::Lang) => {
+                self.run_lang(&arguments);
+                true
+            }
+            Some(builtin) => {
+                self.run_builtin(builtin);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn run_builtin(&mut self, builtin: Builtin) {
         match builtin {
             Builtin::Recall => {
@@ -2188,6 +2212,11 @@ impl App {
     fn open_models(&mut self) {
         if let Some(engine) = self.engine.as_ref() {
             engine.catalog();
+        } else {
+            // Nothing will ever answer this request until an engine starts:
+            // keep the pending picker (the catalog may still arrive) but say
+            // what configures one instead of sitting silent.
+            self.notice(self.shell.lang().t("notice.setup_cli"));
         }
         if self.models.is_empty() {
             self.pending_models = true;
@@ -3019,6 +3048,11 @@ impl App {
     fn open_providers(&mut self) {
         if let Some(engine) = self.engine.as_ref() {
             engine.catalog();
+        } else {
+            // Same first-run truth as /model: nothing will ever answer this
+            // request until an engine starts, so keep the pending list (the
+            // catalog may still arrive) but name the setup step too.
+            self.notice(self.shell.lang().t("notice.setup_cli"));
         }
         if self.providers.is_empty() {
             self.pending_providers = true;
@@ -4070,6 +4104,9 @@ impl App {
                     // The composer's exit words quit before they can become a
                     // Session named "exit".
                     if self.accept_exit_word(&text) {
+                        return;
+                    }
+                    if self.run_home_command(&text) {
                         return;
                     }
                     self.startup.prompt = Some(text);
@@ -11859,6 +11896,61 @@ mod tests {
             app.shell.composer.notice.as_deref(),
             Some("/lang accepts en, zh, or auto — got \"fr\"")
         );
+    }
+
+    /// /model on a fresh install has no engine to serve a catalog, so the
+    /// picker would hang on a reply that never comes. The command names the
+    /// setup step instead of sitting silent.
+    #[test]
+    fn the_model_picker_without_an_engine_names_the_setup_command() {
+        let mut app = app();
+        app.shell.composer.editor.set_text("/model");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none(), "no catalog, no picker");
+        let notice = app
+            .home
+            .notice()
+            .or_else(|| app.shell.composer.notice.as_deref())
+            .expect("the setup guidance is on the screen");
+        assert!(notice.contains("auth login"), "{notice}");
+        assert!(notice.contains("/model"), "{notice}");
+    }
+
+    /// The provider list follows the same first-run truth: it is engine-fed,
+    /// so without an engine leader a names the setup step too.
+    #[test]
+    fn the_provider_list_without_an_engine_names_the_setup_command() {
+        let mut app = app();
+        leader(&mut app, 'a');
+        assert!(app.dialog.is_none(), "no catalog, no list");
+        let notice = app
+            .home
+            .notice()
+            .or_else(|| app.shell.composer.notice.as_deref())
+            .expect("the setup guidance is on the screen");
+        assert!(notice.contains("auth login"), "{notice}");
+    }
+
+    /// A chrome builtin typed on the landing screen runs where it was typed:
+    /// /theme opens the theme dialog without starting a Session.
+    #[test]
+    fn a_home_slash_command_runs_without_a_session() {
+        let mut app = app();
+        app.shell.composer.editor.set_text("/theme");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_some(), "the theme dialog opened");
+        assert_eq!(app.startup.prompt, None, "no Session was started");
+    }
+
+    /// The Session-bound commands and unknown slash text stay first prompts:
+    /// "/tag work" opens a Session that carries it, exactly as before.
+    #[test]
+    fn a_session_bound_slash_stays_a_first_prompt() {
+        let mut app = app();
+        app.shell.composer.editor.set_text("/tag work");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.startup.prompt.as_deref(), Some("/tag work"));
     }
 
     /// An open Session whose transcript holds two user turns, with a handle
