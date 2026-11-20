@@ -13,6 +13,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-20
+
+### Added
+- **tui**: word the Chinese usage labels 输入/输出 and route the hardcoded ones through the catalog (#3249) (`8a65885bb3`)
+
 ## [0.4.1] - 2026-11-20
 
 ### Fixed
