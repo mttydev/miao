@@ -13,6 +13,19 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-20
+
+### Added
+- **tui**: merge the status strip into the host footer under mtty (#3258) (`eb7ee9289d`)
+- **tui**: make the status strip's facts clickable (#3254) (`a66216eecb`)
+- **tui**: tint each sidebar section header with its own syntax hue (#3252) (`5746dde639`)
+- **tui**: tint each sidebar section header with its own accent (#3251) (`26f9bd3402`)
+
+### Fixed
+- **tui**: keep the merged footer alive across state reports and a leader armed under the host (#3259) (`cacf531d65`)
+- **tui**: route the remaining hardcoded chrome labels through the language catalog (#3253) (`581099f585`)
+- **tui**: drop CLICKDEBUG stderr tracing from click dispatch (#3256) (`69b25cc8c9`)
+
 ## [0.4.2] - 2026-11-20
 
 ### Added
