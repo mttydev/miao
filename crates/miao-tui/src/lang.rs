@@ -166,8 +166,65 @@ impl Lang {
             "status.worked_for" => ("Worked for {0}", "已工作 {0}"),
             "status.working" => ("Working", "工作中"),
             "todo.done" => ("TODO done {0}/{1}", "待办完成 {0}/{1}"),
+            "todo.empty" => ("no todo list", "暂无待办列表"),
             "todo.progress" => ("TODO {0}/{1}", "待办 {0}/{1}"),
             "todo.zero" => ("TODO 0/{0}", "待办 0/{0}"),
+            "dlg.title.models" => ("models", "模型"),
+            "dlg.title.model_providers" => ("model providers", "模型提供商"),
+            "dlg.title.theme" => ("theme", "主题"),
+            "dlg.title.workspaces" => ("workspaces", "工作区"),
+            "dlg.title.skills" => ("skills", "技能"),
+            "dlg.title.scheduled" => ("scheduled", "计划任务"),
+            "dlg.title.jobs" => ("jobs", "后台任务"),
+            "dlg.title.devices" => ("devices", "设备"),
+            "dlg.title.providers" => ("providers", "提供商"),
+            "dlg.title.provider_accounts" => ("provider accounts", "提供商账号"),
+            "dlg.title.keys" => ("keys", "密钥"),
+            "dlg.title.stash" => ("stash", "暂存"),
+            "dlg.title.sessions" => ("sessions", "会话"),
+            "dlg.hint.sessions" => (
+                "enter open · 1-9 pinned · / search · r rename · p pin · a archive · d delete · esc close",
+                "enter 打开 · 1-9 固定槽 · / 搜索 · r 重命名 · p 置顶 · a 归档 · d 删除 · esc 关闭",
+            ),
+            "dlg.hint.models_scoped" => (
+                "one provider · ctrl+o widen · ctrl+f favorite · esc close",
+                "单一提供商 · ctrl+o 展开 · ctrl+f 收藏 · esc 关闭",
+            ),
+            "dlg.hint.models_all" => (
+                "type to filter · ctrl+f favorite · ctrl+o provider · esc close",
+                "输入过滤 · ctrl+f 收藏 · ctrl+o 切换提供商 · esc 关闭",
+            ),
+            "dlg.hint.model_providers" => ("enter narrow · esc back to all models", "enter 收窄 · esc 返回全部模型"),
+            "dlg.hint.theme" => ("enter apply · esc close", "enter 应用 · esc 关闭"),
+            "dlg.hint.workspaces" => ("enter move session · esc cancel", "enter 移动会话 · esc 取消"),
+            "dlg.hint.skills" => ("esc close", "esc 关闭"),
+            "dlg.hint.scheduled" => ("x cancel · esc close", "x 取消 · esc 关闭"),
+            "dlg.hint.jobs" => ("x stop · X stop all · esc close", "x 停止 · X 全部停止 · esc 关闭"),
+            "dlg.hint.devices" => ("esc close", "esc 关闭"),
+            "dlg.hint.providers" => ("enter pick provider · type to filter · esc close", "enter 选择提供商 · 输入过滤 · esc 关闭"),
+            "dlg.hint.provider_accounts" => ("enter narrow · type to filter · esc close", "enter 收窄 · 输入过滤 · esc 关闭"),
+            "dlg.hint.keys_scoped" => (
+                "↑↓ move · enter switch · u update · a add · d delete · esc close",
+                "↑↓ 移动 · enter 切换 · u 更新 · a 添加 · d 删除 · esc 关闭",
+            ),
+            "dlg.hint.keys" => (
+                "↑↓ move · enter switch · u update · d delete · esc close",
+                "↑↓ 移动 · enter 切换 · u 更新 · d 删除 · esc 关闭",
+            ),
+            "dlg.hint.stash" => ("enter restore · d delete · esc close", "enter 恢复 · d 删除 · esc 关闭"),
+            "status.no_model_chord" => ("no model · {0} to pick a provider", "无模型 · {0} 选择提供商"),
+            "status.no_model" => ("no model · open the model list to pick a provider", "无模型 · 打开模型列表选择提供商"),
+            "status.update_ready" => ("{0} ready · restart to apply", "{0} 已就绪 · 重启后生效"),
+            "status.not_following" => ("not following · end to resume", "未跟随最新 · 按 End 恢复"),
+            "status.switch_account_chord" => ("{0} switch account", "{0} 切换账号"),
+            "status.switch_account" => ("switch account", "切换账号"),
+            "status.switch_model" => ("{0} switch model", "{0} 切换模型"),
+            "status.auto_approve" => ("auto-approve", "自动批准"),
+            "status.sidebar_hidden" => ("{0} sidebar", "{0} 侧栏"),
+            "notice.esc_home" => ("press esc again to go back home", "再按一次 esc 返回主页"),
+            "panel.approval" => (" approval ", " 批准 "),
+            "panel.question" => (" question ", " 提问 "),
+            "panel.approval_keys" => ("1 allow once · 2 always allow · 3 deny", "1 仅此一次 · 2 总是允许 · 3 拒绝"),
             "turns" => ("turns", "轮"),
             "usage.none" => ("no usage recorded", "暂无用量记录"),
             "usage.now" => ("now", "刚刚"),
@@ -185,6 +242,15 @@ impl Lang {
     /// `t` with `{0}`-`{9}` slots, for lines whose word order differs between
     /// the languages. An argument a translation does not mention stays
     /// unused, and the slot tokens never survive into painted prose.
+    /// The rendering for a key the catalog does not carry. Dialogs that have
+    /// not been swept onto the catalog yet keep their raw English strings, so
+    /// an unswept key reads back as empty and the caller paints what it
+    /// stored instead of an empty label.
+    pub fn try_t(self, key: &str) -> Option<&'static str> {
+        let text = self.t(key);
+        (!text.is_empty()).then_some(text)
+    }
+
     pub fn tf(self, key: &str, args: &[&str]) -> String {
         let mut out = self.t(key).to_string();
         for (index, arg) in args.iter().enumerate() {
@@ -464,5 +530,57 @@ mod tests {
             &["2", "3", "s", "1.2k", " · 1 attempt"],
         );
         assert_eq!(line, "subagents 2 · 3 turns · in 1.2k · 1 attempt");
+    }
+
+    /// The labels the #3248 sweep routed through the catalog: each must carry
+    /// a real Chinese rendering, and the English side must not have drifted.
+    #[test]
+    fn the_swept_chrome_labels_translate_in_chinese() {
+        let keys = [
+            "status.no_model_chord",
+            "status.no_model",
+            "status.update_ready",
+            "status.not_following",
+            "status.switch_account",
+            "status.switch_account_chord",
+            "status.switch_model",
+            "status.auto_approve",
+            "status.sidebar_hidden",
+            "todo.empty",
+            "notice.esc_home",
+            "panel.approval",
+            "panel.question",
+            "panel.approval_keys",
+            "dlg.hint.sessions",
+            "dlg.hint.models_scoped",
+            "dlg.hint.models_all",
+            "dlg.hint.model_providers",
+            "dlg.hint.theme",
+            "dlg.hint.workspaces",
+            "dlg.hint.skills",
+            "dlg.hint.scheduled",
+            "dlg.hint.jobs",
+            "dlg.hint.devices",
+            "dlg.hint.providers",
+            "dlg.hint.provider_accounts",
+            "dlg.hint.keys_scoped",
+            "dlg.hint.keys",
+            "dlg.hint.stash",
+        ];
+        for key in keys {
+            assert_ne!(Lang::En.t(key), Lang::Zh.t(key), "{key} must translate");
+            assert!(!Lang::Zh.t(key).is_empty(), "{key} must not be empty");
+        }
+        // The English side is frozen: the strip's own tests read these bytes.
+        assert_eq!(Lang::En.t("status.auto_approve"), "auto-approve");
+        assert_eq!(Lang::En.t("todo.empty"), "no todo list");
+        assert_eq!(
+            Lang::En.t("notice.esc_home"),
+            "press esc again to go back home"
+        );
+        assert_eq!(
+            Lang::En.t("panel.approval_keys"),
+            "1 allow once · 2 always allow · 3 deny"
+        );
     }
 }

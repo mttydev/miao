@@ -662,7 +662,7 @@ impl Shell {
             sidebar.render(frame, sidebar_area);
         }
         if let Some(panel) = self.panel.as_ref() {
-            panel.render(frame, panel_area, &self.transcript.theme);
+            panel.render(frame, panel_area, self.lang, &self.transcript.theme);
         }
         render_queued(
             frame,
@@ -3475,7 +3475,10 @@ fn hourly_lines(
     // The window spans the workspace ledger rather than this Session: say so,
     // or every Session's sidebar reads the same figures and the block looks
     // like a stub instead of a total.
-    let mut lines = vec![section_header(lang.t("workspace.24h"), palette.syntax.keyword)];
+    let mut lines = vec![section_header(
+        lang.t("workspace.24h"),
+        palette.syntax.keyword,
+    )];
     let mut hover: Vec<(usize, String)> = Vec::new();
     let Some(usage) = usage else {
         lines.push(Line::from(Span::styled(
@@ -3931,7 +3934,10 @@ impl Pane for SidebarPane {
                         // row; this one sat glued to the figures above and read
                         // as one more data line.
                         lines.push(Line::default());
-                        lines.push(section_header(self.lang.t("activity"), palette.syntax.function));
+                        lines.push(section_header(
+                            self.lang.t("activity"),
+                            palette.syntax.function,
+                        ));
                     }
                     // The rows read abnormal-first: what went wrong (retries,
                     // rework) before what it cost in supervision and spend,
@@ -4169,7 +4175,10 @@ impl Pane for SidebarPane {
             // section that failed to load.
             if self.mode.is_some() || self.changes.is_some() {
                 lines.push(Line::default());
-                lines.push(section_header(self.lang.t("working_tree"), palette.syntax.kind));
+                lines.push(section_header(
+                    self.lang.t("working_tree"),
+                    palette.syntax.kind,
+                ));
                 if let Some(mode) = &self.mode {
                     grid_row(
                         &mut self.hover_rows,
@@ -4303,7 +4312,7 @@ impl Pane for SidebarPane {
             ));
             if self.todos.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    "  no todo list",
+                    format!("  {}", self.lang.t("todo.empty")),
                     Style::new().fg(palette.text_muted),
                 )));
             }
@@ -4438,7 +4447,7 @@ pub fn render_hover_tip(frame: &mut Frame, at: (u16, u16), text: &str, theme: &T
 
 /// Draw a modal dialog centered over the current screen. `Clear` hides the
 /// page underneath so the dialog never blends with the transcript.
-pub fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, theme: &Theme) {
+pub fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, lang: Lang, theme: &Theme) {
     if area.width < 20 || area.height < 5 {
         return;
     }
@@ -4456,7 +4465,7 @@ pub fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, theme: &The
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(Span::styled(
-            format!(" {} ", dialog.title()),
+            format!(" {} ", lang.try_t(dialog.title()).unwrap_or(dialog.title())),
             Style::new()
                 .fg(palette.primary)
                 .add_modifier(Modifier::BOLD),
@@ -4495,7 +4504,7 @@ pub fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, theme: &The
         return;
     }
     if let Some(list) = dialog.list() {
-        render_list(frame, inner, list, theme);
+        render_list(frame, inner, list, lang, theme);
         return;
     }
     if let Some(palette) = dialog.palette() {
@@ -4515,7 +4524,7 @@ pub fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, theme: &The
     }
 }
 
-fn render_list(frame: &mut Frame, area: Rect, list: &ListDialog, theme: &Theme) {
+fn render_list(frame: &mut Frame, area: Rect, list: &ListDialog, lang: Lang, theme: &Theme) {
     let palette = theme.palette;
     let hint_area = Rect {
         y: area.y + area.height - 1,
@@ -4635,7 +4644,7 @@ fn render_list(frame: &mut Frame, area: Rect, list: &ListDialog, theme: &Theme) 
     }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            list.hint,
+            lang.try_t(list.hint).unwrap_or(list.hint),
             Style::new().fg(palette.text_muted),
         ))),
         hint_area,
@@ -5151,18 +5160,18 @@ impl Panel {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, lang: Lang, theme: &Theme) {
         let palette = theme.palette;
         let title = match &self.kind {
-            PanelKind::Approval(_) => " approval ",
-            PanelKind::Question(_) => " question ",
+            PanelKind::Approval(_) => lang.t("panel.approval"),
+            PanelKind::Question(_) => lang.t("panel.question"),
         };
         let block = Block::bordered()
             .title(Span::styled(title, Style::new().fg(palette.warning)))
             .border_style(Style::new().fg(palette.warning))
             .style(Style::new().bg(palette.background));
         frame.render_widget(
-            Paragraph::new(panel_lines(self, theme))
+            Paragraph::new(panel_lines(self, lang, theme))
                 .block(block)
                 .wrap(Wrap { trim: false }),
             area,
@@ -5170,7 +5179,7 @@ impl Panel {
     }
 }
 
-fn panel_lines(panel: &Panel, theme: &Theme) -> Vec<Line<'static>> {
+fn panel_lines(panel: &Panel, lang: Lang, theme: &Theme) -> Vec<Line<'static>> {
     let palette = theme.palette;
     match &panel.kind {
         PanelKind::Approval(view) => vec![
@@ -5187,7 +5196,7 @@ fn panel_lines(panel: &Panel, theme: &Theme) -> Vec<Line<'static>> {
             )),
             Line::default(),
             Line::from(Span::styled(
-                "1 allow once · 2 always allow · 3 deny",
+                lang.t("panel.approval_keys"),
                 Style::new().fg(palette.text_muted),
             )),
         ],
@@ -5864,7 +5873,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 12))
             .expect("terminal");
         terminal
-            .draw(|frame| panel.render(frame, frame.area(), theme))
+            .draw(|frame| panel.render(frame, frame.area(), Lang::En, theme))
             .expect("draw");
         terminal
             .backend()
@@ -6062,7 +6071,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         terminal
-            .draw(|frame| super::render_dialog(frame, frame.area(), &dialog, &theme))
+            .draw(|frame| super::render_dialog(frame, frame.area(), &dialog, Lang::En, &theme))
             .expect("draw");
         let painted = terminal
             .backend()
@@ -6092,7 +6101,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         terminal
-            .draw(|frame| super::render_dialog(frame, frame.area(), &dialog, &theme))
+            .draw(|frame| super::render_dialog(frame, frame.area(), &dialog, Lang::En, &theme))
             .expect("draw");
         let buffer = terminal.backend().buffer();
         let rows = buffer
@@ -6150,7 +6159,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         terminal
-            .draw(|frame| super::render_dialog(frame, frame.area(), &dialog, &theme))
+            .draw(|frame| super::render_dialog(frame, frame.area(), &dialog, Lang::En, &theme))
             .expect("draw");
         let painted = terminal
             .backend()

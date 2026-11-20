@@ -969,10 +969,10 @@ impl Dialog {
             }
         }
         let hint = match provider {
-            Some(_) => "one provider · ctrl+o widen · ctrl+f favorite · esc close",
-            None => "type to filter · ctrl+f favorite · ctrl+o provider · esc close",
+            Some(_) => "dlg.hint.models_scoped",
+            None => "dlg.hint.models_all",
         };
-        let mut list = ListDialog::new("models", rows, ListKind::Plain, hint);
+        let mut list = ListDialog::new("dlg.title.models", rows, ListKind::Plain, hint);
         // The Session's own binding is marked so the list answers "which one am
         // I on" without opening the footer. A pin names either the route or
         // the `model · protocol` pair, so both spellings find the row.
@@ -1002,10 +1002,10 @@ impl Dialog {
             });
         }
         Dialog::ModelProviders(ListDialog::new(
-            "model providers",
+            "dlg.title.model_providers",
             rows,
             ListKind::Plain,
-            "enter narrow · esc back to all models",
+            "dlg.hint.model_providers",
         ))
     }
 
@@ -1051,7 +1051,7 @@ impl Dialog {
             label: name.to_string(),
             detail: String::new(),
         }));
-        let mut list = ListDialog::new("theme", rows, ListKind::Plain, "enter apply · esc close");
+        let mut list = ListDialog::new("dlg.title.theme", rows, ListKind::Plain, "dlg.hint.theme");
         list.selected = names
             .iter()
             .position(|name| *name == current)
@@ -1084,10 +1084,10 @@ impl Dialog {
                 .collect()
         };
         Dialog::Workspaces(ListDialog::new(
-            "workspaces",
+            "dlg.title.workspaces",
             rows,
             ListKind::Plain,
-            "enter move session · esc cancel",
+            "dlg.hint.workspaces",
         ))
     }
 
@@ -1109,10 +1109,10 @@ impl Dialog {
                 .collect()
         };
         Dialog::Skills(ListDialog::new(
-            "skills",
+            "dlg.title.skills",
             rows,
             ListKind::ReadOnly,
-            "esc close",
+            "dlg.hint.skills",
         ))
     }
 
@@ -1136,10 +1136,10 @@ impl Dialog {
                 .collect()
         };
         Dialog::Schedule(ListDialog::new(
-            "scheduled",
+            "dlg.title.scheduled",
             rows,
             ListKind::Schedule,
-            "x cancel · esc close",
+            "dlg.hint.scheduled",
         ))
     }
 
@@ -1172,10 +1172,10 @@ impl Dialog {
                 .collect()
         };
         Dialog::Jobs(ListDialog::new(
-            "jobs",
+            "dlg.title.jobs",
             rows,
             ListKind::Jobs,
-            "x stop · X stop all · esc close",
+            "dlg.hint.jobs",
         ))
     }
 
@@ -1197,10 +1197,10 @@ impl Dialog {
                 .collect()
         };
         Dialog::Devices(ListDialog::new(
-            "devices",
+            "dlg.title.devices",
             rows,
             ListKind::ReadOnly,
-            "esc close",
+            "dlg.hint.devices",
         ))
     }
 
@@ -1224,10 +1224,10 @@ impl Dialog {
                 .collect()
         };
         Dialog::Providers(ListDialog::new(
-            "providers",
+            "dlg.title.providers",
             rows,
             ListKind::Plain,
-            "enter pick provider · type to filter · esc close",
+            "dlg.hint.providers",
         ))
     }
 
@@ -1245,10 +1245,10 @@ impl Dialog {
             rows
         };
         Dialog::ProviderAccounts(ListDialog::new(
-            "provider accounts",
+            "dlg.title.provider_accounts",
             rows,
             ListKind::Plain,
-            "enter narrow · type to filter · esc close",
+            "dlg.hint.provider_accounts",
         ))
     }
 
@@ -1293,7 +1293,7 @@ impl Dialog {
     /// so the list says which row is the current window before any key moves.
     pub fn sessions_with_open(rows: &[SessionSummary], open: Option<&str>) -> Self {
         let mut list = ListDialog::new(
-            "sessions",
+            "dlg.title.sessions",
             rows.iter()
                 .map(|row| {
                     // Both marks are suffixes so a row can honestly show that it
@@ -1309,7 +1309,8 @@ impl Dialog {
                     // The preview answers "which conversation was this?"
                     // without opening it, and it rides the label so `/` finds a
                     // Session by what it last said as well as by its title.
-                    if let Some(preview) = row.preview.as_deref().filter(|preview| !preview.is_empty())
+                    if let Some(preview) =
+                        row.preview.as_deref().filter(|preview| !preview.is_empty())
                     {
                         label.push_str(" — ");
                         label.push_str(preview);
@@ -1339,7 +1340,7 @@ impl Dialog {
                 })
                 .collect(),
             ListKind::Sessions,
-            "enter open · 1-9 pinned · / search · r rename · p pin · a archive · d delete · esc close",
+            "dlg.hint.sessions",
         );
         // The caller hands the rows over pinned-first, so the same order is the
         // quick-slot order: `1` reaches the most recently pinned Session.
@@ -1461,18 +1462,23 @@ impl Dialog {
     /// still be updated or deleted.
     pub fn keys(rows: Vec<Row>, provider_scoped: bool) -> Self {
         let hint = match provider_scoped {
-            true => "↑↓ move · enter switch · u update · a add · d delete · esc close",
-            false => "↑↓ move · enter switch · u update · d delete · esc close",
+            true => "dlg.hint.keys_scoped",
+            false => "dlg.hint.keys",
         };
-        Dialog::Accounts(ListDialog::new("keys", rows, ListKind::Keys, hint))
+        Dialog::Accounts(ListDialog::new(
+            "dlg.title.keys",
+            rows,
+            ListKind::Keys,
+            hint,
+        ))
     }
 
     pub fn stash(rows: Vec<Row>) -> Self {
         Dialog::Stash(ListDialog::new(
-            "stash",
+            "dlg.title.stash",
             rows,
             ListKind::Stash,
-            "enter restore · d delete · esc close",
+            "dlg.hint.stash",
         ))
     }
 
@@ -3209,7 +3215,7 @@ mod tests {
                 detail: "2 accounts".into(),
             },
         ]);
-        assert_eq!(dialog.title(), "provider accounts");
+        assert_eq!(dialog.title(), "dlg.title.provider_accounts");
         let list = dialog.list().expect("list");
         assert_eq!(list.rows.len(), 2);
         assert_eq!(list.rows[0].id, "all");
