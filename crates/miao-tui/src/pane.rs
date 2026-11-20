@@ -3219,10 +3219,11 @@ fn hoverable_line(
 /// stack in one column instead of starting wherever the label ended.
 const GRID_LABEL_WIDTH: usize = 8;
 
-/// A section header: upper case, bold, tinted with the section's own accent
-/// role so stacked headers read as structure instead of decoration, while
-/// `NO_COLOR` and dumb terminals drop the tint to plain bold. It carries no
-/// `▾` — the glyph promised a disclosure that does not exist.
+/// A section header: upper case, bold, tinted with a syntax hue so stacked
+/// headers read as structure instead of decoration — each section gets its
+/// own vivid hue from the theme's code palette, while `NO_COLOR` and dumb
+/// terminals drop the tint to plain bold. It carries no `▾` — the glyph
+/// promised a disclosure that does not exist.
 fn section_header(title: &str, color: Color) -> Line<'static> {
     Line::from(Span::styled(
         title.to_string(),
@@ -3412,7 +3413,7 @@ fn quota_lines(
         return Vec::new();
     };
     let muted = Style::new().fg(palette.text_muted);
-    let mut lines = vec![section_header("PLAN · QUOTA", palette.warning)];
+    let mut lines = vec![section_header("PLAN · QUOTA", palette.syntax.variable)];
     for provider in &quota.providers {
         let name = match provider.plan.is_empty() {
             true => provider.provider.clone(),
@@ -3474,7 +3475,7 @@ fn hourly_lines(
     // The window spans the workspace ledger rather than this Session: say so,
     // or every Session's sidebar reads the same figures and the block looks
     // like a stub instead of a total.
-    let mut lines = vec![section_header(lang.t("workspace.24h"), palette.primary)];
+    let mut lines = vec![section_header(lang.t("workspace.24h"), palette.syntax.keyword)];
     let mut hover: Vec<(usize, String)> = Vec::new();
     let Some(usage) = usage else {
         lines.push(Line::from(Span::styled(
@@ -3824,7 +3825,7 @@ impl Pane for SidebarPane {
             lines.push(Line::default());
             lines.push(section_header(
                 self.lang.t("session.usage"),
-                palette.secondary,
+                palette.syntax.string,
             ));
             match &self.usage {
                 None => lines.push(Line::from(Span::styled(
@@ -3930,7 +3931,7 @@ impl Pane for SidebarPane {
                         // row; this one sat glued to the figures above and read
                         // as one more data line.
                         lines.push(Line::default());
-                        lines.push(section_header(self.lang.t("activity"), palette.accent));
+                        lines.push(section_header(self.lang.t("activity"), palette.syntax.function));
                     }
                     // The rows read abnormal-first: what went wrong (retries,
                     // rework) before what it cost in supervision and spend,
@@ -4131,7 +4132,7 @@ impl Pane for SidebarPane {
                         0 => format!("SUBAGENTS {}", self.subagents.len()),
                         _ => format!("SUBAGENTS · {running} running"),
                     },
-                    palette.accent,
+                    palette.syntax.function,
                 ));
                 let now = crate::pane::now_ms();
                 for row in &self.subagents {
@@ -4168,7 +4169,7 @@ impl Pane for SidebarPane {
             // section that failed to load.
             if self.mode.is_some() || self.changes.is_some() {
                 lines.push(Line::default());
-                lines.push(section_header(self.lang.t("working_tree"), palette.primary));
+                lines.push(section_header(self.lang.t("working_tree"), palette.syntax.kind));
                 if let Some(mode) = &self.mode {
                     grid_row(
                         &mut self.hover_rows,
@@ -4298,7 +4299,7 @@ impl Pane for SidebarPane {
                         .lang
                         .tf("todo.progress", &[&done.to_string(), &len.to_string()]),
                 },
-                palette.success,
+                palette.syntax.number,
             ));
             if self.todos.is_empty() {
                 lines.push(Line::from(Span::styled(
