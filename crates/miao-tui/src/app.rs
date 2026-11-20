@@ -1838,15 +1838,6 @@ impl App {
             let position = ratatui::layout::Position::new(mouse.column, mouse.row);
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    eprintln!(
-                        "CLICKDEBUG down at {:?} {:?} hits={}",
-                        position,
-                        self.screen,
-                        match self.screen {
-                            Screen::Session => self.shell.footer_hits.len(),
-                            Screen::Home => self.home.footer_hits.len(),
-                        }
-                    );
                     self.leader = false;
                     // A second press on the same cell inside the window is a
                     // double click: the transcript selects the word under it
@@ -1865,7 +1856,6 @@ impl App {
                         Screen::Session => self.shell.footer_segment(position),
                         Screen::Home => self.home.footer_segment(position),
                     };
-                    eprintln!("CLICKDEBUG segment={segment:?}");
                     match segment {
                         Some(FooterSegment::ApprovalMode) => {
                             self.toggle_auto_approve();
