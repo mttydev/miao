@@ -203,19 +203,33 @@ fn shell_language(value: &str) -> Option<Lang> {
     if language.is_empty() || language == "C" || language == "POSIX" {
         return None;
     }
-    let primary = language.split(['-', '_']).next()?.to_ascii_lowercase();
-    match primary.as_str() {
+    primary_language(language)
+}
+
+/// The part of a language tag that decides our vocabulary: `zh-Hans-CN` and
+/// `zh_CN` both speak Chinese, `en-US` English.
+fn primary_language(code: &str) -> Option<Lang> {
+    match code.split(['-', '_']).next()?.to_ascii_lowercase().as_str() {
         "zh" => Some(Lang::Zh),
         "en" => Some(Lang::En),
         _ => None,
     }
 }
 
-/// macOS records the operator's real language in its preferences even when
-/// the shell exports a language-less `C.UTF-8`, so the system answers when
-/// the environment cannot.
-#[cfg(target_os = "macos")]
+/// The operating system records the operator's real language even when the
+/// shell exports a language-less `C.UTF-8` — or nothing at all, the Windows
+/// default — so the system answers when the environment cannot. Dispatched
+/// at runtime so every reader stays compiled and tested on every platform.
 fn platform_language() -> Option<Lang> {
+    match std::env::consts::OS {
+        "macos" => apple_platform_language(),
+        "windows" => windows_platform_language(),
+        "linux" => linux_platform_language(),
+        _ => None,
+    }
+}
+
+fn apple_platform_language() -> Option<Lang> {
     let output = std::process::Command::new("defaults")
         .args(["read", "-g", "AppleLanguages"])
         .output()
@@ -240,16 +254,47 @@ fn apple_language(text: &str) -> Option<Lang> {
         .lines()
         .map(str::trim)
         .find(|line| line.starts_with('"') || (line.len() > 2 && !line.contains(' ')))?;
-    let primary = stated
-        .trim_matches(|c: char| c == '"' || c == ',')
-        .split(['-', '_'])
-        .next()?
-        .to_ascii_lowercase();
-    match primary.as_str() {
-        "zh" => Some(Lang::Zh),
-        "en" => Some(Lang::En),
-        _ => None,
-    }
+    primary_language(stated.trim_matches(|c: char| c == '"' || c == ','))
+}
+
+fn windows_platform_language() -> Option<Lang> {
+    let output = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Control Panel\International\User Profile",
+            "/v",
+            "Languages",
+        ])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())?;
+    windows_ui_language(&output)
+}
+
+/// `reg query` prints the UI-language list on the REG_MULTI_SZ line, ordered
+/// as Windows uses it for display:
+/// `    Languages    REG_MULTI_SZ    zh-CN en-US`.
+fn windows_ui_language(output: &str) -> Option<Lang> {
+    let line = output.lines().find(|line| line.contains("REG_MULTI_SZ"))?;
+    let mut parts = line
+        .split_whitespace()
+        .skip_while(|token| *token != "REG_MULTI_SZ");
+    parts.next()?;
+    primary_language(parts.next()?)
+}
+
+fn linux_platform_language() -> Option<Lang> {
+    let conf = std::fs::read_to_string("/etc/locale.conf").ok()?;
+    linux_system_language(&conf)
+}
+
+/// systemd records the system locale in `/etc/locale.conf`, usually
+/// `LANG=zh_CN.UTF-8`, mirrored from the desktop's language setting.
+fn linux_system_language(conf: &str) -> Option<Lang> {
+    let line = conf
+        .lines()
+        .find(|line| line.trim_start().starts_with("LANG="))?;
+    primary_language(line.trim_start().strip_prefix("LANG=")?.trim().trim_matches('"'))
 }
 
 #[cfg(test)]
@@ -367,6 +412,44 @@ mod tests {
         );
         assert_eq!(apple_language("zh_CN"), Some(Lang::Zh));
         assert_eq!(apple_language("nonsense"), None);
+    }
+
+    #[test]
+    fn the_windows_ui_language_list_names_the_primary_language() {
+        assert_eq!(
+            windows_ui_language(
+                "\r\nHKEY_CURRENT_USER\\Control Panel\\International\\User Profile\r\n    \
+                 Languages    REG_MULTI_SZ    zh-CN\r\n"
+            ),
+            Some(Lang::Zh),
+            "a Chinese Windows answers Chinese"
+        );
+        assert_eq!(
+            windows_ui_language("    Languages    REG_MULTI_SZ    en-US zh-CN"),
+            Some(Lang::En),
+            "the primary display language leads"
+        );
+        assert_eq!(
+            windows_ui_language("    Language    REG_SZ    zh-CN"),
+            None,
+            "other registry values state nothing"
+        );
+    }
+
+    #[test]
+    fn the_linux_system_locale_names_the_primary_language() {
+        assert_eq!(
+            linux_system_language("[Language]\nLANG=zh_CN.UTF-8\nLC_TIME=zh_CN.UTF-8\n"),
+            Some(Lang::Zh),
+            "a Chinese desktop's locale.conf answers Chinese"
+        );
+        assert_eq!(linux_system_language("LANG=en_US.UTF-8\n"), Some(Lang::En));
+        assert_eq!(
+            linux_system_language("LANG=C.UTF-8\n"),
+            None,
+            "a languageless system locale states nothing"
+        );
+        assert_eq!(linux_system_language("LC_TIME=zh_CN.UTF-8\n"), None);
     }
 
     #[test]
