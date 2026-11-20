@@ -752,6 +752,12 @@ pub enum Command {
     /// in place. The reply names what changed, what kept its connection, and
     /// what this build cannot reload yet.
     ConfigReload,
+    /// Flip the launch-time auto-approve choice and re-derive the policy the
+    /// same way a config reload does: the stored origin and mode stay, the
+    /// bool moves. The reply is the reload summary.
+    AutoApprove {
+        auto_approve: bool,
+    },
     /// Re-derive and return the normalized document the engine reads from the
     /// same ordered sources it was started with. Read-only: a host that wants
     /// to compare its own reader has no other way to ask.

@@ -1830,6 +1830,25 @@ impl Runtime {
         *self.inner.policy_origin.lock().await = Some((origin, mode, auto_approve));
     }
 
+    /// Flip the launch-time auto-approve choice and re-derive the policy the
+    /// same way a config reload does: the stored origin and mode stay, the
+    /// bool moves, and the reload path validates and applies the derived
+    /// policy in place.
+    pub async fn set_auto_approve(&self, auto_approve: bool) -> Result<Value, Error> {
+        {
+            let mut stored = self.inner.policy_origin.lock().await;
+            match stored.as_mut() {
+                Some((_, _, flag)) => *flag = auto_approve,
+                None => {
+                    return Err(Error::Invalid(
+                        "no policy origin to update".into(),
+                    ))
+                }
+            }
+        }
+        self.reload_config().await
+    }
+
     /// Whether any Session in this process is inside a drain. A standalone
     /// reload waits for this to clear, so no turn observes half a change.
     pub fn is_draining(&self) -> bool {

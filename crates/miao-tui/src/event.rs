@@ -50,6 +50,9 @@ pub enum AppEvent {
     Focus(bool),
     /// Wheel and click reports; only wheel movement does anything.
     Mouse(MouseEvent),
+    /// The engine accepted a flip of the auto-approve policy: relabel the
+    /// status strip from the new state.
+    AutoApproveSet(bool),
     /// A watched Session event worth telling the user about.
     Attention {
         kind: attention::Kind,

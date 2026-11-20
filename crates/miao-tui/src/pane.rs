@@ -101,6 +101,9 @@ pub struct Shell {
     /// Which surface the pointer's drag belongs to, if one is in flight. The
     /// release copies that surface and no other.
     drag: Option<DragTarget>,
+    /// The status strip's clickable ranges, as the last paint laid them out.
+    /// Cleared on every paint, so a press can only act on what is on screen.
+    footer_hits: Vec<FooterHit>,
     /// The queued prompts as painted, so a drag can copy the row it covers.
     queued: PaintedCells,
 }
@@ -138,8 +141,18 @@ impl Shell {
             sidebar_hidden: false,
             composer_text: None,
             drag: None,
+            footer_hits: Vec::new(),
             queued: PaintedCells::default(),
         }
+    }
+
+    /// The strip fact a press at this position acts on, if the last paint
+    /// recorded one there.
+    pub fn footer_segment(&self, position: ratatui::layout::Position) -> Option<FooterSegment> {
+        self.footer_hits
+            .iter()
+            .find(|hit| hit.covers(position.y, position.x))
+            .map(|hit| hit.segment)
     }
 
     /// Name the unfold chord the way the operator's keymap spells it. The
@@ -691,6 +704,7 @@ impl Shell {
             status_area,
             &self.status,
             self.leader_hint.as_deref(),
+            &mut self.footer_hits,
             &self.transcript.theme,
         );
         // The rule separates the columns; it is not part of either one. Paint it
@@ -1665,6 +1679,7 @@ pub struct Home {
     /// When the operator last typed, pasted or clicked. The idle light rests
     /// after a stretch of no input, the way the product's logo does, so a home
     /// screen left open stops repainting instead of running forever.
+    footer_hits: Vec<FooterHit>,
     last_input: Instant,
     /// Where the landing prompt painted its draft last frame, so a pointer
     /// inside it selects text the way the Session composer does.
@@ -1687,9 +1702,19 @@ impl Home {
             last_input: Instant::now(),
             composer_text: None,
             composer_drag: false,
+            footer_hits: Vec::new(),
             theme,
             animated: true,
         }
+    }
+
+    /// The strip fact a press at this position acts on, if the last paint
+    /// recorded one there.
+    pub fn footer_segment(&self, position: ratatui::layout::Position) -> Option<FooterSegment> {
+        self.footer_hits
+            .iter()
+            .find(|hit| hit.covers(position.y, position.x))
+            .map(|hit| hit.segment)
     }
 
     /// Any keystroke, paste or click restarts the idle light.
@@ -1885,6 +1910,7 @@ impl Home {
             frame,
             prompt_area,
             composer,
+            &mut self.footer_hits,
             &self.theme,
             Some(&ComposerFooter { status }),
         );
@@ -2401,6 +2427,36 @@ pub struct StatusHint {
     pub text: String,
     pub warning: bool,
     pub success: bool,
+    /// The fact a press on this hint acts on, when one exists: the
+    /// auto-approve hint flips the policy it names.
+    pub segment: Option<FooterSegment>,
+}
+
+/// The status strip's clickable facts: which span flips a policy or opens
+/// the model picker when clicked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FooterSegment {
+    /// The auto-approve hint: clicking flips the policy.
+    ApprovalMode,
+    /// The model label: clicking opens the model picker.
+    Model,
+    /// The provider · protocol tail: clicking opens the same picker.
+    Provider,
+}
+
+/// One clickable range on the strip's row, in absolute terminal cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FooterHit {
+    pub row: u16,
+    pub start: u16,
+    pub end: u16,
+    pub segment: FooterSegment,
+}
+
+impl FooterHit {
+    fn covers(&self, row: u16, column: u16) -> bool {
+        self.row == row && self.start <= column && column < self.end
+    }
 }
 
 /// What the landing prompt's bottom rule carries: the facts the status strip
@@ -2412,52 +2468,68 @@ pub struct ComposerFooter<'a> {
 
 /// The run's hints, then the model, then what the session has cost: the order
 /// the strip painted, minus the version, which keeps the row's right edge.
-fn footer_status_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
+/// Each span carries the segment a press on it acts on, if any.
+fn footer_status_spans(
+    status: &StatusStrip,
+    theme: &Theme,
+) -> Vec<(Span<'static>, Option<FooterSegment>)> {
     let palette = theme.palette;
     let muted = Style::new().fg(palette.text_muted);
-    let mut spans = hint_spans(status, theme);
+    let mut pairs = hint_spans(status, theme);
     if let Some(model) = &status.model {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", muted));
+        if !pairs.is_empty() {
+            pairs.push((Span::styled(" · ", muted), None));
         }
         // The model this window runs on is the row in effect for the whole
         // screen, so it carries the same accent the lists mark theirs with:
         // the strip used to paint it like any other text, which left "which
-        // model am I on" to be read rather than seen.
-        spans.push(Span::styled(
-            model.clone(),
-            Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
+        // model am I on" to be read rather than seen. A press on it opens
+        // the picker.
+        pairs.push((
+            Span::styled(
+                model.clone(),
+                Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
+            ),
+            Some(FooterSegment::Model),
         ));
     }
     if let Some(usage) = &status.usage {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", muted));
+        if !pairs.is_empty() {
+            pairs.push((Span::styled(" · ", muted), None));
         }
-        spans.push(Span::styled(usage.clone(), muted));
+        pairs.push((
+            Span::styled(usage.clone(), muted),
+            Some(FooterSegment::Provider),
+        ));
     }
-    spans
+    pairs
 }
 
-/// The exceptions a status line names, in the order the operator scans them.
-fn hint_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
+/// The exceptions a status line names, in the order the operator scans
+/// them. Each span carries the segment a press on it acts on, when one
+/// exists: the auto-approve hint flips the policy it names.
+fn hint_spans(status: &StatusStrip, theme: &Theme) -> Vec<(Span<'static>, Option<FooterSegment>)> {
     let palette = theme.palette;
     let muted = Style::new().fg(palette.text_muted);
-    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut spans: Vec<(Span<'static>, Option<FooterSegment>)> = Vec::new();
     for hint in &status.hints {
         if !spans.is_empty() {
-            spans.push(Span::styled(" · ", muted));
+            spans.push((Span::styled(" · ", muted), None));
         }
-        spans.push(Span::styled(
-            match hint.warning {
-                // A warning keeps its glyph, so it still reads on a monochrome
-                // terminal; facts about the run carry the tone alone.
-                true => format!("! {}", hint.text),
-                false => hint.text.clone(),
-            },
-            match hint.warning {
-                true => Style::new().fg(palette.warning),
-                false => muted,
-            },
+        spans.push((
+            Span::styled(
+                match hint.warning {
+                    // A warning keeps its glyph, so it still reads on a monochrome
+                    // terminal; facts about the run carry the tone alone.
+                    true => format!("! {}", hint.text),
+                    false => hint.text.clone(),
+                },
+                match hint.warning {
+                    true => Style::new().fg(palette.warning),
+                    false => muted,
+                },
+            ),
+            hint.segment,
         ));
     }
     spans
@@ -2467,23 +2539,29 @@ fn hint_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
 /// — an update waiting, a transcript scrolled away, a policy in effect — then
 /// the model answering. The state is the box title and the usage already rides
 /// the sidebar, so neither is repeated on this line.
-fn composer_status_spans(status: &StatusStrip, theme: &Theme) -> Vec<Span<'static>> {
-    let mut spans = hint_spans(status, theme);
+fn composer_status_spans(
+    status: &StatusStrip,
+    theme: &Theme,
+) -> Vec<(Span<'static>, Option<FooterSegment>)> {
+    let mut pairs = hint_spans(status, theme);
     if let Some(model) = &status.model {
-        if !spans.is_empty() {
-            spans.push(Span::styled(
-                " · ",
-                Style::new().fg(theme.palette.text_muted),
+        if !pairs.is_empty() {
+            pairs.push((
+                Span::styled(" · ", Style::new().fg(theme.palette.text_muted)),
+                None,
             ));
         }
-        spans.push(Span::styled(
-            model.clone(),
-            Style::new()
-                .fg(theme.palette.accent)
-                .add_modifier(Modifier::BOLD),
+        pairs.push((
+            Span::styled(
+                model.clone(),
+                Style::new()
+                    .fg(theme.palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Some(FooterSegment::Model),
         ));
     }
-    spans
+    pairs
 }
 
 /// The facts row under the composer box: the model and any exception the run
@@ -2496,6 +2574,7 @@ fn render_composer_status(
     area: Rect,
     status: &StatusStrip,
     leader: Option<&str>,
+    hits: &mut Vec<FooterHit>,
     theme: &Theme,
 ) {
     let palette = theme.palette;
@@ -2522,13 +2601,30 @@ fn render_composer_status(
             Style::new().fg(palette.primary),
         )),
         None => {
-            let mut spans = composer_status_spans(status, theme);
-            match spans.is_empty() {
+            let mut pairs = composer_status_spans(status, theme);
+            match pairs.is_empty() {
                 true => Line::from(String::new()),
                 false => {
                     // The TS status line starts two cells in from the edge; the
                     // row keeps that offset now that it is a line of its own.
-                    spans.insert(0, Span::raw("  "));
+                    // Each tagged span also records the absolute cells a press
+                    // on it covers, so the strip's facts are clickable.
+                    pairs.insert(0, (Span::raw("  "), None));
+                    let mut col = 0u16;
+                    let mut spans = Vec::new();
+                    for (span, segment) in &pairs {
+                        let width = UnicodeWidthStr::width(span.content.as_ref()) as u16;
+                        if let Some(segment) = segment {
+                            hits.push(FooterHit {
+                                row: area.y,
+                                start: area.x + 2 + col,
+                                end: area.x + 2 + col + width,
+                                segment: *segment,
+                            });
+                        }
+                        spans.push(span.clone());
+                        col += width;
+                    }
                     Line::from(spans)
                 }
             }
@@ -2651,6 +2747,7 @@ fn render_home_composer(
     frame: &mut Frame,
     area: Rect,
     composer: &Composer,
+    hits: &mut Vec<FooterHit>,
     theme: &Theme,
     footer: Option<&ComposerFooter>,
 ) -> Option<ComposerText> {
@@ -2683,17 +2780,33 @@ fn render_home_composer(
     // that eats into the rule would leave the band's own width unmeasurable.
     if let Some(footer) = footer {
         let row = area.y + area.height - 1;
-        let mut spans = footer_status_spans(footer.status, theme);
-        if !spans.is_empty() {
-            let text: usize = spans
+        let mut pairs = footer_status_spans(footer.status, theme);
+        if !pairs.is_empty() {
+            let text: usize = pairs
                 .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .map(|(span, _)| UnicodeWidthStr::width(span.content.as_ref()))
                 .sum();
-            spans.insert(0, Span::raw(" "));
+            pairs.insert(0, (Span::raw(" "), None));
+            let x0 = area.x + 1;
+            let mut col = 1u16;
+            let mut spans = Vec::new();
+            for (span, segment) in &pairs {
+                let width = UnicodeWidthStr::width(span.content.as_ref()) as u16;
+                if let Some(segment) = segment {
+                    hits.push(FooterHit {
+                        row,
+                        start: x0 + col,
+                        end: x0 + col + width,
+                        segment: *segment,
+                    });
+                }
+                spans.push(span.clone());
+                col += width;
+            }
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(Style::new().bg(palette.background)),
                 Rect {
-                    x: area.x + 1,
+                    x: x0,
                     y: row,
                     width: (text as u16).min(area.width.saturating_sub(2)) + 1,
                     height: 1,
@@ -6034,11 +6147,13 @@ mod tests {
                     text: "approve or deny".into(),
                     warning: true,
                     success: false,
+                    segment: None,
                 },
                 StatusHint {
                     text: "ctrl+c to interrupt".into(),
                     warning: false,
                     success: false,
+                    segment: None,
                 },
             ],
         };
@@ -6186,7 +6301,21 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 1)).expect("terminal");
         terminal
             .draw(|frame| {
-                super::render_composer_status(frame, frame.area(), &status, None, &theme);
+                let mut hits = Vec::new();
+                super::render_composer_status(
+                    frame,
+                    frame.area(),
+                    &status,
+                    None,
+                    &mut hits,
+                    &theme,
+                );
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "the model label is the one clickable fact: {hits:?}"
+                );
+                assert_eq!(hits[0].segment, FooterSegment::Model);
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
@@ -7282,11 +7411,13 @@ mod tests {
                     &composer,
                     &theme,
                 );
+                let mut hits = Vec::new();
                 render_composer_status(
                     frame,
                     ratatui::layout::Rect::new(0, height - 1, width, 1),
                     status,
                     leader,
+                    &mut hits,
                     &theme,
                 );
             })
@@ -7329,6 +7460,7 @@ mod tests {
             text: "queued (2)".to_string(),
             warning: false,
             success: false,
+            segment: None,
         });
         let painted = paint_composer_footer(&status, None, 80);
         assert!(painted.contains("queued (2)"), "{painted}");

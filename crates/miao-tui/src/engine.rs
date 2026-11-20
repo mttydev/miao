@@ -52,6 +52,7 @@ const PENDING_INPUT_PAGE: usize = 100;
 /// method at all: `usage.hourly` was answered with `unknown method` and the
 /// sidebar's strip stayed empty no matter what the UI asked for.
 const USAGE_HOURLY_METHOD: &str = "usage_hourly";
+const AUTO_APPROVE_METHOD: &str = "auto_approve";
 
 /// Plan quotas for the stored credentials the engine can meter. It is its own
 /// method because a provider endpoint is a network round trip: the billed
@@ -254,6 +255,9 @@ pub enum Request {
     /// The trailing hourly window the sidebar paints, workspace-wide.
     UsageHourly {
         hours: u64,
+    },
+    AutoApprove {
+        auto_approve: bool,
     },
     /// Plan windows (5h / weekly / monthly) for every metered credential.
     Quota,
@@ -623,6 +627,12 @@ impl Handle {
     /// scoped: the ledger answers for every Session in this workspace.
     pub fn usage_hourly(&self, hours: u64) {
         let _ = self.tx.send(Request::UsageHourly { hours });
+    }
+
+    /// Flip the auto-approve policy on the running engine. The strip
+    /// relabels when the reply lands, not on the click.
+    pub fn set_auto_approve(&self, auto_approve: bool) {
+        let _ = self.tx.send(Request::AutoApprove { auto_approve });
     }
 
     /// Ask for the plan windows behind the stored credentials. A provider that
@@ -1835,6 +1845,18 @@ async fn run(
                         }
                     }
                 }
+                Request::AutoApprove { auto_approve } => {
+                    let result = client
+                        .request(AUTO_APPROVE_METHOD, json!({ "auto_approve": auto_approve }))
+                        .await;
+                    match result {
+                        Ok(_) => bus.send(AppEvent::AutoApproveSet(auto_approve)),
+                        Err(error) => bus
+                            .send(AppEvent::ActionFailed(format!(
+                                "auto-approve failed: {error}"
+                            ))),
+                    }
+                }
                 Request::UsageHourly { hours } => {
                     let result = client
                         .request(USAGE_HOURLY_METHOD, json!({ "hours": hours }))
@@ -2943,6 +2965,25 @@ mod tests {
         assert!(matches!(
             request.command,
             miao_engine::protocol::Command::UsageHourly { hours: 24 }
+        ));
+    }
+
+    /// The strip's mode flip names the method the engine serves: a dotted or
+    /// renamed method would answer `unknown method` and leave the strip
+    /// stale after a click.
+    #[test]
+    fn the_auto_approve_flip_names_the_method_the_engine_serves() {
+        let request: miao_engine::protocol::Request = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "method": AUTO_APPROVE_METHOD,
+            "params": { "auto_approve": false },
+        }))
+        .expect("the engine parses this method");
+        assert!(matches!(
+            request.command,
+            miao_engine::protocol::Command::AutoApprove {
+                auto_approve: false
+            }
         ));
     }
 

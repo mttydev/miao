@@ -18,7 +18,7 @@ use crate::engine;
 use crate::event::{AppEvent, Bus};
 use crate::keybinds::{self, Keymap};
 use crate::lang::Lang;
-use crate::pane::{render_dialog, Home, Panel, PanelKind, Shell, StatusHint};
+use crate::pane::{render_dialog, FooterSegment, Home, Panel, PanelKind, Shell, StatusHint};
 use crate::platform::attention::{self, Attention};
 use crate::platform::{clipboard, editor, zed};
 use crate::scroll::Scroll;
@@ -710,6 +710,8 @@ pub struct App {
     /// attached pictures: the async clipboard read is still catching up, and
     /// the held prompt resends once it lands.
     held_prompt: Option<(String, Vec<Value>)>,
+    /// The launch policy in force, flipped at runtime from the strip.
+    approval_auto: bool,
     startup: Startup,
     /// Built-in plus custom themes, in menu order.
     themes: theme::Catalog,
@@ -878,6 +880,8 @@ impl App {
             clipboard_busy: false,
             clipboard_paste: false,
             held_prompt: None,
+            // The launch policy in force, flipped at runtime from the strip.
+            approval_auto: startup.auto,
             startup,
             themes,
             live: None,
@@ -1386,6 +1390,14 @@ impl App {
                     .collect::<Vec<_>>();
                 self.open_dialog(Dialog::workspaces(&rows));
             }
+            AppEvent::AutoApproveSet(on) => {
+                self.approval_auto = on;
+                self.update_status();
+                self.notice(match on {
+                    true => "auto-approve on: writes run without asking",
+                    false => "auto-approve off: every write asks first",
+                });
+            }
             AppEvent::Usage(usage) => {
                 self.usage = Some(usage);
                 self.shell.set_usage(self.usage.as_ref());
@@ -1826,6 +1838,15 @@ impl App {
             let position = ratatui::layout::Position::new(mouse.column, mouse.row);
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
+                    eprintln!(
+                        "CLICKDEBUG down at {:?} {:?} hits={}",
+                        position,
+                        self.screen,
+                        match self.screen {
+                            Screen::Session => self.shell.footer_hits.len(),
+                            Screen::Home => self.home.footer_hits.len(),
+                        }
+                    );
                     self.leader = false;
                     // A second press on the same cell inside the window is a
                     // double click: the transcript selects the word under it
@@ -1836,6 +1857,26 @@ impl App {
                         cell == position && at.elapsed() <= Self::DOUBLE_CLICK_WINDOW
                     });
                     self.last_click = Some((position, Instant::now()));
+                    // The status strip's facts are clickable first: a press on
+                    // the row flips the policy it names or opens the picker
+                    // for the model it names, and never starts a transcript
+                    // selection.
+                    let segment = match self.screen {
+                        Screen::Session => self.shell.footer_segment(position),
+                        Screen::Home => self.home.footer_segment(position),
+                    };
+                    eprintln!("CLICKDEBUG segment={segment:?}");
+                    match segment {
+                        Some(FooterSegment::ApprovalMode) => {
+                            self.toggle_auto_approve();
+                            return;
+                        }
+                        Some(FooterSegment::Model | FooterSegment::Provider) => {
+                            self.open_models_dialog();
+                            return;
+                        }
+                        None => {}
+                    }
                     if repeat && self.screen == Screen::Session && self.shell.select_word(position)
                     {
                         return;
@@ -2274,6 +2315,14 @@ impl App {
 
     /// The model picker over the current catalog, narrowed to the remembered
     /// provider and carrying the needs-auth tail from the last catalog.
+    /// The strip's auto-approve label is clickable: the flip asks the engine
+    /// to re-derive its policy, and the strip relabels when the reply lands.
+    fn toggle_auto_approve(&mut self) {
+        if let Some(engine) = self.engine.as_ref() {
+            engine.set_auto_approve(!self.approval_auto);
+        }
+    }
+
     fn open_models_dialog(&mut self) {
         let current = self
             .session
@@ -4866,11 +4915,12 @@ impl App {
             // The launch policy holds before any Session opens, so the strip
             // names it on the launcher too: a person starting work under
             // `--auto` should not have to open a Session to find that out.
-            if self.startup.auto {
+            if self.approval_auto {
                 self.shell.status.hints.push(StatusHint {
                     text: lang.t("status.auto_approve").to_string(),
                     warning: true,
                     success: false,
+                    segment: Some(FooterSegment::ApprovalMode),
                 });
             }
             self.mtty_state.update(crate::mtty_state::State::Idle);
@@ -5185,6 +5235,7 @@ impl App {
                     .tf("status.update_ready", &[installed.as_str()]),
                 warning: false,
                 success: true,
+                segment: None,
             });
         }
         // Scrolled away from the newest row: the transcript keeps filling below
@@ -5195,6 +5246,7 @@ impl App {
                 text: self.shell.lang().t("status.not_following").to_string(),
                 warning: false,
                 success: false,
+                segment: None,
             });
         }
         // An approval or question is already the phase line, the queued count
@@ -5223,6 +5275,7 @@ impl App {
                     text,
                     warning: false,
                     success: false,
+                    segment: None,
                 });
             }
         }
@@ -5231,11 +5284,12 @@ impl App {
         // policy in effect, not as the absence of one — the same reason the
         // warning flag exists. Read-only is the other side worth naming: it
         // refuses writes, which surprises anyone who expects a workspace mode.
-        if self.startup.auto {
+        if self.approval_auto {
             hints.push(StatusHint {
                 text: self.shell.lang().t("status.auto_approve").to_string(),
                 warning: true,
                 success: false,
+                segment: Some(FooterSegment::ApprovalMode),
             });
         }
         // A hidden column took its own chord with it. Naming it here is what
@@ -5246,6 +5300,7 @@ impl App {
                 text: self.shell.lang().tf("status.sidebar_hidden", &[chord]),
                 warning: false,
                 success: false,
+                segment: None,
             });
         }
         self.shell.status.hints = hints;
