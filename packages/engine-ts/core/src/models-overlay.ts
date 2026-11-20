@@ -43,6 +43,21 @@ export const providers: Record<string, ProviderPatch> = {
       },
     },
   },
+  /**
+   * Volcengine (Ark) serves this DeepSeek V4.1 Flash build with image input,
+   * but the catalog marks the dated id text-only. Ark accepts an `image_url`
+   * part for it and describes the picture (checked against the live
+   * endpoint), so restore the modality; otherwise the engine replaces a
+   * pasted image with the "model does not support image input" marker.
+   */
+  volcengine: {
+    id: "volcengine",
+    models: {
+      "deepseek-v4-1-flash-261017": {
+        modalities: { input: ["text", "image"], output: ["text"] },
+      },
+    },
+  },
 }
 
 /**
