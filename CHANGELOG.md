@@ -13,6 +13,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-20
+
+### Fixed
+- **tui**: clear the status strip's hits on every paint (#3262) (`3ecd0f6aa8`)
+- **tui**: make the first-run model setup reachable instead of silent (#3260) (`0fdc24985e`)
+
 ## [0.4.3] - 2026-11-20
 
 ### Added
