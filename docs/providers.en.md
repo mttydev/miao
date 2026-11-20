@@ -107,6 +107,7 @@ and native-currency cost.
       "models": {
         "llama-3.3-70b": {
           "name": "Llama 3.3 70B",
+          "capabilities": { "tools": true, "input": ["text"] },
           "cost": { "input": 0.2, "output": 0.6 },
           "limit": { "context": 131072 },
         },
@@ -121,6 +122,20 @@ and native-currency cost.
 `api` field selects the wire protocol, and the whole file is validated against
 `$schema`. After editing, run `miao models` to confirm what the provider now
 reports.
+
+`capabilities` declares what the model can do, and it gates what the engine
+sends it. `tools` gates tool calling; `input` lists the modalities the model
+accepts (`text`, `image`, `pdf`). A route that omits `image` makes the engine
+replace attached images with an omission marker and instructs the model to
+tell the operator — so a vision model behind a custom provider must declare
+`["text", "image"]`, for example:
+
+```jsonc
+"deepseek-v4-1-flash-261017": {
+  "name": "DeepSeek V4.1 Flash",
+  "capabilities": { "tools": true, "input": ["text", "image"] },
+},
+```
 
 ## Native engine routes
 
