@@ -11910,7 +11910,7 @@ mod tests {
         let notice = app
             .home
             .notice()
-            .or_else(|| app.shell.composer.notice.as_deref())
+            .or(app.shell.composer.notice.as_deref())
             .expect("the setup guidance is on the screen");
         assert!(notice.contains("auth login"), "{notice}");
         assert!(notice.contains("/model"), "{notice}");
@@ -11926,7 +11926,7 @@ mod tests {
         let notice = app
             .home
             .notice()
-            .or_else(|| app.shell.composer.notice.as_deref())
+            .or(app.shell.composer.notice.as_deref())
             .expect("the setup guidance is on the screen");
         assert!(notice.contains("auth login"), "{notice}");
     }
