@@ -25,21 +25,21 @@ impl Lang {
     }
 
     /// The ambient locale, read the way gettext does: `LC_ALL` wins, then
-    /// `LC_MESSAGES`, then `LANG`. A `zh` prefix means Chinese; anything else
-    /// non-empty means English, and an unset world falls back to English.
+    /// `LC_MESSAGES`, then `LANG`. A `zh` prefix means Chinese and any other
+    /// stated language means English — but a language-less value (`C`,
+    /// `POSIX`, the Terminal.app default `C.UTF-8`) states nothing, and on
+    /// macOS the system's own language answers before English does.
     pub fn from_env() -> Lang {
         for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
             if let Ok(value) = std::env::var(key) {
-                let value = value.trim();
-                if value.is_empty() {
-                    continue;
+                if let Some(lang) = shell_language(value.trim()) {
+                    return lang;
                 }
-                return if value.to_ascii_lowercase().starts_with("zh") {
-                    Lang::Zh
-                } else {
-                    Lang::En
-                };
             }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(lang) = platform_language() {
+            return lang;
         }
         Lang::En
     }
@@ -195,6 +195,63 @@ impl Lang {
     }
 }
 
+/// The language a locale value states: `zh_CN.UTF-8` speaks Chinese and
+/// `en_US.UTF-8` English, while `C`, `POSIX` and `C.UTF-8` — what a Chinese
+/// macOS exports into the shell — state no language at all.
+fn shell_language(value: &str) -> Option<Lang> {
+    let language = value.split(['.', '@']).next()?.trim();
+    if language.is_empty() || language == "C" || language == "POSIX" {
+        return None;
+    }
+    let primary = language.split(['-', '_']).next()?.to_ascii_lowercase();
+    match primary.as_str() {
+        "zh" => Some(Lang::Zh),
+        "en" => Some(Lang::En),
+        _ => None,
+    }
+}
+
+/// macOS records the operator's real language in its preferences even when
+/// the shell exports a language-less `C.UTF-8`, so the system answers when
+/// the environment cannot.
+#[cfg(target_os = "macos")]
+fn platform_language() -> Option<Lang> {
+    let output = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleLanguages"])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8(output.stdout).ok())
+        .flatten()?;
+    apple_language(&output).or_else(|| {
+        let output = std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleLocale"])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8(output.stdout).ok())
+            .flatten()?;
+        apple_language(&output)
+    })
+}
+
+/// The primary language from `defaults read` output: the languages list
+/// starts with it (`"zh-Hans-CN",`) and the locale reads `zh_CN`.
+fn apple_language(text: &str) -> Option<Lang> {
+    let stated = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('"') || (line.len() > 2 && !line.contains(' ')))?;
+    let primary = stated
+        .trim_matches(|c: char| c == '"' || c == ',')
+        .split(['-', '_'])
+        .next()?
+        .to_ascii_lowercase();
+    match primary.as_str() {
+        "zh" => Some(Lang::Zh),
+        "en" => Some(Lang::En),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +340,33 @@ mod tests {
         assert_eq!(Lang::parse("zh-CN"), Some(Lang::Zh));
         assert_eq!(Lang::parse("中文"), Some(Lang::Zh));
         assert_eq!(Lang::parse("fr"), None);
+    }
+
+    #[test]
+    fn a_languageless_shell_locale_states_nothing() {
+        // The Terminal.app default on a Chinese macOS: no language stated.
+        assert_eq!(shell_language("C.UTF-8"), None);
+        assert_eq!(shell_language("C"), None);
+        assert_eq!(shell_language("POSIX"), None);
+        assert_eq!(shell_language(""), None);
+        assert_eq!(shell_language("zh_CN.UTF-8"), Some(Lang::Zh));
+        assert_eq!(shell_language("en_US.UTF-8"), Some(Lang::En));
+    }
+
+    #[test]
+    fn the_apple_language_list_names_the_primary_language() {
+        assert_eq!(
+            apple_language("(\n    \"zh-Hans-CN\"\n)"),
+            Some(Lang::Zh),
+            "the zh-Hans macOS answers Chinese"
+        );
+        assert_eq!(
+            apple_language("(\n    \"en-US\",\n    \"zh-Hans-CN\"\n)"),
+            Some(Lang::En),
+            "the primary language leads"
+        );
+        assert_eq!(apple_language("zh_CN"), Some(Lang::Zh));
+        assert_eq!(apple_language("nonsense"), None);
     }
 
     #[test]
