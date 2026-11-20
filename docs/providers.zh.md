@@ -79,6 +79,7 @@ miao auth login mtty
       "models": {
         "llama-3.3-70b": {
           "name": "Llama 3.3 70B",
+          "capabilities": { "tools": true, "input": ["text"] },
           "cost": { "input": 0.2, "output": 0.6 },
           "limit": { "context": 131072 },
         },
@@ -89,6 +90,15 @@ miao auth login mtty
 ```
 
 `env` 指定供应商从哪些环境变量读取 key；`disabled` 会在即使存在凭证的情况下隐藏该供应商及其模型。`api` 选择通信协议，整个文件由 `$schema` 校验。改动后运行 `miao models` 确认该供应商现在报告的内容。
+
+`capabilities` 声明模型能做什么，并决定引擎给它发什么：`tools` 控制工具调用；`input` 列出模型接受的输入形态（`text`、`image`、`pdf`）。路由省略 `image` 时，引擎会把附加的图片替换成省略标记并指示模型告知操作者——所以自定义供应商背后的视觉模型必须声明 `["text", "image"]`，例如：
+
+```jsonc
+"deepseek-v4-1-flash-261017": {
+  "name": "DeepSeek V4.1 Flash",
+  "capabilities": { "tools": true, "input": ["text", "image"] },
+},
+```
 
 ## 原生引擎路由
 

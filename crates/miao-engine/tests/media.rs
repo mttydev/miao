@@ -478,6 +478,46 @@ async fn capability_mismatch_refuses_media_consistently_and_keeps_bytes_recovera
     server.await.unwrap();
 }
 
+/// A route that declares image input delivers the picture whole: the declared
+/// capability is what gates the omission marker, so `["text","image"]` must
+/// keep the bytes on the wire exactly like an undeclared (empty) route does.
+#[tokio::test]
+async fn a_declared_image_capability_delivers_the_image() {
+    let (url, mut requests, server) =
+        common::endpoint(vec![(200, anthropic_text("sees it"))]).await;
+    let capable: Arc<dyn Provider> = Anthropic::new(url, "fixture".into(), "fixture-model".into())
+        .unwrap()
+        .with_input_modalities(vec!["text".into(), "image".into()])
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let runtime = Runtime::new(
+        store.clone(),
+        capable,
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    let image: Attachment = serde_json::from_value(
+        json!({"mime":"image/png","data":PNG,"metadata":{"name":"diagram.png"}}),
+    )
+    .unwrap();
+    runtime
+        .admit_with(input(), vec![image.clone()], true)
+        .await
+        .unwrap();
+    wait_runs(&store, "s", 1).await;
+
+    let wire = requests.recv().await.unwrap().to_string();
+    assert!(
+        wire.contains(&image.data),
+        "the declared capability delivers the image: {wire}"
+    );
+    assert!(!wire.contains("image attachment omitted"), "{wire}");
+    runtime.shutdown().await;
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn unsupported_media_is_rejected_before_any_durable_state() {
     let dir = tempfile::tempdir().unwrap();

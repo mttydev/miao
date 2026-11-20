@@ -80,7 +80,7 @@ fn normalize_parts(
             .ok_or_else(|| ProviderError::Stream("invalid media type".into()))?;
         let name = part["metadata"]["name"].as_str().unwrap_or("attachment");
         if image && !input.is_empty() && !input.iter().any(|item| item.starts_with("image")) {
-            *part = json!({"type":"text","text":format!("[image attachment omitted: model does not support image input: {name}]")});
+            *part = json!({"type":"text","text":format!("[image attachment omitted: model does not support image input: {name}]\nThe image was not sent to the model. Tell the operator that this attachment could not be delivered, and that switching to a model whose route declares image input (or adding image to the model's capabilities.input in the configuration) will deliver it.")});
             continue;
         }
         if mime.starts_with("text/") {
