@@ -67,7 +67,7 @@ impl Lang {
             "activity" => ("ACTIVITY", "活动"),
             "activity.auxiliary" => (
                 "auxiliary {0} call{1} · in {2} · out {3}",
-                "辅助调用 {0} 次 · 入 {2} · 出 {3}",
+                "辅助调用 {0} 次 · 输入 {2} · 输出 {3}",
             ),
             "activity.decisions" => ("decisions {0}", "决策 {0}"),
             "activity.hooks" => ("hooks {0} · {1} ms{2}", "钩子 {0} · {1} ms{2}"),
@@ -75,7 +75,7 @@ impl Lang {
             "activity.subagent_attempts" => (" · {0} attempt{1}", " · {0} 次尝试"),
             "activity.subagents" => (
                 "subagents {0} · {1} turn{2} · in {3}{4}",
-                "子代理 {0} · {1} 轮 · 入 {3}{4}",
+                "子代理 {0} · {1} 轮 · 输入 {3}{4}",
             ),
             "cache" => ("cache", "缓存"),
             "changes" => ("changes", "变更"),
@@ -86,7 +86,7 @@ impl Lang {
             "composer.thinking_summary" => ("Thinking · {0}", "思考中 · {0}"),
             "context" => ("context", "上下文"),
             "footer.hide_sidebar" => ("hide sidebar", "隐藏侧栏"),
-            "in" => ("in", "入"),
+            "in" => ("in", "输入"),
             "lang.auto" => (
                 "Language now follows the system locale ({0})",
                 "界面语言跟随系统（当前 {0}）",
@@ -134,7 +134,7 @@ impl Lang {
             ),
             "mode" => ("mode", "模式"),
             "model" => ("model", "模型"),
-            "out" => ("out", "出"),
+            "out" => ("out", "输出"),
             "session.usage" => ("SESSION · USAGE", "会话 · 用量"),
             "status.backlog" => ("Engine backlog · {0} queued", "引擎积压 · {0} 条排队"),
             "status.done" => ("Done", "已完成"),

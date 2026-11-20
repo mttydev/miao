@@ -5155,10 +5155,13 @@ impl App {
                 .filter(|usage| usage.turns > 0)
                 .map(|usage| {
                     format!(
-                        "{} turns · in {} · out {}",
+                        "{} {} · {} {} · {} {}",
                         usage.turns,
+                        self.shell.lang().t("turns"),
                         compact_tokens(usage.input_tokens),
-                        compact_tokens(usage.output_tokens)
+                        self.shell.lang().t("in"),
+                        compact_tokens(usage.output_tokens),
+                        self.shell.lang().t("out")
                     )
                 });
         // The state rides the composer's own title — idle/working/needs you sit
