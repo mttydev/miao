@@ -3541,11 +3541,11 @@ fn hourly_lines(
     ]));
     let compact = crate::status::compact_tokens;
     lines.push(Line::from(vec![
-        Span::styled("in ", muted),
+        Span::styled(format!("{} ", lang.t("in")), muted),
         Span::styled(compact(usage.input), Style::new().fg(palette.secondary)),
-        Span::styled(" · out ", muted),
+        Span::styled(format!(" · {} ", lang.t("out")), muted),
         Span::styled(compact(usage.output), Style::new().fg(palette.warning)),
-        Span::styled(" · cache ", muted),
+        Span::styled(format!(" · {} ", lang.t("cache")), muted),
         Span::styled(
             usage
                 .cache_hit()
@@ -3574,19 +3574,25 @@ fn hourly_lines(
     {
         let numbers = MODEL_IN_CELLS + MODEL_OUT_CELLS + MODEL_CACHE_CELLS + 3;
         let name_cells = width.saturating_sub(numbers + MODEL_INDENT).max(8);
+        // CJK labels own two cells per character, so the header pads to the
+        // columns' *display* width: a format-width pad would drift the labels
+        // off the ASCII figures beneath them.
+        let header_cell = |label: &str, cells: usize| {
+            let pad = cells.saturating_sub(unicode_width::UnicodeWidthStr::width(label));
+            format!("{}{}", " ".repeat(pad), label)
+        };
+        let model_label = lang.t("model");
+        let model_cells =
+            name_cells.saturating_sub(unicode_width::UnicodeWidthStr::width(model_label));
         lines.push(Line::from(Span::styled(
             format!(
-                "{:indent$}{:<name_cells$} {:>in_cells$} {:>out_cells$} {:>hit_cells$}",
-                "",
-                lang.t("model"),
-                lang.t("in"),
-                lang.t("out"),
-                lang.t("cache"),
-                indent = MODEL_INDENT,
-                name_cells = name_cells,
-                in_cells = MODEL_IN_CELLS,
-                out_cells = MODEL_OUT_CELLS,
-                hit_cells = MODEL_CACHE_CELLS,
+                "{}{}{} {} {} {}",
+                " ".repeat(MODEL_INDENT),
+                model_label,
+                " ".repeat(model_cells),
+                header_cell(lang.t("in"), MODEL_IN_CELLS),
+                header_cell(lang.t("out"), MODEL_OUT_CELLS),
+                header_cell(lang.t("cache"), MODEL_CACHE_CELLS),
             ),
             muted,
         )));
@@ -3616,10 +3622,13 @@ fn hourly_lines(
         hover.push((
             lines.len(),
             format!(
-                "{} · in {} · out {} · cache {}",
+                "{} · {} {} · {} {} · {} {}",
                 model.model,
+                lang.t("in"),
                 compact(model.input),
+                lang.t("out"),
                 compact(model.output),
+                lang.t("cache"),
                 hit
             ),
         ));
