@@ -660,6 +660,10 @@ impl Shell {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
+        // The strip's hits belong to this paint alone: a frame that lays the
+        // row out differently must not leave last paint's ranges reachable,
+        // and a wire built from them would repeat every fact per frame.
+        self.footer_hits.clear();
         let panel_height = self.panel.as_ref().map_or(0, Panel::height);
         // No air bands around the composer. The box draws its own rules above
         // and below, and the facts row sits directly under it: a spare row on
@@ -1845,6 +1849,10 @@ impl Home {
         composer: &mut Composer,
         status: &StatusStrip,
     ) {
+        // The landing strip's hits belong to this paint alone, like the
+        // Session's: without the clear, every frame appended its ranges and
+        // the merged-footer wire repeated the facts hundreds of times.
+        self.footer_hits.clear();
         let palette = self.theme.palette;
         let width = area.width as usize;
         // The page ground: every other row is painted by something, and the
@@ -10131,6 +10139,52 @@ mod draft_gap_tests {
         let ids: Vec<&str> = wire.iter().map(|seg| seg.id).collect();
         assert_eq!(ids, vec!["model", "provider"], "{wire:?}");
         assert_eq!(wire[1].text, "volcengine · mtp", "{wire:?}");
+    }
+
+    /// Two paints must leave two segments, not four: the strip's hits belong
+    /// to the frame that laid them out, and the merged-footer wire reports
+    /// exactly what is on screen now. The ranges were never cleared between
+    /// paints, so every frame appended its spans and a session's wire grew
+    /// without bound.
+    #[test]
+    fn repeated_session_paints_do_not_stack_the_wire() {
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), strip_theme());
+        shell.set_embedded_footer(true);
+        shell.status.model = Some("deepseek-v4".into());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
+        for _ in 0..2 {
+            terminal.draw(|frame| shell.render(frame)).expect("draw");
+        }
+        let wire = shell.footer_wire().expect("the wire survives");
+        assert_eq!(wire.len(), 1, "model segs stacked across paints: {wire:?}");
+    }
+
+    #[test]
+    fn repeated_landing_paints_do_not_stack_the_wire() {
+        let mut home = Home::new(strip_theme());
+        home.set_embedded_footer(true);
+        let status = StatusStrip {
+            model: Some("deepseek-v4".into()),
+            usage: Some("volcengine · mtp".into()),
+            hints: Vec::new(),
+        };
+        let mut composer = crate::editor::Composer::new(Path::new("."));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
+        for _ in 0..2 {
+            terminal
+                .draw(|frame| home.render(frame, frame.area(), &mut composer, &status))
+                .expect("draw");
+        }
+        let wire = home
+            .footer_wire(&status)
+            .expect("the landing wire survives");
+        assert_eq!(
+            wire.len(),
+            2,
+            "landing segs stacked across paints: {wire:?}"
+        );
     }
 }
 
