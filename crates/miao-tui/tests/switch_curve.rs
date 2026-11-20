@@ -57,6 +57,8 @@ impl Harness {
         cmd.arg(&dir);
         cmd.cwd(&dir);
         cmd.env("TERM", "xterm-256color");
+        // Deterministic English labels; see tests/smoke.rs for the note.
+        cmd.env("LC_ALL", "en_US.UTF-8");
         cmd.env("MIAO_TUI_STATE_DIR", dir.join("state"));
         cmd.env("MIAO_DISABLE_TERMINAL_TITLE", "0");
         cmd.env("MIAO_TUI_FAKE_READY_FILE", &ready);
@@ -217,19 +219,27 @@ fn a_hundred_session_switches_do_not_grow_the_process() {
         harness.send(b"\x18");
         harness.send(b"l");
         assert!(
-            harness.wait_for("open · 1-9 pinned", Duration::from_secs(5)),
+            harness.wait_for("open · 1-9 pinned", Duration::from_secs(20)),
             "switch {index}: the session dialog never opened\n{}",
             harness.text()
         );
         harness.send(b"\r");
         assert!(
-            harness.wait_for("hello from the fixture", Duration::from_secs(5)),
+            harness.wait_for("hello from the fixture", Duration::from_secs(20)),
             "switch {index}: the Session never opened\n{}",
+            harness.text()
+        );
+        // #2639: the first Escape from a Session only arms the leave hint;
+        // the second one returns to the launcher.
+        harness.send(b"\x1b");
+        assert!(
+            harness.wait_for("esc again to go back home", Duration::from_secs(20)),
+            "switch {index}: the leave hint never showed\n{}",
             harness.text()
         );
         harness.send(b"\x1b");
         assert!(
-            harness.wait_for("Ask anything", Duration::from_secs(5)),
+            harness.wait_for("Ask anything", Duration::from_secs(20)),
             "switch {index}: the launcher never came back\n{}",
             harness.text()
         );

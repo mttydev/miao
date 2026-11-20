@@ -53,6 +53,8 @@ impl Harness {
         cmd.arg(&dir);
         cmd.cwd(&dir);
         cmd.env("TERM", "xterm-256color");
+        // Deterministic English labels; see tests/smoke.rs for the note.
+        cmd.env("LC_ALL", "en_US.UTF-8");
         cmd.env("MIAO_TUI_STATE_DIR", dir.join("state"));
         cmd.env("MIAO_DISABLE_TERMINAL_TITLE", "0");
         let ready = dir.join("engine.ready");
