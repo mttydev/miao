@@ -13,6 +13,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-20
+
+### Added
+- **tui**: hand the facts row to the host and answer presses with chords (#3264) (`be65f24d87`)
+
 ## [0.4.4] - 2026-11-20
 
 ### Fixed
