@@ -117,9 +117,15 @@ fn context_json(context: Option<&RuntimeContext>) -> serde_json::Value {
 /// Whether the running host merges this pane's strip into its own footer.
 /// Taking the row over only pays when the host answers with synthesized
 /// presses; the capability rides a variable an older host never sets, so a
-/// new TUI under one keeps painting its own strip.
-pub fn host_footer_enabled() -> bool {
-    flag_from_lookup(|name| std::env::var(name).ok())
+/// new TUI under one keeps painting its own strip. A pane env is required
+/// too: without one there is no one to report to, and a hidden strip with
+/// no host row would leave the facts nowhere.
+pub fn host_footer_active() -> bool {
+    active_from_lookup(|name| std::env::var(name).ok())
+}
+
+fn active_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    flag_from_lookup(&lookup) && Target::from_lookup(&lookup).is_some()
 }
 
 fn flag_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> bool {
@@ -180,7 +186,7 @@ impl Reporter {
             context: None,
             last: None,
             last_footer: None,
-            host_footer: host_footer_enabled(),
+            host_footer: host_footer_active(),
         }
     }
 
@@ -218,7 +224,7 @@ impl Reporter {
             return;
         }
         self.last = Some(state);
-        self.send(state, None);
+        self.send(state, self.footer_rider().as_deref());
     }
 
     /// Publish or clear the owned Runtime beside the run state. The report
@@ -226,7 +232,21 @@ impl Reporter {
     /// pane's whole entry and a stale context would point at a dead host.
     pub fn set_runtime_context(&mut self, context: Option<RuntimeContext>) {
         self.context = context;
-        self.send(self.last.unwrap_or(State::Idle), None);
+        self.send(
+            self.last.unwrap_or(State::Idle),
+            self.footer_rider().as_deref(),
+        );
+    }
+
+    /// The cached footer attached to every report. mtty replaces the pane's
+    /// whole entry on each write, so a state change sent without the footer
+    /// would silently drop the facts the host is showing until the strip
+    /// itself next changed.
+    fn footer_rider(&self) -> Option<String> {
+        match self.host_footer {
+            true => self.last_footer.clone(),
+            false => None,
+        }
     }
 
     /// The TUI is leaving: an idle report stops the tab claiming a run that
@@ -270,8 +290,8 @@ impl Reporter {
 
 #[cfg(test)]
 mod tests {
-    use super::{arguments, context_json, flag_from_lookup, footer_json, footer_update};
-    use super::{Reporter, RuntimeContext, State, Target};
+    use super::{active_from_lookup, arguments, context_json, flag_from_lookup, footer_json};
+    use super::{footer_update, Reporter, RuntimeContext, State, Target};
 
     #[test]
     fn state_follows_the_blocking_and_run_signals() {
@@ -399,6 +419,46 @@ mod tests {
         assert_eq!(reporter.last, Some(State::Idle));
         reporter.clear();
         assert_eq!(reporter.last, Some(State::Idle));
+    }
+
+    #[test]
+    fn host_footer_takes_the_row_only_with_a_pane_to_report_to() {
+        let env = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            }
+        };
+        // The capability without a pane env hides the strip with nobody
+        // reporting: not a merge, just missing facts.
+        assert!(!active_from_lookup(env(&[("MTTY_HOST_FOOTER", "1")])));
+        assert!(active_from_lookup(env(&[
+            ("MTTY_HOST_FOOTER", "1"),
+            ("MTTY_PANE_ID", "p1"),
+        ])));
+        // A pane without the capability is the ordinary strip.
+        assert!(!active_from_lookup(env(&[("MTTY_PANE_ID", "p1")])));
+    }
+
+    #[test]
+    fn the_cached_footer_rides_every_report() {
+        let mut reporter = Reporter::default();
+        assert_eq!(reporter.footer_rider(), None);
+        reporter.host_footer = true;
+        reporter.last_footer = Some(r#"{"v":1,"visible":true}"#.into());
+        assert_eq!(
+            reporter.footer_rider().as_deref(),
+            Some(r#"{"v":1,"visible":true}"#)
+        );
+        // Outside the merge the state path never carries a footer.
+        reporter.host_footer = false;
+        assert_eq!(reporter.footer_rider(), None);
     }
 
     #[test]
