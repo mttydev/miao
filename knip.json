@@ -2,15 +2,67 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": { "entry": ["script/*.ts"], "project": ["script/**/*.ts"] },
-    "apps/desktop": { "entry": ["src/index.tsx"] },
-    "packages/*": {
-      "entry": ["src/**/*.test.ts", "src/**/*.test.tsx", "script/*.ts"],
+    "packages/app": {
+      "entry": ["src/**/*.test.ts", "e2e/**/*.test.ts", "e2e/**/*.config.ts", "e2e/reproduction/**/*.{ts,tsx}"],
+      "project": ["src/**/*.{ts,tsx}", "e2e/**/*.{ts,tsx}"]
+    },
+    "packages/client": {
+      "entry": ["test/**/*.test.ts", "script/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/http-recorder": {
+      "entry": ["test/**/*.test.ts", "script/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/httpapi-codegen": {
+      "entry": ["test/**/*.test.ts", "test/generated-consumer.ts", "test/generated/**"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/protocol": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/schema": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/script": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/session-ui": {
+      "entry": ["src/**/*.test.ts"],
       "project": ["src/**/*.{ts,tsx}"]
     },
-    "packages/engine-ts/*": {
-      "entry": ["src/**/*.test.ts", "src/**/*.test.tsx", "script/*.ts"],
+    "packages/storybook": { "entry": [".storybook/**/*.{ts,tsx}"], "project": [".storybook/**/*.{ts,tsx}"] },
+    "packages/ui": {
+      "entry": ["src/**/*.test.ts", "script/*.ts"],
       "project": ["src/**/*.{ts,tsx}"]
     },
-    "packages/storybook": { "entry": [".storybook/**/*.{ts,tsx}"], "project": [".storybook/**/*.{ts,tsx}"] }
+    "packages/engine-ts/codemode": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/engine-ts/core": {
+      "entry": ["test/**/*.test.ts", "script/*.ts", "test/fixture/**/*.ts", "test/**/fixtures/**/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/engine-ts/effect-drizzle-sqlite": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/engine-ts/llm": {
+      "entry": ["test/**/*.test.ts", "script/*.ts", "test/*.types.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/engine-ts/native": { "project": ["src/**/*.ts"] },
+    "packages/engine-ts/plugin": {
+      "entry": ["script/*.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/engine-ts/remote-control": {
+      "entry": ["test/**/*.test.ts", "script/*.ts", "test/fixture/**/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    }
   }
 }

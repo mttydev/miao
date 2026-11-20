@@ -21,7 +21,7 @@
     "sso": "aws sso login --sso-session=miao --no-browser",
     "translate:app": "bun run script/translate-app.ts",
     "test": "echo 'do not run tests from root' && exit 1",
-    "lint:dead": "knip --include files"
+    "lint:dead": "knip --include files --no-config-hints"
   },
   "workspaces": {
     "packages": [
