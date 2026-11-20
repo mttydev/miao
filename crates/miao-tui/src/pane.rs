@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -3219,15 +3219,14 @@ fn hoverable_line(
 /// stack in one column instead of starting wherever the label ended.
 const GRID_LABEL_WIDTH: usize = 8;
 
-/// A section header: upper case, muted and bold. It carries no `▾` — the glyph
-/// promised a disclosure that does not exist, and eight of them stacked down
-/// the column read as decoration rather than as structure.
-fn section_header(title: &str, palette: &crate::theme::Palette) -> Line<'static> {
+/// A section header: upper case, bold, tinted with the section's own accent
+/// role so stacked headers read as structure instead of decoration, while
+/// `NO_COLOR` and dumb terminals drop the tint to plain bold. It carries no
+/// `▾` — the glyph promised a disclosure that does not exist.
+fn section_header(title: &str, color: Color) -> Line<'static> {
     Line::from(Span::styled(
         title.to_string(),
-        Style::new()
-            .fg(palette.text_muted)
-            .add_modifier(Modifier::BOLD),
+        Style::new().fg(color).add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -3413,7 +3412,7 @@ fn quota_lines(
         return Vec::new();
     };
     let muted = Style::new().fg(palette.text_muted);
-    let mut lines = vec![section_header("PLAN · QUOTA", palette)];
+    let mut lines = vec![section_header("PLAN · QUOTA", palette.warning)];
     for provider in &quota.providers {
         let name = match provider.plan.is_empty() {
             true => provider.provider.clone(),
@@ -3475,7 +3474,7 @@ fn hourly_lines(
     // The window spans the workspace ledger rather than this Session: say so,
     // or every Session's sidebar reads the same figures and the block looks
     // like a stub instead of a total.
-    let mut lines = vec![section_header(lang.t("workspace.24h"), palette)];
+    let mut lines = vec![section_header(lang.t("workspace.24h"), palette.primary)];
     let mut hover: Vec<(usize, String)> = Vec::new();
     let Some(usage) = usage else {
         lines.push(Line::from(Span::styled(
@@ -3823,7 +3822,10 @@ impl Pane for SidebarPane {
             // workspace spent, so they carry their own "WHAT · scope" header
             // instead of reading as the tail of the Last 24h group.
             lines.push(Line::default());
-            lines.push(section_header(self.lang.t("session.usage"), &palette));
+            lines.push(section_header(
+                self.lang.t("session.usage"),
+                palette.secondary,
+            ));
             match &self.usage {
                 None => lines.push(Line::from(Span::styled(
                     "  no usage yet",
@@ -3928,7 +3930,7 @@ impl Pane for SidebarPane {
                         // row; this one sat glued to the figures above and read
                         // as one more data line.
                         lines.push(Line::default());
-                        lines.push(section_header(self.lang.t("activity"), &palette));
+                        lines.push(section_header(self.lang.t("activity"), palette.accent));
                     }
                     // The rows read abnormal-first: what went wrong (retries,
                     // rework) before what it cost in supervision and spend,
@@ -4129,7 +4131,7 @@ impl Pane for SidebarPane {
                         0 => format!("SUBAGENTS {}", self.subagents.len()),
                         _ => format!("SUBAGENTS · {running} running"),
                     },
-                    &palette,
+                    palette.accent,
                 ));
                 let now = crate::pane::now_ms();
                 for row in &self.subagents {
@@ -4166,7 +4168,7 @@ impl Pane for SidebarPane {
             // section that failed to load.
             if self.mode.is_some() || self.changes.is_some() {
                 lines.push(Line::default());
-                lines.push(section_header(self.lang.t("working_tree"), &palette));
+                lines.push(section_header(self.lang.t("working_tree"), palette.primary));
                 if let Some(mode) = &self.mode {
                     grid_row(
                         &mut self.hover_rows,
@@ -4296,7 +4298,7 @@ impl Pane for SidebarPane {
                         .lang
                         .tf("todo.progress", &[&done.to_string(), &len.to_string()]),
                 },
-                &palette,
+                palette.success,
             ));
             if self.todos.is_empty() {
                 lines.push(Line::from(Span::styled(
