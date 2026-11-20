@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::dialogs::{Dialog, ListDialog, ListKind, PaletteDialog};
 use crate::editor::{CompletionKind, Composer, Editor, Mode};
+use crate::lang::Lang;
 use crate::session::{
     ApprovalView, Entry, Part, QuestionView, Reasoning, SessionSummary, Transcript,
 };
@@ -65,6 +66,10 @@ pub struct Shell {
     pub title: TitlePane,
     pub transcript: TranscriptPane,
     pub composer: Composer,
+    /// The chrome language: the labels painted around the content. `/lang`
+    /// swaps it live; the transcript's own turns keep the language they were
+    /// written in.
+    lang: Lang,
     /// The row under the composer. It answers "which model, at what cost?"
     /// without opening a dialog, the way the TypeScript status line does.
     pub status: StatusStrip,
@@ -106,6 +111,7 @@ impl Shell {
             title: TitlePane::new(workspace, theme.clone()),
             transcript: TranscriptPane::new(theme.clone()),
             composer: Composer::new(workspace),
+            lang: Lang::En,
             status: StatusStrip::default(),
             panel: None,
             leader_hint: None,
@@ -123,6 +129,7 @@ impl Shell {
                 plan: None,
                 todos: Vec::new(),
                 chord: None,
+                lang: Lang::En,
             }),
             last: None,
             pending_transcript: None,
@@ -183,6 +190,27 @@ impl Shell {
     pub fn toggle_sidebar(&mut self) -> bool {
         self.sidebar_hidden = !self.sidebar_hidden;
         !self.sidebar_hidden
+    }
+
+    /// The chrome language the labels paint in.
+    pub fn lang(&self) -> Lang {
+        self.lang
+    }
+
+    /// `/lang` swaps the chrome language live: the composer's placeholder,
+    /// the sidebar's labels and a streamed draft's Thinking line re-render in
+    /// the picked language without a restart. The transcript's own content
+    /// keeps the language its turn was written in.
+    pub fn set_lang(&mut self, lang: Lang) {
+        if self.lang == lang {
+            return;
+        }
+        self.lang = lang;
+        self.transcript.set_lang(lang);
+        self.composer.lang = lang;
+        if let Some(sidebar) = self.sidebar.as_mut() {
+            sidebar.lang = lang;
+        }
     }
 
     pub fn set_transcript(&mut self, transcript: &Transcript) {
@@ -787,6 +815,9 @@ impl Pane for TitlePane {
 
 pub struct TranscriptPane {
     theme: Theme,
+    /// The chrome language a streamed draft's Thinking line paints in. The
+    /// transcript's committed rows keep the language their turn ran in.
+    lang: Lang,
     /// The projection's rows, unwrapped. A frame wraps them once per width
     /// into `body` and paints only its viewport, so a keystroke costs the
     /// window rather than the whole Session.
@@ -853,6 +884,7 @@ impl TranscriptPane {
     fn new(theme: Theme) -> Self {
         Self {
             theme,
+            lang: Lang::En,
             rows: vec![Row::plain(Line::from("no Session selected"))],
             draft_source: None,
             draft: Vec::new(),
@@ -929,6 +961,21 @@ impl TranscriptPane {
         rows.saturating_sub(self.area.height as usize) as u16
     }
 
+    /// `/lang` re-labels a streamed draft: the Thinking line is the only
+    /// chrome text here, so a switch rebuilds it in the picked language.
+    fn set_lang(&mut self, lang: Lang) {
+        if self.lang == lang {
+            return;
+        }
+        self.lang = lang;
+        // `refresh_draft` skips an up-to-date draft, so mark one in flight
+        // stale or its old-language label would survive the switch.
+        if self.draft_source.is_some() {
+            self.draft_dirty = true;
+        }
+        self.refresh_draft(true);
+    }
+
     fn refresh_draft(&mut self, force: bool) {
         if !self.draft_dirty {
             return;
@@ -943,6 +990,7 @@ impl TranscriptPane {
         self.draft = draft_lines(
             self.draft_source.as_deref().unwrap_or(&[]),
             &self.theme,
+            self.lang,
             now_ms(),
         );
         self.draft_dirty = false;
@@ -2047,7 +2095,7 @@ fn prose_lines(text: &str, theme: &Theme) -> Vec<Row> {
 /// nor the order the committed message will show, so the transcript rearranged
 /// itself the moment the turn committed. Claude Code and codex both paint the
 /// turn in arrival order; this does the same.
-fn draft_lines(parts: &[DraftPart], theme: &Theme, now_ms: u64) -> Vec<Row> {
+fn draft_lines(parts: &[DraftPart], theme: &Theme, lang: Lang, now_ms: u64) -> Vec<Row> {
     let palette = theme.palette;
     let mut rows = Vec::new();
     let mut opened = false;
@@ -2063,9 +2111,9 @@ fn draft_lines(parts: &[DraftPart], theme: &Theme, now_ms: u64) -> Vec<Row> {
                 let frame = SPINNER_FRAMES[(now_ms / 160) as usize % SPINNER_FRAMES.len()];
                 let summary = fit(&reasoning_summary(text), COMPACT_CELLS);
                 let label = if summary.is_empty() {
-                    "Thinking".to_string()
+                    lang.t("composer.thinking").to_string()
                 } else {
-                    format!("Thinking · {summary}")
+                    lang.tf("composer.thinking_summary", &[&summary])
                 };
                 rows.push(Row::clipped(Line::from(Span::styled(
                     format!("{frame} {label}"),
@@ -2512,6 +2560,8 @@ const PLACEHOLDERS: [&str; 3] = [
     "Fix broken tests",
 ];
 const SHELL_PLACEHOLDERS: [&str; 3] = ["ls -la", "git status", "pwd"];
+/// The same examples in Chinese, picked while the chrome language is zh.
+const PLACEHOLDERS_ZH: [&str; 3] = ["修一个 TODO", "这个项目的技术栈是什么？", "修好坏掉的测试"];
 
 /// The tallest the input grows before it scrolls, the TypeScript prompt's
 /// default `max_height` of `max(6, height / 3)`: on a tall window a long draft
@@ -3015,13 +3065,15 @@ fn render_composer_body(
                 // changes.
                 let examples: &[&str] = if shell {
                     &SHELL_PLACEHOLDERS
+                } else if composer.lang == Lang::Zh {
+                    &PLACEHOLDERS_ZH
                 } else {
                     &PLACEHOLDERS
                 };
                 let verb = if shell {
-                    "Run a command…"
+                    composer.lang.t("composer.run")
                 } else {
-                    "Ask anything…"
+                    composer.lang.t("composer.ask")
                 };
                 let example = examples[composer.placeholder % examples.len()];
                 Line::from(Span::styled(
@@ -3415,6 +3467,7 @@ fn until_reset(at_ms: u64) -> String {
 fn hourly_lines(
     usage: Option<&crate::status::HourlyUsage>,
     width: usize,
+    lang: Lang,
     palette: &crate::theme::Palette,
 ) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
     const GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -3422,10 +3475,13 @@ fn hourly_lines(
     // The window spans the workspace ledger rather than this Session: say so,
     // or every Session's sidebar reads the same figures and the block looks
     // like a stub instead of a total.
-    let mut lines = vec![section_header("24H · WORKSPACE", palette)];
+    let mut lines = vec![section_header(lang.t("workspace.24h"), palette)];
     let mut hover: Vec<(usize, String)> = Vec::new();
     let Some(usage) = usage else {
-        lines.push(Line::from(Span::styled("  no usage recorded", muted)));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", lang.t("usage.none")),
+            muted,
+        )));
         return (lines, hover);
     };
     // A narrow column pairs hours instead of dropping them: the shape of the
@@ -3441,7 +3497,10 @@ fn hourly_lines(
         })
         .collect::<Vec<_>>();
     if cells.is_empty() {
-        lines.push(Line::from(Span::styled("  no usage recorded", muted)));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", lang.t("usage.none")),
+            muted,
+        )));
         return (lines, hover);
     }
     let mut sorted = cells.clone();
@@ -3519,10 +3578,10 @@ fn hourly_lines(
             format!(
                 "{:indent$}{:<name_cells$} {:>in_cells$} {:>out_cells$} {:>hit_cells$}",
                 "",
-                "model",
-                "in",
-                "out",
-                "cache",
+                lang.t("model"),
+                lang.t("in"),
+                lang.t("out"),
+                lang.t("cache"),
                 indent = MODEL_INDENT,
                 name_cells = name_cells,
                 in_cells = MODEL_IN_CELLS,
@@ -3597,15 +3656,12 @@ fn hourly_lines(
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or(0);
         let hours_ago = now_ms.saturating_sub(start_ms) / 3_600_000;
+        let ago = match hours_ago {
+            0 => lang.t("usage.now").to_string(),
+            hours => format!("-{hours}h"),
+        };
         money.push(Span::styled(
-            format!(
-                " · peak {} · {}",
-                match hours_ago {
-                    0 => "now".to_string(),
-                    hours => format!("-{hours}h"),
-                },
-                compact(tokens)
-            ),
+            lang.tf("usage.peak", &[&ago, &compact(tokens)]),
             muted,
         ));
     }
@@ -3679,6 +3735,9 @@ pub struct SidebarPane {
     /// The chord that hides this column, resolved from the live keymap. Pinned
     /// to the column's last row so a long checklist cannot scroll it away.
     chord: Option<String>,
+    /// The chrome language this column paints its headers and row labels in.
+    /// `/lang` swaps it live.
+    lang: Lang,
 }
 
 impl Pane for SidebarPane {
@@ -3732,7 +3791,7 @@ impl Pane for SidebarPane {
             // banner above it read as two stacked headers for one block of
             // numbers, and the strip already says what the rows below explain.
             let (hourly, hourly_hover) =
-                hourly_lines(self.usage_hourly.as_ref(), text_width, &palette);
+                hourly_lines(self.usage_hourly.as_ref(), text_width, self.lang, &palette);
             let hourly_base = lines.len();
             lines.extend(hourly);
             for (offset, text) in hourly_hover {
@@ -3755,7 +3814,7 @@ impl Pane for SidebarPane {
             // workspace spent, so they carry their own "WHAT · scope" header
             // instead of reading as the tail of the Last 24h group.
             lines.push(Line::default());
-            lines.push(section_header("SESSION · USAGE", &palette));
+            lines.push(section_header(self.lang.t("session.usage"), &palette));
             match &self.usage {
                 None => lines.push(Line::from(Span::styled(
                     "  no usage yet",
@@ -3793,7 +3852,7 @@ impl Pane for SidebarPane {
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            "context",
+                            self.lang.t("context"),
                             &format!(
                                 "{} of {} · {}%",
                                 crate::status::compact_tokens(tokens),
@@ -3820,8 +3879,14 @@ impl Pane for SidebarPane {
                         &mut self.hover_rows,
                         inner,
                         &mut lines,
-                        ("in", crate::status::compact_tokens(usage.input_tokens)),
-                        ("out", crate::status::compact_tokens(usage.output_tokens)),
+                        (
+                            self.lang.t("in"),
+                            crate::status::compact_tokens(usage.input_tokens),
+                        ),
+                        (
+                            self.lang.t("out"),
+                            crate::status::compact_tokens(usage.output_tokens),
+                        ),
                         Style::new().fg(palette.text_muted),
                         text_width,
                     );
@@ -3830,10 +3895,10 @@ impl Pane for SidebarPane {
                         inner,
                         &mut lines,
                         (
-                            "cache",
+                            self.lang.t("cache"),
                             crate::status::compact_tokens(usage.cache_read_tokens),
                         ),
-                        ("turns", usage.turns.to_string()),
+                        (self.lang.t("turns"), usage.turns.to_string()),
                         Style::new().fg(palette.text_muted),
                         text_width,
                     );
@@ -3854,7 +3919,7 @@ impl Pane for SidebarPane {
                         // row; this one sat glued to the figures above and read
                         // as one more data line.
                         lines.push(Line::default());
-                        lines.push(section_header("ACTIVITY", &palette));
+                        lines.push(section_header(self.lang.t("activity"), &palette));
                     }
                     // The rows read abnormal-first: what went wrong (retries,
                     // rework) before what it cost in supervision and spend,
@@ -3955,7 +4020,7 @@ impl Pane for SidebarPane {
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            format!("decisions {}", parts.join(" · ")),
+                            self.lang.tf("activity.decisions", &[&parts.join(" · ")]),
                             Style::new().fg(palette.text_muted),
                             text_width,
                         );
@@ -3967,10 +4032,12 @@ impl Pane for SidebarPane {
                         // they match, the suffix would repeat the turn count in
                         // other words.
                         let retried = if usage.subagent_attempts > usage.subagent_turns {
-                            format!(
-                                " · {} attempt{}",
-                                usage.subagent_attempts,
-                                plural(usage.subagent_attempts)
+                            self.lang.tf(
+                                "activity.subagent_attempts",
+                                &[
+                                    &usage.subagent_attempts.to_string(),
+                                    plural(usage.subagent_attempts),
+                                ],
                             )
                         } else {
                             String::new()
@@ -3979,13 +4046,15 @@ impl Pane for SidebarPane {
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            format!(
-                                "subagents {} · {} turn{} · in {}{}",
-                                usage.subagent_sessions,
-                                usage.subagent_turns,
-                                plural(usage.subagent_turns),
-                                crate::status::compact_tokens(usage.subagent_input_tokens),
-                                retried,
+                            self.lang.tf(
+                                "activity.subagents",
+                                &[
+                                    &usage.subagent_sessions.to_string(),
+                                    &usage.subagent_turns.to_string(),
+                                    plural(usage.subagent_turns),
+                                    &crate::status::compact_tokens(usage.subagent_input_tokens),
+                                    &retried,
+                                ],
                             ),
                             Style::new().fg(palette.text_muted),
                             text_width,
@@ -3998,12 +4067,14 @@ impl Pane for SidebarPane {
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            format!(
-                                "auxiliary {} call{} · in {} · out {}",
-                                usage.auxiliary_calls,
-                                plural(usage.auxiliary_calls),
-                                crate::status::compact_tokens(usage.auxiliary_input_tokens),
-                                crate::status::compact_tokens(usage.auxiliary_output_tokens),
+                            self.lang.tf(
+                                "activity.auxiliary",
+                                &[
+                                    &usage.auxiliary_calls.to_string(),
+                                    plural(usage.auxiliary_calls),
+                                    &crate::status::compact_tokens(usage.auxiliary_input_tokens),
+                                    &crate::status::compact_tokens(usage.auxiliary_output_tokens),
+                                ],
                             ),
                             Style::new().fg(palette.text_muted),
                             text_width,
@@ -4014,7 +4085,8 @@ impl Pane for SidebarPane {
                     // quiet detail.
                     if usage.hook_calls > 0 {
                         let failed = if usage.hook_failed > 0 {
-                            format!(" · {} failed", usage.hook_failed)
+                            self.lang
+                                .tf("activity.hooks_failed", &[&usage.hook_failed.to_string()])
                         } else {
                             String::new()
                         };
@@ -4022,9 +4094,13 @@ impl Pane for SidebarPane {
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            format!(
-                                "hooks {} · {} ms{}",
-                                usage.hook_calls, usage.hook_ms, failed
+                            self.lang.tf(
+                                "activity.hooks",
+                                &[
+                                    &usage.hook_calls.to_string(),
+                                    &usage.hook_ms.to_string(),
+                                    &failed,
+                                ],
                             ),
                             Style::new().fg(palette.text_muted),
                             text_width,
@@ -4081,13 +4157,13 @@ impl Pane for SidebarPane {
             // section that failed to load.
             if self.mode.is_some() || self.changes.is_some() {
                 lines.push(Line::default());
-                lines.push(section_header("WORKING TREE", &palette));
+                lines.push(section_header(self.lang.t("working_tree"), &palette));
                 if let Some(mode) = &self.mode {
                     grid_row(
                         &mut self.hover_rows,
                         inner,
                         &mut lines,
-                        "mode",
+                        self.lang.t("mode"),
                         mode,
                         Style::new().fg(palette.warning),
                         &palette,
@@ -4099,8 +4175,16 @@ impl Pane for SidebarPane {
                         &mut self.hover_rows,
                         inner,
                         &mut lines,
-                        "changes",
-                        &format!("{files} {noun}  +{added} −{removed}"),
+                        self.lang.t("changes"),
+                        &self.lang.tf(
+                            "changes.row",
+                            &[
+                                &files.to_string(),
+                                noun,
+                                &added.to_string(),
+                                &removed.to_string(),
+                            ],
+                        ),
                         Style::new().fg(palette.text_muted),
                         &palette,
                     );
@@ -4195,9 +4279,13 @@ impl Pane for SidebarPane {
                 // instruction read as current progress; the header says what
                 // it is, until the next list replaces it.
                 &match (done, self.todos.len()) {
-                    (0, len) => format!("TODO 0/{len}"),
-                    (done, len) if done == len => format!("TODO done {done}/{len}"),
-                    (done, len) => format!("TODO {done}/{len}"),
+                    (0, len) => self.lang.tf("todo.zero", &[&len.to_string()]),
+                    (done, len) if done == len => self
+                        .lang
+                        .tf("todo.done", &[&done.to_string(), &len.to_string()]),
+                    (done, len) => self
+                        .lang
+                        .tf("todo.progress", &[&done.to_string(), &len.to_string()]),
                 },
                 &palette,
             ));
@@ -4263,7 +4351,10 @@ impl Pane for SidebarPane {
             .map(|chord| {
                 Line::from(vec![
                     Span::styled(chord.clone(), Style::new().fg(palette.text)),
-                    Span::styled("  hide sidebar", Style::new().fg(palette.text_muted)),
+                    Span::styled(
+                        format!("  {}", self.lang.t("footer.hide_sidebar")),
+                        Style::new().fg(palette.text_muted),
+                    ),
                 ])
             });
         let content = match hint {
@@ -8370,6 +8461,7 @@ mod tests {
                 status: "in_progress".to_string(),
             }],
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).expect("terminal");
@@ -8450,6 +8542,7 @@ mod tests {
             plan: None,
             todos: Vec::new(),
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).expect("terminal");
@@ -8492,7 +8585,8 @@ mod tests {
         // A column too narrow for 24 glyphs pairs the hours instead of
         // dropping them: the shape of the day is the point, not the count.
         let palette = home_theme().palette;
-        let (narrow, narrow_hover) = hourly_lines(sidebar.usage_hourly.as_ref(), 20, &palette);
+        let (narrow, narrow_hover) =
+            hourly_lines(sidebar.usage_hourly.as_ref(), 20, Lang::En, &palette);
         assert_eq!(narrow[1].spans.len(), 12, "narrow columns pair hours");
         assert!(
             narrow_hover.is_empty(),
@@ -8578,6 +8672,7 @@ mod tests {
             plan: None,
             todos: Vec::new(),
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).expect("terminal");
@@ -8660,6 +8755,7 @@ mod tests {
                 })
                 .collect(),
             chord: Some("ctrl+x b".to_string()),
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).expect("terminal");
@@ -8720,7 +8816,7 @@ mod tests {
             cache_hit_ratio: Some(0.0),
         };
         let theme = home_theme();
-        let (strip, _) = hourly_lines(Some(&usage), 40, &theme.palette);
+        let (strip, _) = hourly_lines(Some(&usage), 40, Lang::En, &theme.palette);
         let glyphs = strip[1]
             .spans
             .iter()
@@ -8769,7 +8865,8 @@ mod tests {
                 cache_hit_ratio: Some(cache_read as f64 / input as f64),
             }
         };
-        let (unhealthy, _) = hourly_lines(Some(&build(120_000, 10_000)), 40, &theme.palette);
+        let (unhealthy, _) =
+            hourly_lines(Some(&build(120_000, 10_000)), 40, Lang::En, &theme.palette);
         let joined = unhealthy
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -8779,7 +8876,8 @@ mod tests {
             joined.contains("/compact"),
             "a low hit with heavy billed input names the fix: {joined:?}"
         );
-        let (healthy, _) = hourly_lines(Some(&build(120_000, 110_000)), 40, &theme.palette);
+        let (healthy, _) =
+            hourly_lines(Some(&build(120_000, 110_000)), 40, Lang::En, &theme.palette);
         let joined = healthy
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -8789,7 +8887,7 @@ mod tests {
             !joined.contains("/compact"),
             "a healthy hit stays quiet: {joined:?}"
         );
-        let (small, _) = hourly_lines(Some(&build(3_000, 1_000)), 40, &theme.palette);
+        let (small, _) = hourly_lines(Some(&build(3_000, 1_000)), 40, Lang::En, &theme.palette);
         let joined = small
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -8841,7 +8939,7 @@ mod tests {
             truncated: false,
             cache_hit_ratio: None,
         };
-        let (strip, _) = hourly_lines(Some(&usage), 40, &theme.palette);
+        let (strip, _) = hourly_lines(Some(&usage), 40, Lang::En, &theme.palette);
         let lines = strip
             .iter()
             .map(|line| {
@@ -8890,6 +8988,7 @@ mod tests {
                 ..usage
             }),
             40,
+            Lang::En,
             &theme.palette,
         );
         let joined = bare
@@ -8940,7 +9039,7 @@ mod tests {
             truncated: false,
             cache_hit_ratio: None,
         };
-        let (strip, _) = hourly_lines(Some(&usage), 40, &theme.palette);
+        let (strip, _) = hourly_lines(Some(&usage), 40, Lang::En, &theme.palette);
         let joined = strip
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -8985,6 +9084,7 @@ mod tests {
                 plan: None,
                 todos: Vec::new(),
                 chord: None,
+                lang: Lang::En,
             }
         }
         let summary = |window: Option<u64>, tokens: Option<u64>| {
@@ -9091,6 +9191,7 @@ mod tests {
             plan: None,
             todos: Vec::new(),
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -9140,6 +9241,7 @@ mod tests {
             plan: None,
             todos: Vec::new(),
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -9211,6 +9313,7 @@ mod tests {
             plan: None,
             todos: Vec::new(),
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -9278,6 +9381,7 @@ mod tests {
             plan: None,
             todos: Vec::new(),
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -9321,6 +9425,7 @@ mod tests {
             plan: None,
             todos: Vec::new(),
             chord: None,
+            lang: Lang::En,
         };
         let mut summary = home_row("ses_s", &"很长的会话标题".repeat(8), None);
         summary.directory = Some("/very/long/path\n".repeat(4));
@@ -9405,6 +9510,7 @@ mod tests {
                 status: "in_progress".into(),
             }],
             chord: None,
+            lang: Lang::En,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -9601,6 +9707,7 @@ mod draft_gap_tests {
                 DraftPart::Text("the answer".into()),
             ],
             &theme,
+            Lang::En,
             0,
         );
         let text: Vec<String> = rows
@@ -9626,7 +9733,7 @@ mod draft_gap_tests {
             name: "t".into(),
             palette,
         };
-        let rows = draft_lines(&[DraftPart::Text("the answer".into())], &theme, 0);
+        let rows = draft_lines(&[DraftPart::Text("the answer".into())], &theme, Lang::En, 0);
         let text: Vec<String> = rows
             .iter()
             .map(|row| row.line.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -9744,6 +9851,7 @@ mod draft_tool_tests {
                 },
             ],
             &theme,
+            Lang::En,
             0,
         );
         let text: Vec<String> = rows
@@ -9792,7 +9900,7 @@ mod interleave_tests {
                 arguments: r#"{"argv":["echo","two"]}"#.into(),
             },
         ];
-        let rows = draft_lines(&parts, &theme, 0);
+        let rows = draft_lines(&parts, &theme, Lang::En, 0);
         let text: Vec<String> = rows
             .iter()
             .map(|row| row.line.spans.iter().map(|s| s.content.as_ref()).collect())

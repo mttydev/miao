@@ -957,6 +957,9 @@ pub struct Composer {
     /// one at random when it mounts and re-rolls on a Session change, so this
     /// is a stored index rather than a clock drift.
     pub placeholder: usize,
+    /// The chrome language the placeholder paints in. `Shell` keeps it
+    /// current so `/lang` re-labels without a restart.
+    pub lang: crate::lang::Lang,
     /// The work the Session's own checklist still has left, offered in the
     /// empty composer once nothing is running. It is the todo list the engine
     /// continues from, not a guess at what to do next, so accepting it asks for
@@ -1008,6 +1011,7 @@ impl Composer {
             phase_action: None,
             idle: None,
             placeholder: random_pick(),
+            lang: crate::lang::Lang::En,
             suggestion: None,
             attachments: Vec::new(),
             attachment_markers: Vec::new(),
@@ -1915,6 +1919,7 @@ mod tests {
             phase_action: None,
             idle: None,
             placeholder: 0,
+            lang: crate::lang::Lang::En,
             suggestion: None,
             attachments: Vec::new(),
             attachment_markers: Vec::new(),

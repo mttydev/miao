@@ -61,6 +61,8 @@ pub enum Builtin {
     /// reachable by name.
     Paste,
     Help,
+    /// Switch or inspect the chrome language.
+    Lang,
     Quit,
     /// Raise the turns a Goal's own budget allows. The `goal` tool that could
     /// rewrite it runs inside a provider turn, and a spent Goal budget stops
@@ -70,7 +72,7 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 34] = [
+    pub const ALL: [Builtin; 35] = [
         Builtin::Models,
         Builtin::Permissions,
         Builtin::Sandbox,
@@ -104,6 +106,7 @@ impl Builtin {
         Builtin::Recall,
         Builtin::Paste,
         Builtin::Help,
+        Builtin::Lang,
         Builtin::Quit,
     ];
 
@@ -143,6 +146,7 @@ impl Builtin {
             Builtin::Recall => "recall",
             Builtin::Paste => "paste",
             Builtin::Help => "help",
+            Builtin::Lang => "lang",
             Builtin::Quit => "quit",
         }
     }
@@ -162,6 +166,7 @@ impl Builtin {
             Builtin::Debug => &["doctor"],
             Builtin::Status => &["cost"],
             Builtin::Accounts => &["login", "logout"],
+            Builtin::Lang => &["language"],
             _ => &[],
         }
     }
@@ -201,6 +206,7 @@ impl Builtin {
             Builtin::Recall => "Restore an archived tool output by handle",
             Builtin::Paste => "Paste the clipboard (image or text)",
             Builtin::Help => "Keys and commands",
+            Builtin::Lang => "Switch the interface language",
             Builtin::Quit => "Quit miao",
         }
     }
@@ -256,6 +262,7 @@ impl Builtin {
             // Pasting is asked for by name: /paste, no chord.
             Builtin::Paste => None,
             Builtin::Help => Some(Action::Help),
+            Builtin::Lang => None,
             Builtin::Quit => Some(Action::AppExit),
         }
     }
