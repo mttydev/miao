@@ -104,6 +104,9 @@ pub struct Shell {
     /// The status strip's clickable ranges, as the last paint laid them out.
     /// Cleared on every paint, so a press can only act on what is on screen.
     footer_hits: Vec<FooterHit>,
+    /// The embedded host takes the facts row over: it paints nothing here
+    /// while the hits stay, so its synthesized presses still land.
+    embedded_footer: bool,
     /// The queued prompts as painted, so a drag can copy the row it covers.
     queued: PaintedCells,
 }
@@ -142,7 +145,23 @@ impl Shell {
             composer_text: None,
             drag: None,
             footer_hits: Vec::new(),
+            embedded_footer: crate::mtty_state::host_footer_enabled(),
             queued: PaintedCells::default(),
+        }
+    }
+
+    /// Take the facts row over: nothing painted on it, the hits kept.
+    pub fn set_embedded_footer(&mut self, on: bool) {
+        self.embedded_footer = on;
+    }
+
+    /// The strip facts the embedded host's footer should show now: the
+    /// clickable ranges as the last paint laid them out. `None` while the
+    /// leader menu owns the row.
+    pub fn footer_wire(&self) -> Option<Vec<FooterWireSeg>> {
+        match self.leader_hint.is_some() {
+            true => None,
+            false => wire_from_hits(&self.footer_hits, &self.status),
         }
     }
 
@@ -706,6 +725,7 @@ impl Shell {
             self.leader_hint.as_deref(),
             &mut self.footer_hits,
             &self.transcript.theme,
+            self.embedded_footer,
         );
         // The rule separates the columns; it is not part of either one. Paint it
         // last, after every pane: a band that pads to its own edge, a wide glyph
@@ -1680,6 +1700,8 @@ pub struct Home {
     /// after a stretch of no input, the way the product's logo does, so a home
     /// screen left open stops repainting instead of running forever.
     footer_hits: Vec<FooterHit>,
+    /// The embedded host merges the landing facts into its own footer.
+    embedded_footer: bool,
     last_input: Instant,
     /// Where the landing prompt painted its draft last frame, so a pointer
     /// inside it selects text the way the Session composer does.
@@ -1699,13 +1721,26 @@ impl Home {
             notice: None,
             warning: None,
             prompt_width: crate::config::PromptWidth::default(),
+            footer_hits: Vec::new(),
+            embedded_footer: crate::mtty_state::host_footer_enabled(),
             last_input: Instant::now(),
             composer_text: None,
             composer_drag: false,
-            footer_hits: Vec::new(),
             theme,
             animated: true,
         }
+    }
+
+    /// Take the landing facts over: nothing painted on the rule, the hits
+    /// kept for the host's synthesized presses.
+    pub fn set_embedded_footer(&mut self, on: bool) {
+        self.embedded_footer = on;
+    }
+
+    /// The landing facts the embedded host's footer should show now. `None`
+    /// while nothing is on screen for the host to show.
+    pub fn footer_wire(&self, status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
+        wire_from_hits(&self.footer_hits, status)
     }
 
     /// The strip fact a press at this position acts on, if the last paint
@@ -1913,6 +1948,7 @@ impl Home {
             &mut self.footer_hits,
             &self.theme,
             Some(&ComposerFooter { status }),
+            self.embedded_footer,
         );
         for (offset, (notice, ink)) in notices.iter().enumerate() {
             frame.render_widget(
@@ -2459,6 +2495,67 @@ impl FooterHit {
     }
 }
 
+impl FooterSegment {
+    /// The stable name the embedded host addresses this fact by.
+    pub fn id(self) -> &'static str {
+        match self {
+            FooterSegment::ApprovalMode => "approval",
+            FooterSegment::Model => "model",
+            FooterSegment::Provider => "provider",
+        }
+    }
+}
+
+/// One strip fact the embedded host merges into its own footer: the label it
+/// shows, and the absolute cells a synthesized press lands on.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct FooterWireSeg {
+    pub id: &'static str,
+    pub text: String,
+    pub row: u16,
+    pub start: u16,
+    pub end: u16,
+}
+
+/// What a hint reads like painted: a warning keeps its glyph, so the host's
+/// label matches the strip's own span.
+fn hint_label(hint: &StatusHint) -> String {
+    match hint.warning {
+        true => format!("! {}", hint.text),
+        false => hint.text.clone(),
+    }
+}
+
+/// The wire for one painted strip: the clickable ranges as the last paint
+/// laid them out, labelled with the facts a press on them acts on. `None`
+/// when nothing is on screen for the host to show.
+fn wire_from_hits(hits: &[FooterHit], status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
+    if hits.is_empty() {
+        return None;
+    }
+    let text = |segment: FooterSegment| match segment {
+        FooterSegment::ApprovalMode => status
+            .hints
+            .iter()
+            .find(|hint| hint.segment == Some(segment))
+            .map(hint_label)
+            .unwrap_or_default(),
+        FooterSegment::Model => status.model.clone().unwrap_or_default(),
+        FooterSegment::Provider => status.usage.clone().unwrap_or_default(),
+    };
+    Some(
+        hits.iter()
+            .map(|hit| FooterWireSeg {
+                id: hit.segment.id(),
+                text: text(hit.segment),
+                row: hit.row,
+                start: hit.start,
+                end: hit.end,
+            })
+            .collect(),
+    )
+}
+
 /// What the landing prompt's bottom rule carries: the facts the status strip
 /// used to spend the window's last row on — what the run waits on, what it
 /// runs on, what it has cost.
@@ -2576,6 +2673,7 @@ fn render_composer_status(
     leader: Option<&str>,
     hits: &mut Vec<FooterHit>,
     theme: &Theme,
+    embedded: bool,
 ) {
     let palette = theme.palette;
     let muted = Style::new().fg(palette.text_muted);
@@ -2584,26 +2682,35 @@ fn render_composer_status(
     let facts_width = area.width.saturating_sub(version_width + 1);
     // The row sits on the page, not on the box's border: paint its whole
     // width, or a cell the text does not reach falls back to the terminal's
-    // own background and reads as a hole in the layout.
+    // own background and reads as a hole in the layout. Under an embedded
+    // host the same paint blanks the row: the host merges these facts into
+    // its own chrome, and painting them too would show the line twice.
     frame.render_widget(
         Block::new().style(Style::new().bg(palette.background)),
         area,
     );
-    // A leader that is still waiting takes the row over with its chords, the
-    // way it took the strip over: discoverable exactly where the facts it
-    // replaces usually sit.
-    let left = match leader {
-        Some(menu) => Line::from(Span::styled(
-            format!(
-                "  {} ",
-                fit_chords(menu, facts_width.saturating_sub(3) as usize)
-            ),
-            Style::new().fg(palette.primary),
-        )),
+    // A leader that is still waiting keeps its chords even under an embedded
+    // host: they are transient input feedback, not chrome the host carries.
+    // The facts hide, but the hit geometry is laid out exactly as painted,
+    // so a synthesized press from the host lands on the same handler.
+    let painted = match leader {
+        Some(menu) => {
+            if embedded {
+                None
+            } else {
+                Some(Line::from(Span::styled(
+                    format!(
+                        "  {} ",
+                        fit_chords(menu, facts_width.saturating_sub(3) as usize)
+                    ),
+                    Style::new().fg(palette.primary),
+                )))
+            }
+        }
         None => {
             let mut pairs = composer_status_spans(status, theme);
             match pairs.is_empty() {
-                true => Line::from(String::new()),
+                true => None,
                 false => {
                     // The TS status line starts two cells in from the edge; the
                     // row keeps that offset now that it is a line of its own.
@@ -2625,23 +2732,30 @@ fn render_composer_status(
                         spans.push(span.clone());
                         col += width;
                     }
-                    Line::from(spans)
+                    match embedded {
+                        true => None,
+                        false => Some(Line::from(spans)),
+                    }
                 }
             }
         }
     };
-    frame.render_widget(
-        Paragraph::new(left),
-        Rect {
-            width: facts_width,
-            height: 1,
-            ..area
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(version, muted))).alignment(Alignment::Right),
-        area,
-    );
+    if let Some(left) = painted {
+        frame.render_widget(
+            Paragraph::new(left),
+            Rect {
+                width: facts_width,
+                height: 1,
+                ..area
+            },
+        );
+    }
+    if !embedded {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(version, muted))).alignment(Alignment::Right),
+            area,
+        );
+    }
 }
 
 const COMPOSER_COMPLETION_ROWS: usize = 6;
@@ -2750,6 +2864,7 @@ fn render_home_composer(
     hits: &mut Vec<FooterHit>,
     theme: &Theme,
     footer: Option<&ComposerFooter>,
+    embedded: bool,
 ) -> Option<ComposerText> {
     let palette = theme.palette;
     if area.width < 5 || area.height < 2 {
@@ -2803,15 +2918,21 @@ fn render_home_composer(
                 spans.push(span.clone());
                 col += width;
             }
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(Style::new().bg(palette.background)),
-                Rect {
-                    x: x0,
-                    y: row,
-                    width: (text as u16).min(area.width.saturating_sub(2)) + 1,
-                    height: 1,
-                },
-            );
+            match embedded {
+                // The host merges these facts into its own footer; the hit
+                // geometry stays, so its synthesized presses land on the same
+                // segments a painted press would.
+                true => {}
+                false => frame.render_widget(
+                    Paragraph::new(Line::from(spans)).style(Style::new().bg(palette.background)),
+                    Rect {
+                        x: x0,
+                        y: row,
+                        width: (text as u16).min(area.width.saturating_sub(2)) + 1,
+                        height: 1,
+                    },
+                ),
+            }
         }
     }
     let body = Rect {
@@ -6309,6 +6430,7 @@ mod tests {
                     None,
                     &mut hits,
                     &theme,
+                    false,
                 );
                 assert_eq!(
                     hits.len(),
@@ -7419,6 +7541,7 @@ mod tests {
                     leader,
                     &mut hits,
                     &theme,
+                    false,
                 );
             })
             .expect("draw");
@@ -9892,6 +10015,116 @@ mod draft_gap_tests {
             .map(|row| row.line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         assert!(text[0].starts_with("● the answer"), "{text:?}");
+    }
+
+    fn strip_theme() -> Theme {
+        Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette: crate::theme::builtin(
+                crate::theme::DEFAULT_THEME,
+                crate::theme::ThemeMode::Dark,
+            )
+            .expect("theme"),
+        }
+    }
+
+    /// The embedded host takes the facts row over: the strip paints nothing,
+    /// but the wire still names every segment with the cells a synthesized
+    /// press from the host lands on.
+    #[test]
+    fn embedded_session_strip_paints_nothing_and_reports_the_wire() {
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), strip_theme());
+        shell.set_embedded_footer(true);
+        shell.status.model = Some("deepseek-v4".into());
+        shell.status.hints.push(StatusHint {
+            text: "auto".into(),
+            warning: true,
+            success: false,
+            segment: Some(FooterSegment::ApprovalMode),
+        });
+        let width = 80u16;
+        let height = 24u16;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let painted: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            !painted.contains("deepseek-v4"),
+            "the model fact leaked into the painted row: {painted}"
+        );
+        assert!(
+            !painted.contains(concat!("miao ", env!("CARGO_PKG_VERSION"))),
+            "the version leaked into the painted row: {painted}"
+        );
+        let wire = shell.footer_wire().expect("the wire survives the takeover");
+        let ids: Vec<&str> = wire.iter().map(|seg| seg.id).collect();
+        assert_eq!(ids, vec!["approval", "model"], "{wire:?}");
+        assert_eq!(wire[0].text, "! auto", "{wire:?}");
+        assert_eq!(wire[1].text, "deepseek-v4", "{wire:?}");
+        // The cells match the painted layout, not a guess: the lead-in is the
+        // strip's two-cell offset, and the ranges do not overlap.
+        assert!(wire[0].start >= 2, "{wire:?}");
+        assert!(wire[0].end <= wire[1].start, "{wire:?}");
+        assert!(wire[1].end < width, "{wire:?}");
+    }
+
+    /// The armed leader still owns the row under an embedded host: the wire
+    /// hides, so the host's footer does not show facts behind the chords.
+    #[test]
+    fn an_armed_leader_hides_the_wire() {
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), strip_theme());
+        shell.set_embedded_footer(true);
+        shell.status.model = Some("deepseek-v4".into());
+        shell.set_leader_hint(Some("ctrl+x".into()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        assert_eq!(shell.footer_wire(), None);
+    }
+
+    /// The landing prompt merges the same way: no painted facts on the rule,
+    /// a wire that names the provider tail the Session strip does not carry.
+    #[test]
+    fn embedded_landing_paints_no_facts_and_reports_the_wire() {
+        let mut home = Home::new(strip_theme());
+        home.set_embedded_footer(true);
+        let status = StatusStrip {
+            model: Some("deepseek-v4".into()),
+            usage: Some("volcengine · mtp".into()),
+            hints: Vec::new(),
+        };
+        let mut composer = crate::editor::Composer::new(Path::new("."));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                home.render(frame, frame.area(), &mut composer, &status);
+            })
+            .expect("draw");
+        let painted: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            !painted.contains("volcengine"),
+            "the landing facts leaked onto the rule: {painted}"
+        );
+        let wire = home
+            .footer_wire(&status)
+            .expect("the landing wire survives the takeover");
+        let ids: Vec<&str> = wire.iter().map(|seg| seg.id).collect();
+        assert_eq!(ids, vec!["model", "provider"], "{wire:?}");
+        assert_eq!(wire[1].text, "volcengine · mtp", "{wire:?}");
     }
 }
 

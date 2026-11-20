@@ -18,7 +18,9 @@ use crate::engine;
 use crate::event::{AppEvent, Bus};
 use crate::keybinds::{self, Keymap};
 use crate::lang::Lang;
-use crate::pane::{render_dialog, FooterSegment, Home, Panel, PanelKind, Shell, StatusHint};
+use crate::pane::{
+    render_dialog, FooterSegment, FooterWireSeg, Home, Panel, PanelKind, Shell, StatusHint,
+};
 use crate::platform::attention::{self, Attention};
 use crate::platform::{clipboard, editor, zed};
 use crate::scroll::Scroll;
@@ -1073,6 +1075,17 @@ impl App {
                 self.shell.lang(),
                 self.shell.theme(),
             );
+        }
+        self.mtty_state.sync_footer(self.footer_wire());
+    }
+
+    /// The strip facts the host's merged footer should show now, so a click
+    /// in the host's chrome reaches the same handler a press on the painted
+    /// strip would.
+    fn footer_wire(&self) -> Option<Vec<FooterWireSeg>> {
+        match self.screen {
+            Screen::Home => self.home.footer_wire(&self.shell.status),
+            Screen::Session => self.shell.footer_wire(),
         }
     }
 
