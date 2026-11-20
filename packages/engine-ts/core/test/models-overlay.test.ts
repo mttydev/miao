@@ -58,6 +58,35 @@ describe("ModelsOverlay", () => {
     })
   })
 
+  it("restores image input for Volcengine's dated DeepSeek V4.1 Flash", () => {
+    const catalog: Record<string, ModelsCatalog.Provider> = {
+      volcengine: {
+        id: "volcengine",
+        name: "Volcengine",
+        env: ["ARK_API_KEY"],
+        api: "https://ark.cn-beijing.volces.com/api/v3",
+        models: {
+          "deepseek-v4-1-flash-261017": {
+            id: "deepseek-v4-1-flash-261017",
+            name: "DeepSeek V4.1 Flash 1017",
+            release_date: "2026-10-17",
+            attachment: false,
+            reasoning: true,
+            temperature: true,
+            tool_call: true,
+            limit: { context: 1_048_576, output: 393_216 },
+            modalities: { input: ["text"], output: ["text"] },
+          },
+        },
+      },
+    }
+    const merged = ModelsOverlay.merge(catalog)
+    expect(merged.volcengine?.models["deepseek-v4-1-flash-261017"]?.modalities).toEqual({
+      input: ["text", "image"],
+      output: ["text"],
+    })
+  })
+
   it("merges overlay model patches field-wise over catalog entries", () => {
     const catalog: Record<string, ModelsCatalog.Provider> = {
       "zhipuai-coding-plan": {
