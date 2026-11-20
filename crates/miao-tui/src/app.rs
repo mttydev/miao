@@ -1062,7 +1062,13 @@ impl App {
             }
         }
         if let Some(dialog) = self.dialog.as_ref() {
-            render_dialog(frame, frame.area(), dialog, self.shell.theme());
+            render_dialog(
+                frame,
+                frame.area(),
+                dialog,
+                self.shell.lang(),
+                self.shell.theme(),
+            );
         }
     }
 
@@ -4848,10 +4854,11 @@ impl App {
                 });
             // An install with no route at all leaves the row blank, which
             // reads as a broken status line rather than an empty catalog.
+            let lang = self.shell.lang();
             self.shell.status.model = landing.or_else(|| {
                 Some(match self.keys.chord(keybinds::Action::ModelList) {
-                    Some(chord) => format!("no model · {chord} to pick a provider"),
-                    None => "no model · open the model list to pick a provider".to_string(),
+                    Some(chord) => lang.tf("status.no_model_chord", &[&chord]),
+                    None => lang.t("status.no_model").to_string(),
                 })
             });
             self.shell.status.usage = None;
@@ -4861,7 +4868,7 @@ impl App {
             // `--auto` should not have to open a Session to find that out.
             if self.startup.auto {
                 self.shell.status.hints.push(StatusHint {
-                    text: "auto-approve".to_string(),
+                    text: lang.t("status.auto_approve").to_string(),
                     warning: true,
                     success: false,
                 });
@@ -5172,7 +5179,10 @@ impl App {
         let mut hints: Vec<StatusHint> = Vec::new();
         if let Some(installed) = &self.pending_update {
             hints.push(StatusHint {
-                text: format!("{installed} ready · restart to apply"),
+                text: self
+                    .shell
+                    .lang()
+                    .tf("status.update_ready", &[installed.as_str()]),
                 warning: false,
                 success: true,
             });
@@ -5182,7 +5192,7 @@ impl App {
         // from output that has scrolled out of sight.
         if !self.shell.following() {
             hints.push(StatusHint {
-                text: "not following · end to resume".to_string(),
+                text: self.shell.lang().t("status.not_following").to_string(),
                 warning: false,
                 success: false,
             });
@@ -5201,12 +5211,13 @@ impl App {
         }) = live.map(|live| &live.phase)
         {
             if matches!(cause.as_str(), "account_quota" | "vendor_rate_limit") {
+                let lang = self.shell.lang();
                 let mut text = match self.keys.chord(keybinds::Action::Accounts) {
-                    Some(chord) => format!("{chord} switch account"),
-                    None => "switch account".to_string(),
+                    Some(chord) => lang.tf("status.switch_account_chord", &[&chord]),
+                    None => lang.t("status.switch_account").to_string(),
                 };
                 if let Some(chord) = self.keys.chord(keybinds::Action::ModelList) {
-                    text.push_str(&format!(" · {chord} switch model"));
+                    text.push_str(&format!(" · {}", lang.tf("status.switch_model", &[&chord])));
                 }
                 hints.push(StatusHint {
                     text,
@@ -5222,7 +5233,7 @@ impl App {
         // refuses writes, which surprises anyone who expects a workspace mode.
         if self.startup.auto {
             hints.push(StatusHint {
-                text: "auto-approve".to_string(),
+                text: self.shell.lang().t("status.auto_approve").to_string(),
                 warning: true,
                 success: false,
             });
@@ -5232,7 +5243,7 @@ impl App {
         // off the screen.
         if let Some(chord) = self.shell.hidden_sidebar_chord() {
             hints.push(StatusHint {
-                text: format!("{chord} sidebar"),
+                text: self.shell.lang().tf("status.sidebar_hidden", &[chord]),
                 warning: false,
                 success: false,
             });
@@ -5695,7 +5706,7 @@ impl App {
         // stops a turn and never discards the transcript.
         if !self.confirm_leave() {
             self.leave_armed = Some(Instant::now() + NOTICE_LIFETIME);
-            self.notice("press esc again to go back home");
+            self.notice(self.shell.lang().t("notice.esc_home"));
             return;
         }
         self.leave_session();
@@ -10886,7 +10897,7 @@ mod tests {
             "a stored key needs no catalog answer to be listed"
         );
         let list = app.dialog.as_ref().and_then(Dialog::list).expect("list");
-        assert_eq!(list.title, "provider accounts");
+        assert_eq!(list.title, "dlg.title.provider_accounts");
         // The store is the list's source, so a key whose provider serves no
         // route yet still has a row of its own.
         assert!(list
@@ -10906,7 +10917,7 @@ mod tests {
         app.handle(key(KeyCode::Down, KeyModifiers::NONE));
         app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
         let list = app.dialog.as_ref().and_then(Dialog::list).expect("list");
-        assert_eq!(list.title, "keys");
+        assert_eq!(list.title, "dlg.title.keys");
         let labels: Vec<&str> = list.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -10948,7 +10959,7 @@ mod tests {
         app.handle(key(KeyCode::Down, KeyModifiers::NONE));
         app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
         let list = app.dialog.as_ref().and_then(Dialog::list).expect("list");
-        assert_eq!(list.title, "keys");
+        assert_eq!(list.title, "dlg.title.keys");
         // A credential the engine serves but the store does not hold keeps its
         // row, so it can still be selected; it just is not the operator's to
         // edit here.
@@ -10980,7 +10991,7 @@ mod tests {
             ]
         })));
         let list = app.dialog.as_ref().and_then(Dialog::list).expect("list");
-        assert_eq!(list.title, "providers");
+        assert_eq!(list.title, "dlg.title.providers");
         assert!(list
             .rows
             .iter()
@@ -11019,7 +11030,7 @@ mod tests {
         })));
         app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
         let list = app.dialog.as_ref().and_then(Dialog::list).expect("list");
-        assert_eq!(list.title, "models");
+        assert_eq!(list.title, "dlg.title.models");
         assert_eq!(app.models_filter.as_deref(), Some("openai"));
         assert!(list.rows.iter().any(|row| row.label.contains("gpt-5")));
         assert!(!list.rows.iter().any(|row| row.label.contains("glm-5")));
@@ -11436,7 +11447,7 @@ mod tests {
             ]
         })));
         let list = app.dialog.as_ref().and_then(Dialog::list).expect("list");
-        assert_eq!(list.title, "providers");
+        assert_eq!(list.title, "dlg.title.providers");
         assert!(list
             .rows
             .iter()
