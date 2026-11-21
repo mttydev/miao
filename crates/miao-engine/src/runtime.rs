@@ -6725,15 +6725,23 @@ command: None,
                             "Task paused: the todo list stayed unchanged for {goal_stalls} continuation turns over {waited}s, so the loop stopped waiting for it to move (round {blocked_round} of this list). Nothing is running now. It re-arms on its own with your next message, the next background notice, or a change to a todo's state."
                         ),
                     };
-                    inner
-                        .store
-                        .inject(
-                            session,
-                            &note_identity("loop-paused", &signature, blocked_round, &pause),
-                            &pause,
-                            "engine",
-                        )
-                        .await?;
+                    // A wait on a running job resolves itself, and the host
+                    // reports it live (count, clock, command). Writing it into
+                    // the transcript on every wait pushed a note that says "no
+                    // action needed" into the history and the model's context,
+                    // so the wait stays a lifecycle event; the pauses that do
+                    // need the operator keep their note.
+                    if reason != "waiting" {
+                        inner
+                            .store
+                            .inject(
+                                session,
+                                &note_identity("loop-paused", &signature, blocked_round, &pause),
+                                &pause,
+                                "engine",
+                            )
+                            .await?;
+                    }
                     // A continuation this run already admitted must not outlive
                     // the pause: a queued `goal:` input left behind is promoted by
                     // the next drain and starts a fresh run with fresh counters,

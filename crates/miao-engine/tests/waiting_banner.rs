@@ -306,10 +306,11 @@ async fn a_running_child_does_not_pause_its_parent_and_prints_no_ids() {
 }
 
 /// A background job is the one kind of background work that pauses, because
-/// nothing about it finishes the Session's turn for it. The note then says how
-/// many are running — the count is the whole decision — and never which.
+/// nothing about it finishes the Session's turn for it. The pause is a
+/// lifecycle event the host reports live: a transcript note repeated a
+/// no-action line on every wait, so only the event is written.
 #[tokio::test]
-async fn a_running_job_pauses_with_a_count_and_no_ids() {
+async fn a_running_job_pauses_without_a_transcript_note() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -341,22 +342,17 @@ async fn a_running_job_pauses_with_a_count_and_no_ids() {
             .any(|event| event.kind == "loop.stopped" && event.data["reason"] == "waiting"),
         "a job this Session owns is what the waiting pause is for"
     );
-    let pause = events
+    let notes: Vec<&str> = events
         .iter()
         .filter_map(|event| event.data["text"].as_str())
-        .find(|text| text.contains("Task paused"))
-        .expect("the pause is visible in history");
+        .collect();
     assert!(
-        pause.contains("1 background job(s) still running"),
-        "the pause counts the work it is waiting on: {pause}"
+        !notes.iter().any(|note| note.contains("Task paused")),
+        "a self-resolving wait is not a transcript note: {notes:?}"
     );
-    let id = jobs[0]["job_id"].as_str().unwrap();
-    assert!(
-        !pause.contains(id),
-        "the pause reports a count, not the ids it counted: {pause}"
-    );
-    assert!(
-        !pause.contains("delegated subagent task(s)"),
-        "no child is running, so none is announced: {pause}"
+    assert_eq!(
+        jobs[0]["state"].as_str(),
+        Some("running"),
+        "the job the drain waited on is still the live work"
     );
 }
