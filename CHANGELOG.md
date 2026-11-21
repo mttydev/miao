@@ -13,6 +13,14 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-21
+
+### Added
+- **engine**: start unmodeled and derive routes from stored keys (#3269) (`7a8b683ace`)
+
+### Fixed
+- **tui**: keep a committed answer painted while the reader is in history (#3268) (`94c6480ff4`)
+
 ## [0.4.5] - 2026-11-20
 
 ### Added
