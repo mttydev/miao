@@ -70,8 +70,8 @@ lsof -p <pid> | grep '.versions/'
 ## 3. 快速开始
 
 ```bash
-# 1. 登录 / 配置 provider（凭据写入 auth.json）
-miao providers login
+# 1. 登录 / 配置 provider（凭据写入共享凭据库）
+miao auth login <integration> <key>   # 或在 TUI 里用 /accounts 完成 OAuth / API key 登录
 
 # 2. 列出可用模型
 miao models
@@ -118,7 +118,7 @@ miao
 | `engine`                                                          | 旧版配置里的引擎选择，仅为兼容保留；引擎始终在进程内运行，此项不再改变放置                                                  |
 | `experimental`                                                    | 实验开关（如 Code Mode）                                                                                                                          |
 
-**本币计价**：`providers.<id>.models.<m>.cost` 用 provider 官方本币单价（如 DeepSeek 的 CNY），成本按配置费率估算；TUI 内 `/currency` 可切换显示货币（默认 USD，未声明本币的 provider 按静态汇率换算）。
+**本币计价**：`providers.<id>.models.<m>.cost` 用 provider 官方本币单价（如 DeepSeek 的 CNY），成本按配置费率估算并记录为 provider 声明的币种，不做汇率换算；账本按币种分别累计。
 
 **引擎**：引擎就在 `miao` 二进制里运行，没有需要单独安装或指定路径的引擎；`MIAO_ENGINE_STORAGE` 可改写它的存储位置（默认 `~/.local/share/miao-engine/storage`），`miao doctor` 会显示协议、schema 版本与将要打开的数据库。开发构建可用 `MIAO_ENGINE_BIN` 指定单独构建的引擎。
 
@@ -161,14 +161,15 @@ prompt 获得焦点时：
 ### 5.2 会话与模型
 
 - `/model` 或 `ctrl+x m` 切换模型（会记住每个 agent 上次使用的模型）。
-- `miao session list` / `miao export <sessionID>` 管理与会话导出（`--format jsonl` 每行一条消息，便于 grep/备份）。
+- `miao session list` / `miao export <sessionID>` 管理与会话导出（输出 JSONL，每行一条已提交事件，便于 grep/备份）。
 - `miao run "..."` 非交互执行一次。
 
 ### 5.3 命令与技能
 
 - 斜杠命令：在 prompt 输入 `/` 触发；命令来自 `commands` 配置。
 - 技能（skills）：按描述匹配，模型可用 `skill` 工具加载技能内容。
-- `miao agent create` 生成自定义 agent。
+- 自定义 agent 写在 `agents` 配置里，用 `miao agent list` 查看。
+- 完整命令清单见[命令大全](commands.zh.md)。
 
 ### 5.4 MCP
 
@@ -223,7 +224,7 @@ V2 在调度执行前先持久化输入。当前任务仍需继续时，执行�
 
 例如先要求修复错误，再补充「保持公共 API 不变，并运行包内测试」。待处理输入会展示尚未进入模型历史的要求。公共 V2 API 还提供 queue 投递和 `resume: false`，后者只保存输入、不启动执行。
 
-通过会话列表重新打开任务，或用 `miao export <sessionID> --format jsonl` 导出记录。历史可以跨终端生命周期保留，但崩溃不会自动重试未完成的模型执行。恢复时先检查已完成的改动；重复执行具有外部副作用的命令前，需要核实之前的执行结果。
+通过会话列表重新打开任务，或用 `miao export <sessionID>` 导出记录（JSONL）。历史可以跨终端生命周期保留，但崩溃不会自动重试未完成的模型执行。恢复时先检查已完成的改动；重复执行具有外部副作用的命令前，需要核实之前的执行结果。
 
 ### 5.10 专项子代理与项目内会话消息
 
@@ -259,46 +260,23 @@ V2 `list_sessions` 可发现同项目会话，`send_message` 接受会话 ID 或
 
 ## 7. 常见问题（FAQ）
 
-**Q：侧边栏 LSP 一直显示 “LSPs are disabled”？**
-配置里没写 `lsp`（省略即禁用）。在 `miao.jsonc` 加 `"lsp": true` 即可：原生引擎会重载配置并连上语言服务器，不必重启；TypeScript 引擎仍需重启 miao。
+高频问题已经整理成独立页面：[常见问题（FAQ）](faq.zh.md)，覆盖安装升级、供应商与模型、权限、配置、MCP、数据位置和排障。这里只保留两个最容易影响使用的点：
 
-**Q：`ctrl+x b` 打不开侧边栏？**
-子会话（由 task/subagent 派生、`parent_id` 非空）侧边栏被强制隐藏；顶层会话可用。窄终端（宽度 ≤120）auto 模式也不默认显示，但手动 toggle 有效。
-
-**Q：模型/供应商怎么配？**
-`miao providers login` 写凭据；`miao models` 查看；在 `miao.jsonc` 的 `providers` 里自定义。可用 `miao debug config` 查看生效配置，用 `miao debug info` 查看安装与插件信息；`miao debug` 列出子命令。
-
-**Q：怎么用我的 Command Code 订阅？**
-用 `miao auth login commandcode`（浏览器辅助登录）连一次，或把 `CMD_API_KEY` 设成
-[commandcode.ai Studio](https://commandcode.ai/studio/) 生成的 API key。连接后会自动从你的账号
-发现可用模型。Command Code 走的是 CLI 订阅端点而非其文档中的 Provider API，因此模型能力与价格
-在目录补充前取保守值。
-
-**Q：成本显示和账单对不上？**
-让 provider 用本币单价（`providers.<id>.models.<m>.cost` 用本币）；或用 `/currency` 切换显示货币。
-
-**Q：native（Rust）addon 出问题怎么办？**
-用 `MIAO_NATIVE=0` 禁用它，编辑匹配与补丁派生随即改由 TypeScript 实现接管。addon 同时用于 OS 沙箱 runner。详见[原生组件范围](native-benchmarks.zh.md)。
-
-**Q：能持续推进一个有多个待办的任务吗？**
-用 `loop` 配置（§5.8），或外部循环 `miao run --continue "...continue..."`。
-
-**Q：会改我的 git 仓库吗？**
-快照用独立 git 目录（`~/.local/share/miao/snapshot/…`），不污染工作树；编辑与命令遵循配置的权限规则。
+- 侧边栏显示 “LSPs are disabled”：配置里没写 `lsp`（省略即禁用）。在 `miao.jsonc` 加 `"lsp": true`，原生引擎会重载配置并连接语言服务器。
+- `ctrl+x b` 打不开侧边栏：子会话（由 task/subagent 派生、`parent_id` 非空）会强制隐藏侧边栏；窄终端（宽度 ≤120）的 auto 模式也不默认显示，但手动 toggle 有效。
 
 ## 8. 排障
 
 ```bash
 miao db path              # 数据库路径
 miao db stats             # 表/事件占用（定位膨胀）
-miao db vacuum            # checkpoint + VACUUM 回收空闲页
-miao db backfill          # 把旧 V1 会话消息转成 V2 结构（幂等）
-miao db compact           # backfill 后：删除已退役的 message/part 表及其事件
-miao export <sessionID> --format jsonl   # 导出会话
-MIAO_CONFIG=/path/miao.jsonc miao        # 指定配置
+miao db vacuum --apply    # 回收空闲页
+miao db backup --to <path>  # 校验过的数据库备份
+miao export <sessionID>   # 导出会话为 JSONL
+MIAO_CONFIG=/path/miao.jsonc miao  # 指定配置
 ```
 
-日志位于 `~/.local/share/miao/log/`。V2 之前的数据库膨胀主要来自遗留的逐 delta 事件；`miao db stats` 可监控，`miao db compact` 可退役旧表，`vacuum` 可回收空闲页。
+日志位于 `~/.local/share/miao/log/`。用 `miao db stats` 监控膨胀，需要时用 `miao db vacuum --apply` 回收空闲页；`miao db retention` 只报告可能被保留策略删除的事件，不会直接删除。
 
 ## 9. 开发
 
