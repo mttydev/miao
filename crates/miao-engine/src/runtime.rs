@@ -3562,6 +3562,14 @@ async fn drain(
             .await?;
     }
     record_promotions(&inner, &session, &run, &promoted, &lease).await?;
+    // The drain opens by promoting the inputs it is about to answer. Their
+    // newest seq is where a Goal's accounting window reopens (see the budget
+    // gate), so the owner's message always gets a fresh stretch.
+    let promoted_seq = promoted.last().map(|event| event.seq);
+    let start = DrainStart {
+        history_base,
+        promoted_seq,
+    };
     let mut tool_dispatched = false;
     let result = execute(
         &session,
@@ -3569,7 +3577,7 @@ async fn drain(
         &inner,
         cancel.clone(),
         &lease,
-        history_base,
+        start,
         &mut tool_dispatched,
     )
     .await;
@@ -3931,15 +3939,25 @@ fn state_selected(state: &Value) -> Result<Value, Error> {
     )
 }
 
+/// What the drain settled before the loop: the message tail a first-turn
+/// rejection attributes to, and the newest input promotion whose Goal window
+/// reopens at the first budget boundary.
+#[derive(Clone, Copy)]
+struct DrainStart {
+    history_base: u64,
+    promoted_seq: Option<u64>,
+}
+
 async fn execute(
     session: &str,
     run: &str,
     inner: &Arc<Inner>,
     cancel: CancellationToken,
     lease: &SessionLease,
-    history_base: u64,
+    start: DrainStart,
     tool_dispatched: &mut bool,
 ) -> Result<(), Error> {
+    let history_base = start.history_base;
     let mut step = 0;
     let mut allowance = inner.policy().max_provider_turns();
     // What this prompt has been billed: the sum of the input and output tokens
@@ -4044,6 +4062,9 @@ async fn execute(
     let cost_stop = inner.optimization(crate::optimization::Mechanism::CostStop);
     let mut budgets = Budgets::read(inner, session, goal_budget).await?;
     let mut budget_warned = HashSet::new();
+    // Earliest not-yet-consumed external promotion in this drain: the drain's
+    // own inputs first, then any steer that arrived while a turn ran.
+    let mut promoted_seq = start.promoted_seq;
     // Todo debt: count provider turns against the last `todos` revision so a
     // long stretch of tool calls cannot leave the persisted checklist silently
     // behind the work. The existing no-progress guard only watches text-only
@@ -4062,8 +4083,20 @@ async fn execute(
         // it is evaluated here, at the boundary where nothing is half-applied.
         // VAL-04 ablates the gate as a whole: with `cost_stop` removed the same
         // declarations are still recorded, but no turn is warned or stopped.
-        if cost_stop && !budgets.is_empty() {
+        if cost_stop {
+            // Refresh unconditionally: a Goal recorded mid-drain is a fact of
+            // the next boundary whether or not one existed when the drain
+            // opened. Reading only a non-empty set let a Goal the model
+            // declared itself go unenforced for the rest of the drain.
             budgets.refresh(inner, session, goal_budget).await?;
+            // A human instruction starts a new stretch of work, so a Goal
+            // budget stated for the previous one cannot veto it. The Session's
+            // budget is the operator's and stays in force.
+            if let Some(seq) = promoted_seq.take() {
+                budgets
+                    .reopen_goal(inner, session, goal_budget, seq)
+                    .await?;
+            }
             if !budget_gate(inner, session, run, &budgets, &mut budget_warned).await? {
                 return Ok(());
             }
@@ -4089,6 +4122,7 @@ async fn execute(
             if promoted.is_empty() {
                 break;
             }
+            promoted_seq = promoted.last().map(|event| event.seq);
             record_promotions(inner, session, run, &promoted, lease).await?;
             reset_allowance = true;
         }
@@ -9347,6 +9381,31 @@ impl Budgets {
         self.goal = match (goal, crate::budget::from_goal(&state), revision) {
             (true, Some(declaration), Some(revision)) => {
                 Some(BudgetWindow::open(inner, session, declaration, revision).await?)
+            }
+            _ => None,
+        };
+        self.goal_revision = revision;
+        Ok(())
+    }
+
+    /// Reopen the Goal's window at a newly promoted external input. A budget a
+    /// model declared for one stretch of work is not a veto over the owner's
+    /// next instruction: the next message starts a new window, so it runs even
+    /// when the previous stretch spent its whole allowance. The Session's own
+    /// declaration is the operator's and is deliberately left alone.
+    async fn reopen_goal(
+        &mut self,
+        inner: &Arc<Inner>,
+        session: &str,
+        goal: bool,
+        after_seq: u64,
+    ) -> Result<(), Error> {
+        let state = inner.store.state(session).await?;
+        let revision = state["goal"]["revision"].as_u64();
+        self.goal = match (goal, crate::budget::from_goal(&state), revision) {
+            (true, Some(declaration), Some(_)) => {
+                let after = after_seq.max(revision.unwrap_or(0));
+                Some(BudgetWindow::open(inner, session, declaration, after).await?)
             }
             _ => None,
         };
