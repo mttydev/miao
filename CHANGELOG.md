@@ -15,7 +15,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [0.4.8] - 2026-11-21
 
+### Added
+- **engine**: cap model-declared goal token budgets (#3280) (`bba023ebb6`)
+
 ### Fixed
+- **engine**: let a user message reopen an exhausted goal budget window (#3279) (`b18eba8331`)
 - **tui**: localize the sidebar goal, plan, and usage sections (#3276) (`4517e4e048`)
 
 ## [0.4.7] - 2026-11-21
