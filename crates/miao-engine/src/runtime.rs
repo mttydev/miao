@@ -310,6 +310,11 @@ struct Inner {
     /// Sessions with a drain in this process. The timer heartbeat must not claim
     /// one: claiming advances the epoch and would fence the active drain.
     draining: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Why the newest local stop was asked for, per Session. It rides memory
+    /// from the actor that cancels a token to the drain that writes its own
+    /// terminal event, so no store write sits on the interrupt path and the
+    /// origin still lands in the journal before `run.finished`.
+    stop_origins: Mutex<HashMap<String, String>>,
     stop: CancellationToken,
     heartbeat: Mutex<Option<JoinHandle<()>>>,
     permission_refresh: Mutex<Option<JoinHandle<()>>>,
@@ -390,8 +395,10 @@ struct Background {
 enum Command {
     Shell(crate::session_shell::Invocation),
     Wake(bool),
-    Cancel(oneshot::Sender<Result<bool, Error>>),
-    CancelIf(String, oneshot::Sender<Result<bool, Error>>),
+    /// Interrupt the active run; the string is the origin the journal records
+    /// so a stopped turn can be explained later.
+    Cancel(String, oneshot::Sender<Result<bool, Error>>),
+    CancelIf(String, String, oneshot::Sender<Result<bool, Error>>),
     Approve(Response, bool, oneshot::Sender<Result<(), Error>>),
 }
 
@@ -1100,6 +1107,7 @@ impl Runtime {
                 subagent_pool: FairPool::new(SUBAGENT_SLOTS, crate::subagent::PER_SESSION_LIMIT),
                 started: Mutex::new(std::collections::HashSet::new()),
                 draining: std::sync::Mutex::new(std::collections::HashSet::new()),
+                stop_origins: Mutex::new(HashMap::new()),
                 stop: CancellationToken::new(),
                 heartbeat: Mutex::new(None),
                 permission_refresh: Mutex::new(None),
@@ -3118,7 +3126,7 @@ impl Runtime {
     /// drain, remove the attachment, and await the coordinator so the bounded
     /// attachment table frees immediately. Unattached sessions report false.
     pub async fn detach(&self, session: &str) -> Result<bool, Error> {
-        let _ = self.cancel(session).await?;
+        let _ = self.cancel_with(session, "session_closed").await?;
         let actor = {
             let mut actors = self.inner.actors.lock().await;
             actors.remove(session)
@@ -3145,6 +3153,16 @@ impl Runtime {
     }
 
     pub async fn cancel(&self, session: &str) -> Result<bool, Error> {
+        self.cancel_with(session, "operator").await
+    }
+
+    /// Interrupt the active run and record who asked for it.
+    ///
+    /// The origin rides the durable `run.cancel_requested` event, which is the
+    /// only place a stopped turn says why it stopped: `run.finished` carries
+    /// just the coarse `interrupted` category, so before this a local Escape
+    /// and a host shutdown read exactly alike.
+    async fn cancel_with(&self, session: &str, origin: &str) -> Result<bool, Error> {
         let commands = {
             let actors = self.inner.actors.lock().await;
             actors.get(session).map(|a| a.commands.clone())
@@ -3157,13 +3175,13 @@ impl Runtime {
             };
             self.inner
                 .store
-                .request_cancel(session, &run, "operator")
+                .request_cancel(session, &run, origin)
                 .await?;
             return Ok(true);
         };
         let (reply, result) = oneshot::channel();
         commands
-            .send(Command::Cancel(reply))
+            .send(Command::Cancel(origin.to_string(), reply))
             .await
             .map_err(|_| Error::Closed)?;
         result.await.map_err(|_| Error::Closed)?
@@ -3182,13 +3200,17 @@ impl Runtime {
             }
             self.inner
                 .store
-                .request_cancel(session, run, "operator")
+                .request_cancel(session, run, "take_back")
                 .await?;
             return Ok(true);
         };
         let (reply, result) = oneshot::channel();
         commands
-            .send(Command::CancelIf(run.to_owned(), reply))
+            .send(Command::CancelIf(
+                run.to_owned(),
+                "take_back".to_string(),
+                reply,
+            ))
             .await
             .map_err(|_| Error::Closed)?;
         result.await.map_err(|_| Error::Closed)?
@@ -3254,6 +3276,21 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) {
+        // Record why every live drain is stopping before the stop token fires:
+        // a drain token is a child of `stop`, so a drain can wake and write its
+        // own finish before the actor that owns it reaches its stop branch.
+        {
+            let sessions: Vec<String> = self
+                .inner
+                .draining
+                .lock()
+                .map(|draining| draining.iter().cloned().collect())
+                .unwrap_or_default();
+            let mut origins = self.inner.stop_origins.lock().await;
+            for session in sessions {
+                origins.insert(session, "shutdown".to_string());
+            }
+        }
         self.inner.stop.cancel();
         if let Some(heartbeat) = self.inner.heartbeat.lock().await.take() {
             let _ = heartbeat.await;
@@ -3318,6 +3355,25 @@ fn withdraw_product_sources(inner: &Inner, session: &str, notifications: &mut Jo
     notifications.spawn(async move { bridge.notify_cancellation(&session, &ids).await });
 }
 
+/// Name a stop once per run, after its token has been cancelled.
+///
+/// The first path to reach the journal wins: a shutdown racing an operator's
+/// Escape must not relabel a run an operator already stopped, and consuming a
+/// remote request must not rewrite its origin. The write trails the token
+/// cancel on purpose — a journal write queued ahead of it would hold the stop
+/// behind the store writer and let a pending authorization commit win.
+async fn note_stop(inner: &Arc<Inner>, session: &str, run: &str, origin: &str) {
+    if inner
+        .store
+        .cancel_requested(session, run, 0)
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let _ = inner.store.request_cancel(session, run, origin).await;
+}
+
 async fn coordinate(session: String, inner: Arc<Inner>, mut commands: mpsc::Receiver<Command>) {
     let mut tasks = JoinSet::new();
     let mut notifications = JoinSet::new();
@@ -3347,7 +3403,13 @@ async fn coordinate(session: String, inner: Arc<Inner>, mut commands: mpsc::Rece
         tokio::select! {
             biased;
             _=inner.stop.cancelled() => {
-                if let Some(cancel)=active.take() { cancel.cancel(); }
+                if let Some(cancel)=active.take() {
+                    // A shutdown interrupts every live drain, so the journal
+                    // has to say so. `Runtime::shutdown` seeds the origin before
+                    // it cancels `stop`, because a drain can wake and write its
+                    // own finish before this branch runs.
+                    cancel.cancel();
+                }
                 while tasks.join_next().await.is_some() {}
                 break;
             }
@@ -3356,28 +3418,36 @@ async fn coordinate(session: String, inner: Arc<Inner>, mut commands: mpsc::Rece
                     if active_shell.as_deref()!=Some(&invocation.call_id) && !shells.iter().any(|item|item.call_id==invocation.call_id) {shells.push_back(invocation);}
                 },
                 Some(Command::Wake(force)) => wake=Some(wake.unwrap_or(false)||(force && active.is_none())),
-                Some(Command::Cancel(reply)) => {
+                Some(Command::Cancel(origin, reply)) => {
                     // A wake already queued behind this run belongs to input the
                     // operator admitted before stopping it. Escape interrupts the
                     // turn, not the message typed behind it, so the coalesced
                     // wake survives and the successor drain promotes that input.
                     // With nothing queued no wake exists and the Session stays
                     // stopped, which is what a plain interrupt means.
+                    if let Some(cancel)=&active {
+                        // The token goes ahead of any store I/O: a stop queued
+                        // behind the writer would let a pending authorization
+                        // commit win. The origin rides memory and the drain
+                        // writes it before its own finish event.
+                        inner.stop_origins.lock().await.insert(session.clone(), origin);
+                        cancel.cancel();
+                    }
                     refuse_shell_queue(&inner,&session,&mut shells).await;
-                    if let Some(cancel)=&active { cancel.cancel(); }
                     withdraw_product_sources(&inner,&session,&mut notifications);
                     let result = retire_shared_permission_sources(&inner,&session,None).await.map(|_|active.is_some());
                     let _=reply.send(result);
                 }
-                Some(Command::CancelIf(expected,reply)) => {
+                Some(Command::CancelIf(expected,origin,reply)) => {
                     // The actor cannot start another drain during this check:
                     // the active token and durable run belong to the same owner.
                     let result = match inner.store.active_run(&session).await {
                         Ok(Some(run)) if run == expected && active.as_ref().is_some_and(|token| !token.is_cancelled()) => {
                             // Same rule as `Cancel`: a coalesced wake is work the
                             // operator already admitted, so it outlives the stop.
-                            refuse_shell_queue(&inner,&session,&mut shells).await;
+                            inner.stop_origins.lock().await.insert(session.clone(), origin);
                             if let Some(token) = &active { token.cancel(); }
+                            refuse_shell_queue(&inner,&session,&mut shells).await;
                             withdraw_product_sources(&inner,&session,&mut notifications);
                             retire_shared_permission_sources(&inner,&session,None).await.map(|_|true)
                         }
@@ -3391,14 +3461,17 @@ async fn coordinate(session: String, inner: Arc<Inner>, mut commands: mpsc::Rece
                     let _=reply.send(result);
                 },
                 None => {
-                    // Detach retains the old notification delivery guarantee;
-                    // global shutdown drops this scoped set with the actor.
+                    // Detach retains the old notification delivery guarantee, and
+                    // its drain still owes a terminal event: cancelling it and
+                    // then dropping the JoinSet would abort the drain, leaving
+                    // the run `running` and the stop unexplained.
                     while !notifications.is_empty() {
                         tokio::select! {
                             _=inner.stop.cancelled() => break,
                             _=notifications.join_next() => {},
                         }
                     }
+                    while tasks.join_next().await.is_some() {}
                     break;
                 },
             },
@@ -3608,6 +3681,17 @@ async fn drain(
         None
     };
     retire_shared_permission_sources(&inner, &session, None).await?;
+    // A stop the operator asked for left its origin in memory. Write it ahead
+    // of the terminal event so a journal reader sees the reason before the
+    // finish; a request from another window already wrote its own, and
+    // `note_stop` keeps the first origin. Take it either way so a cancel that
+    // raced a completed run cannot label the next one.
+    let origin = inner.stop_origins.lock().await.remove(&session);
+    if reason == "interrupted" {
+        if let Some(origin) = origin {
+            note_stop(&inner, &session, &run, &origin).await;
+        }
+    }
     // `reason` stays the coarse lifecycle category (completed/failed/interrupted).
     // Carry the underlying error text with it so a client — and, for a delegated
     // child, the parent waiting on it — can show why the drain failed instead of
@@ -9301,7 +9385,7 @@ async fn cancel_session(inner: &Arc<Inner>, session: &str) -> Result<bool, Error
     };
     let (reply, result) = oneshot::channel();
     commands
-        .send(Command::Cancel(reply))
+        .send(Command::Cancel("engine".to_string(), reply))
         .await
         .map_err(|_| Error::Closed)?;
     result.await.map_err(|_| Error::Closed)?

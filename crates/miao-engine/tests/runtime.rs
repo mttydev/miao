@@ -164,6 +164,15 @@ async fn cancellation_is_handled_while_provider_is_waiting_and_does_not_block_ot
             .unwrap();
     assert!(cancelled);
     finished(&store, "interrupted").await;
+    assert!(
+        store
+            .events("s", 0, 1000)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "run.cancel_requested" && e.data["reason"] == "operator"),
+        "an operator interrupt records who stopped the run"
+    );
     assert!(!store
         .events("other", 0, 100)
         .await
@@ -178,6 +187,78 @@ async fn cancellation_is_handled_while_provider_is_waiting_and_does_not_block_ot
         .unwrap()
         .iter()
         .any(|e| e.kind == "run.finished" && e.data["reason"] == "interrupted"));
+}
+
+#[tokio::test]
+async fn shutdown_names_itself_as_the_stop_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let (calls, mut receive) = mpsc::channel(10);
+    let runtime = Runtime::new(
+        store.clone(),
+        Arc::new(Scripted {
+            calls,
+            release: Arc::new(Notify::new()),
+        }),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(input("first", Delivery::Steer), true)
+        .await
+        .unwrap();
+    receive.recv().await.unwrap();
+    runtime.shutdown().await;
+    let events = store.events("s", 0, 1000).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "run.cancel_requested" && e.data["reason"] == "shutdown"),
+        "a shutdown stop must not read like an operator's Escape; saw {:?}",
+        events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.data.get("reason").cloned()))
+            .collect::<Vec<_>>()
+    );
+    assert!(events
+        .iter()
+        .any(|e| e.kind == "run.finished" && e.data["reason"] == "interrupted"));
+}
+
+#[tokio::test]
+async fn detaching_a_session_records_that_it_was_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    let (calls, mut receive) = mpsc::channel(10);
+    let runtime = Runtime::new(
+        store.clone(),
+        Arc::new(Scripted {
+            calls,
+            release: Arc::new(Notify::new()),
+        }),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .admit(input("first", Delivery::Steer), true)
+        .await
+        .unwrap();
+    receive.recv().await.unwrap();
+    assert!(runtime.detach("s").await.unwrap());
+    let events = store.events("s", 0, 1000).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "run.cancel_requested" && e.data["reason"] == "session_closed"),
+        "closing the Session is its own stop origin; saw {:?}",
+        events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.data.get("reason").cloned()))
+            .collect::<Vec<_>>()
+    );
+    runtime.shutdown().await;
 }
 
 #[tokio::test]

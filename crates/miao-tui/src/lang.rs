@@ -173,6 +173,7 @@ impl Lang {
             "status.esc_bare" => ("Esc interrupt", "Esc 中断"),
             "status.esc_send_bare" => ("Esc interrupt and send", "Esc 中断并发送"),
             "status.idle" => ("Idle", "空闲"),
+            "status.interrupted" => ("interrupted", "已中断"),
             "status.needs_answer" => ("needs an answer", "需要回答"),
             "status.needs_answer_many" => {
                 ("needs an answer · {0} waiting", "需要回答 · {0} 个等待中")
