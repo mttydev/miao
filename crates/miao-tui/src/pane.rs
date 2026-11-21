@@ -373,6 +373,18 @@ impl Shell {
         self.transcript.running_tool = label;
     }
 
+    /// Name the compaction pass the run is inside; `None` clears it.
+    pub fn set_running_compaction(&mut self, phase: Option<(u64, u64)>) {
+        self.transcript.running_compaction = phase;
+    }
+
+    /// The pass the run is inside, for a test that asserts a frame set or
+    /// cleared it rather than reading the painted row.
+    #[cfg(test)]
+    pub fn transcript_compaction(&self) -> Option<(u64, u64)> {
+        self.transcript.running_compaction
+    }
+
     /// Where the transcript is scrolled to, in rows from the oldest one. A test
     /// asserts a wheel step exactly instead of inferring it from `following`.
     #[cfg(test)]
@@ -951,6 +963,10 @@ pub struct TranscriptPane {
     /// A tool the run has started but not finished. It streams into the tail
     /// as the spinner row the TS transcript keeps under the running step.
     running_tool: Option<String>,
+    /// A compaction pass the run is inside, as `(segment, total)`. It has no
+    /// tool call to name, and a pass visible only in the status strip left a
+    /// reader watching a transcript that never moved.
+    running_compaction: Option<(u64, u64)>,
     /// Tool results render at their folded budget unless this is on.
     expanded: bool,
     /// The transcript's inner area from the last frame, in screen coordinates.
@@ -995,6 +1011,7 @@ impl TranscriptPane {
             follow: true,
             user_anchors: Vec::new(),
             running_tool: None,
+            running_compaction: None,
             expanded: false,
             area: Rect::default(),
             selection: None,
@@ -1157,6 +1174,24 @@ impl Pane for TranscriptPane {
             let label = fit(label, (content.width as usize).saturating_sub(10));
             visible.push(Line::from(Span::styled(
                 format!("{frame} running {label}"),
+                Style::new().fg(palette.text_muted),
+            )));
+        }
+        // A compaction pass is the other work with no tool call to name: the
+        // summary runs on its own model calls, and a transcript that never
+        // moved while it happened read as a stalled turn.
+        if let Some((segment, total)) = self.running_compaction.filter(|_| self.follow) {
+            if visible.len() == viewport {
+                visible.remove(0);
+            }
+            let frame = SPINNER_FRAMES[(now_ms() / 160) as usize % SPINNER_FRAMES.len()];
+            let label = match total > 1 {
+                true => format!("compacting context {segment}/{total}"),
+                false => "compacting context".to_string(),
+            };
+            let label = fit(&label, (content.width as usize).saturating_sub(2));
+            visible.push(Line::from(Span::styled(
+                format!("{frame} {label}"),
                 Style::new().fg(palette.text_muted),
             )));
         }
@@ -8002,6 +8037,64 @@ mod tests {
                 .any(|row| row.contains("running bash")),
             "{:?}",
             text(&terminal)
+        );
+    }
+
+    /// A compaction pass names itself where the conversation is, not only in
+    /// the strip: the summary runs on its own model calls, and an unmoving
+    /// transcript read as a stalled turn.
+    #[test]
+    fn a_compacting_pass_names_itself_at_the_tail() {
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), home_theme());
+        let transcript = Transcript {
+            entries: vec![Entry::User {
+                text: "question".into(),
+                seq: 1,
+            }],
+            ..Transcript::default()
+        };
+        shell.set_transcript(&transcript);
+        shell.set_running_compaction(Some((2, 3)));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).expect("terminal");
+        terminal
+            .draw(|frame| shell.transcript.render(frame, frame.area()))
+            .expect("draw");
+        let rows = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            (0..12)
+                .map(|y| {
+                    (0..60)
+                        .map(|x| {
+                            terminal
+                                .backend()
+                                .buffer()
+                                .cell(ratatui::prelude::Position::new(x, y))
+                                .map(|cell| cell.symbol().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let painted = rows(&terminal);
+        assert!(
+            painted
+                .iter()
+                .any(|row| row.contains("compacting context 2/3")),
+            "{painted:?}"
+        );
+        // The pass ended, so the row goes with it; the finished banner is the
+        // projection's job, not this row's.
+        shell.set_running_compaction(None);
+        terminal
+            .draw(|frame| shell.transcript.render(frame, frame.area()))
+            .expect("draw");
+        assert!(
+            !rows(&terminal)
+                .iter()
+                .any(|row| row.contains("compacting context")),
+            "{:?}",
+            rows(&terminal)
         );
     }
 

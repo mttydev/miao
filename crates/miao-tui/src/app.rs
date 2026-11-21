@@ -1604,6 +1604,7 @@ impl App {
                     self.draft = None;
                     self.shell.set_draft(&[]);
                     self.shell.set_running_tool(None);
+                    self.shell.set_running_compaction(None);
                 }
                 self.committed = committed;
                 // The sidebar's Context section and hourly strip are painted
@@ -4735,14 +4736,16 @@ impl App {
             // is the silence an operator reads as a stall.
             "compaction.started" => {
                 self.compaction_paused_notice = false;
-                LivePhase::Compacting {
-                    segment: 1,
-                    total: frame
-                        .get("segments")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(1)
-                        .max(1),
-                }
+                let total = frame
+                    .get("segments")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1);
+                // The transcript keeps the pass as a tail row: the strip alone
+                // was easy to miss, and a pass showed nothing at all where the
+                // conversation is.
+                self.shell.set_running_compaction(Some((1, total)));
+                LivePhase::Compacting { segment: 1, total }
             }
             "compaction.progress" => {
                 let total = frame
@@ -4755,6 +4758,7 @@ impl App {
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
                     .clamp(1, total);
+                self.shell.set_running_compaction(Some((segment, total)));
                 LivePhase::Compacting { segment, total }
             }
             // The pass stopped because the turn was interrupted. The summary it
@@ -4762,12 +4766,14 @@ impl App {
             // compaction that is no longer running — otherwise Escape looks like
             // it did nothing and a stopped pass reads exactly like a wedged one.
             "compaction.cancelled" => {
+                self.shell.set_running_compaction(None);
                 self.notice("Compaction stopped");
                 LivePhase::Waiting
             }
             // A gate that keeps a pass idle never started one: only a stale
             // Compacting phase from an earlier attempt has to end here.
             "compaction.skipped" | "compaction.prefix.fallback" => {
+                self.shell.set_running_compaction(None);
                 // Gate ⑤ is the one skip an operator has to hear about: the
                 // summarizer kept failing, so no pass will run by itself and the
                 // history keeps growing until the endpoint refuses the turn.
@@ -4791,7 +4797,10 @@ impl App {
             }
             // The summary landed or was refused, and the turn continues: the
             // next provider frame names what it is doing now.
-            "compaction.finished" | "compaction.failed" => LivePhase::Waiting,
+            "compaction.finished" | "compaction.failed" => {
+                self.shell.set_running_compaction(None);
+                LivePhase::Waiting
+            }
             _ => return,
         };
         // Only a phase change restarts the clock; a heartbeat must not restart
@@ -9671,6 +9680,31 @@ mod tests {
             app.shell.title.status(),
             Some("Waiting for model · Esc interrupt")
         );
+    }
+
+    /// The pass rides the transcript tail as well as the strip: the frame that
+    /// names a segment sets the row, and the frame that ends the pass clears
+    /// it, so a finished summary cannot leave work named on screen.
+    #[test]
+    fn a_compaction_pass_rides_the_transcript_tail() {
+        let mut app = running_app("run-1");
+        app.handle(AppEvent::Provider(serde_json::json!({
+            "kind": "compaction.started",
+            "session_id": "ses_1",
+            "run_id": "run-1",
+            "segments": 3,
+        })));
+        assert_eq!(app.shell.transcript_compaction(), Some((1, 3)));
+        app.handle(AppEvent::Provider(serde_json::json!({
+            "kind": "compaction.progress",
+            "session_id": "ses_1",
+            "run_id": "run-1",
+            "segment": 2,
+            "total": 3,
+        })));
+        assert_eq!(app.shell.transcript_compaction(), Some((2, 3)));
+        app.handle(provider_frame("compaction.finished"));
+        assert_eq!(app.shell.transcript_compaction(), None);
     }
 
     /// Escape during a pass cancels it, and the summary that was never built
