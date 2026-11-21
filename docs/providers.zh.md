@@ -48,7 +48,20 @@ miao debug routes      # 解析出的路由清单（JSON）
 | `MIAO_MODELS_URL` | 从另一个 URL 拉取目录 |
 | `MIAO_MODELS_PATH` | 使用指定的本地目录文件 |
 
-[Command Code](https://commandcode.ai) 是订阅制供应商：用 `miao auth login commandcode`（浏览器辅助）连接，或设置 `CMD_API_KEY`；连接后会从你的账号发现其模型。OpenCode Zen / Go 仍作为可选的第三方供应商保留。
+[Command Code](https://commandcode.ai) 是订阅制供应商：用 `miao auth login commandcode`（浏览器辅助）连接，或设置 `CMD_API_KEY`。目录列出它的全部模型，套餐决定哪些模型可用：在 `providers.commandcode.plan` 写 `go` / `goat` / `pro` / `max`，Max 10× 与 20× 都写 `max`。同一个 provider 的两把 key 若套餐不同，用 `account_plans` 按 key 的账户标签分别指定。未写 plan、或写了 `team` / `provider` 这类目录没有分层信息的套餐时，不隐藏模型；目录标记为 `deprecated` 的模型始终不显示。Go 套餐不含 API access，第三方客户端无法用它调用模型，需 GOAT 或更高。
+
+```jsonc
+{
+  "providers": {
+    "commandcode": {
+      "plan": "pro",
+      "account_plans": { "work": "max" }
+    }
+  }
+}
+```
+
+[OpenCode](https://opencode.ai) 的两个入口按计费方式分开：`opencode` 是按量付费的 Console，`opencode-go` 是 Go 订阅。Go / Go Plus / Go Teams 三档都覆盖同一组模型，所以 `opencode-go` 不按套餐过滤；套餐只影响额度，不影响可选模型。
 
 ### mtty 网关
 

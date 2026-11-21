@@ -46,6 +46,18 @@ pub fn routes(
     sources: &[Source],
     credential_db: Option<&Path>,
 ) -> Result<Option<Vec<Value>>, String> {
+    routes_with(
+        sources,
+        credential_db,
+        crate::model_catalog::models_snapshot().as_ref(),
+    )
+}
+
+fn routes_with(
+    sources: &[Source],
+    credential_db: Option<&Path>,
+    snapshot: Option<&Value>,
+) -> Result<Option<Vec<Value>>, String> {
     let documents = config_derive::load(sources)?;
     let values = documents
         .iter()
@@ -72,6 +84,19 @@ pub fn routes(
     let mut entries = Vec::new();
     let mut primary_seen = false;
     for (id, provider) in providers {
+        // A configuration entry and the catalog describe one provider: the
+        // entry carries what the operator chose (a plan, an endpoint, extra
+        // models) while the catalog carries the shipped model list. Merging
+        // keeps a plan-only entry from replacing the catalog with an empty
+        // model map.
+        let provider = match snapshot
+            .and_then(Value::as_object)
+            .and_then(|snapshot| snapshot.get(id))
+        {
+            Some(base) => merge_provider(base, provider),
+            None => provider.clone(),
+        };
+        let provider = &provider;
         if provider.get("disabled").and_then(Value::as_bool) == Some(true) {
             continue;
         }
@@ -94,6 +119,9 @@ pub fn routes(
             if model.get("disabled").and_then(Value::as_bool) == Some(true) {
                 continue;
             }
+            if !available(model) {
+                continue;
+            }
             // A model's own api overrides the provider's, the way the
             // product's catalog builds it.
             let api = model
@@ -101,7 +129,7 @@ pub fn routes(
                 .filter(|api| api.get("type").is_some() || api.get("url").is_some());
             let api = api.or(provider_api);
             let Some(api) = api else { continue };
-            let Some((transport, endpoint)) = transport(api, model_id) else {
+            let Some((transport, endpoint)) = route_transport(id, api, model_id) else {
                 continue;
             };
             let key = format!("{id}/{model_id}");
@@ -150,10 +178,24 @@ pub fn routes(
                 }
             }
             if from_environment {
-                entries.push(entry);
+                if plan_allows(plan_for(provider, "default").as_deref(), model.get("plans")) {
+                    entries.push(entry);
+                }
                 continue;
             }
-            for (position, account) in accounts.iter().enumerate() {
+            // A provider can hold keys on different plans, so the plan filter
+            // runs per account. Only the provider's default account keeps the
+            // plain route id a Session may already carry; a model its plan
+            // filters out must not promote another account into that slot.
+            let default_account = accounts.first().map(|account| account.id.as_str());
+            for account in accounts {
+                if !plan_allows(
+                    plan_for(provider, &account.label).as_deref(),
+                    model.get("plans"),
+                ) {
+                    continue;
+                }
+                let position = usize::from(Some(account.id.as_str()) != default_account);
                 entries.push(route_entry(
                     &entry, id, model_id, account, position, &entries,
                 ));
@@ -162,7 +204,7 @@ pub fn routes(
     }
     // Credential integrations the configuration does not name answer through
     // the catalog snapshot, the way the product host answers them.
-    entries.extend(catalog_key_routes(providers, credential_db));
+    entries.extend(catalog_key_routes_with(snapshot, providers, credential_db));
     if entries.is_empty() {
         return Ok(None);
     }
@@ -233,10 +275,22 @@ pub fn catalog_key_routes(
     declared: &serde_json::Map<String, Value>,
     credential_db: Option<&Path>,
 ) -> Vec<Value> {
-    let Some(snapshot) = crate::model_catalog::models_snapshot() else {
-        return Vec::new();
-    };
-    snapshot_key_routes(&snapshot, declared, credential_db)
+    catalog_key_routes_with(
+        crate::model_catalog::models_snapshot().as_ref(),
+        declared,
+        credential_db,
+    )
+}
+
+fn catalog_key_routes_with(
+    snapshot: Option<&Value>,
+    declared: &serde_json::Map<String, Value>,
+    credential_db: Option<&Path>,
+) -> Vec<Value> {
+    match snapshot {
+        Some(snapshot) => snapshot_key_routes(snapshot, declared, credential_db),
+        None => Vec::new(),
+    }
 }
 
 /// Rewrite the manifest from the configuration and the credential store, and
@@ -340,22 +394,28 @@ fn snapshot_key_routes(
         let models = provider.get("models").and_then(Value::as_object);
         let Some(models) = models else { continue };
         for (model_id, model) in models {
-            let produces_text = model
-                .get("modalities")
-                .and_then(|modalities| modalities.get("output"))
-                .and_then(Value::as_array)
-                .is_some_and(|outputs| outputs.iter().any(|item| item == "text"));
-            if !produces_text {
+            // A catalog entry can omit `modalities` entirely (Command Code
+            // publishes neither capabilities nor pricing on its model list).
+            // An omitted field is unknown, not "no text": hiding an id the
+            // account can call is worse than showing one it cannot.
+            if !text_output(model) || !available(model) {
                 continue;
             }
-            let Some(endpoint) = base.join_pair("chat/completions") else {
-                continue;
+            let (transport, endpoint) = if id == "commandcode" {
+                match commandcode_transport(base, model_id) {
+                    Some(pair) => pair,
+                    None => continue,
+                }
+            } else {
+                match base.join_pair("chat/completions") {
+                    Some(endpoint) => ("openai-chat".to_string(), Some(endpoint)),
+                    None => continue,
+                }
             };
             let mut entry = json!({
                 "id": format!("{id}/{model_id}"),
-                "provider": "openai-chat",
+                "provider": transport,
                 "model": model_id,
-                "endpoint": endpoint,
                 "credential": {
                     "type": "database",
                     "path": db_path.display().to_string(),
@@ -363,6 +423,9 @@ fn snapshot_key_routes(
                     "integration": account.integration,
                 },
             });
+            if let Some(endpoint) = endpoint {
+                entry["endpoint"] = json!(endpoint);
+            }
             gateway_session_header(id, &mut entry);
             let limit = model.get("limit").and_then(Value::as_object);
             let mut bounded = serde_json::Map::new();
@@ -393,6 +456,175 @@ fn snapshot_key_routes(
         }
     }
     entries
+}
+
+/// Whether a model's declared output can carry text. A missing or empty
+/// declaration is unknown, so the model stays routable; only an explicit
+/// non-text output (an image model, for example) is skipped.
+fn text_output(model: &Value) -> bool {
+    match model
+        .get("modalities")
+        .and_then(|modalities| modalities.get("output"))
+        .and_then(Value::as_array)
+    {
+        None => true,
+        Some(outputs) => outputs.is_empty() || outputs.iter().any(|output| output == "text"),
+    }
+}
+
+/// The catalog marks retired models `deprecated`; the product treats those as
+/// disabled, so a derived route must not keep offering them.
+fn available(model: &Value) -> bool {
+    model.get("status").and_then(Value::as_str) != Some("deprecated")
+}
+
+/// The plan tiers Command Code uses to gate its catalog, cheapest first.
+const PLAN_TIERS: [&str; 4] = ["go", "goat", "pro", "max"];
+
+/// The plan an account is on: the account label's entry wins, then the
+/// provider-wide plan. An absent value means "unknown", which hides nothing.
+fn plan_for(provider: &Value, account: &str) -> Option<String> {
+    provider
+        .get("account_plans")
+        .and_then(Value::as_object)
+        .and_then(|plans| plans.get(account))
+        .and_then(Value::as_str)
+        .or_else(|| provider.get("plan").and_then(Value::as_str))
+        .map(normalize_plan)
+}
+
+fn normalize_plan(plan: &str) -> String {
+    match plan.trim().to_ascii_lowercase().as_str() {
+        // Command Code sells Max as 10x and 20x; both name the catalog's `max`
+        // tier. OpenCode's Go Plus and Go Teams likewise serve Go's models.
+        "max10" | "max-10" | "max-10x" | "max_10x" | "max 10x" => "max".to_string(),
+        "max20" | "max-20" | "max-20x" | "max_20x" | "max 20x" => "max".to_string(),
+        "goplus" | "go-plus" | "go plus" | "goteams" | "go-teams" | "go teams" => "go".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A model is selectable when its entry names no plan tiers, or names the
+/// account's tier. An unrecognized plan (Teams, Provider, Enterprise) hides
+/// nothing: a wrong model list is worse than a short one, but hiding a model
+/// the account can call is worse still.
+fn plan_allows(plan: Option<&str>, plans: Option<&Value>) -> bool {
+    let Some(plan) = plan else {
+        return true;
+    };
+    if !PLAN_TIERS.contains(&plan) {
+        return true;
+    }
+    let Some(plans) = plans.and_then(Value::as_array) else {
+        return true;
+    };
+    plans.is_empty()
+        || plans
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|tier| normalize_plan(tier) == plan)
+}
+
+/// Merge a configured provider over its catalog entry. Only the top level is
+/// replaced field by field; models are merged per id so a config that adds one
+/// model or overrides one field keeps the catalog's other models.
+fn merge_provider(base: &Value, declared: &Value) -> Value {
+    let (Some(base_fields), Some(declared_fields)) = (base.as_object(), declared.as_object())
+    else {
+        return declared.clone();
+    };
+    let mut merged = base_fields.clone();
+    let mut models = merged
+        .remove("models")
+        .and_then(|models| models.as_object().cloned())
+        .unwrap_or_default();
+    for (field, value) in declared_fields {
+        if field == "models" {
+            // An explicit model list is the operator's catalog for this
+            // provider. Only an absent or empty list inherits the shipped
+            // models, which is what a plan-only entry needs.
+            let Some(declared_models) = value.as_object() else {
+                continue;
+            };
+            if declared_models.is_empty() {
+                continue;
+            }
+            let mut replaced = serde_json::Map::new();
+            for (model_id, model) in declared_models {
+                let merged_model = match models.get(model_id) {
+                    Some(base_model) => merge_model(base_model, model),
+                    None => model.clone(),
+                };
+                replaced.insert(model_id.clone(), merged_model);
+            }
+            models = replaced;
+            continue;
+        }
+        merged.insert(field.clone(), value.clone());
+    }
+    merged.insert("models".into(), Value::Object(models));
+    Value::Object(merged)
+}
+
+fn merge_model(base: &Value, declared: &Value) -> Value {
+    let (Some(base_fields), Some(declared_fields)) = (base.as_object(), declared.as_object())
+    else {
+        return declared.clone();
+    };
+    let mut merged = base_fields.clone();
+    for (field, value) in declared_fields {
+        merged.insert(field.clone(), value.clone());
+    }
+    Value::Object(merged)
+}
+
+/// Pick the wire for one route. Command Code needs its own base and splits
+/// Claude behind `/messages`; every other provider keeps the existing mapping.
+fn route_transport(
+    provider: &str,
+    api: &Value,
+    model_id: &str,
+) -> Option<(String, Option<String>)> {
+    let owned;
+    let api = match api {
+        Value::String(url) => {
+            owned = json!({ "url": url });
+            &owned
+        }
+        api => api,
+    };
+    if provider == "commandcode" {
+        let base = api
+            .as_str()
+            .or_else(|| api.get("url").and_then(Value::as_str))?;
+        return commandcode_transport(base, model_id);
+    }
+    transport(api, model_id)
+}
+
+/// Command Code's Provider API lives under `/provider/v1`; the catalog names
+/// only the host. OpenAI-compatible models answer `/chat/completions`, while
+/// the Claude models are served only by `/messages` (official model list
+/// reports `supported_endpoints` per model).
+fn commandcode_transport(base: &str, model_id: &str) -> Option<(String, Option<String>)> {
+    let mut base = base.trim_end_matches('/');
+    if let Some(stripped) = base.strip_suffix("/chat/completions") {
+        base = stripped;
+    }
+    if let Some(stripped) = base.strip_suffix("/messages") {
+        base = stripped;
+    }
+    let base = match base.ends_with("/provider/v1") {
+        true => base.to_string(),
+        false => format!("{base}/provider/v1"),
+    };
+    if model_id.starts_with("claude") {
+        base.join_pair("messages")
+            .map(|endpoint| ("anthropic".to_string(), Some(endpoint)))
+    } else {
+        base.join_pair("chat/completions")
+            .map(|endpoint| ("openai-chat".to_string(), Some(endpoint)))
+    }
 }
 
 /// The wire a configured api rides, and the endpoint it reaches. The mapping
@@ -1066,5 +1298,153 @@ mod tests {
             "{}",
             serde_json::to_string(&entries[0]).unwrap()
         );
+    }
+
+    fn snapshot_database(directory: &Path, accounts: &[(&str, &str)]) -> std::path::PathBuf {
+        let database = directory.join("credentials.db");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE credential (id text primary key, integration_id text, label text, value text)",
+                [],
+            )
+            .unwrap();
+        for (id, label) in accounts {
+            connection
+                .execute(
+                    "INSERT INTO credential VALUES (?1, 'commandcode', ?2, '{\"type\":\"key\",\"key\":\"k\"}')",
+                    rusqlite::params![id, label],
+                )
+                .unwrap();
+        }
+        database
+    }
+
+    /// Command Code's model list carries no capabilities, so only one model
+    /// had `modalities` and the rest vanished from the picker. A missing
+    /// declaration has to count as text, `deprecated` entries stay out, and
+    /// Claude belongs on `/messages` while the Provider API lives under
+    /// `/provider/v1`.
+    #[test]
+    fn commandcode_catalog_models_route_without_modalities() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = snapshot_database(directory.path(), &[("cred_cc", "default")]);
+        let snapshot = json!({
+            "commandcode": {
+                "name": "Command Code",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "https://api.commandcode.ai",
+                "models": {
+                    "inclusionai/ling-3.1-flash:free": {},
+                    "deepseek/deepseek-v4.1-flash": {
+                        "limit": { "context": 1000000, "output": 32768 },
+                    },
+                    "claude-opus-5": {},
+                    "retired-model": { "status": "deprecated" },
+                    "image-model": {
+                        "modalities": { "input": ["text"], "output": ["image"] },
+                    },
+                },
+            },
+        });
+        let entries = snapshot_key_routes(&snapshot, &serde_json::Map::new(), Some(&database));
+        let ids: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "commandcode/claude-opus-5",
+                "commandcode/deepseek/deepseek-v4.1-flash",
+                "commandcode/inclusionai/ling-3.1-flash:free",
+            ],
+            "{}",
+            serde_json::to_string(&entries).unwrap()
+        );
+        let chat = &entries[1];
+        assert_eq!(chat["provider"], "openai-chat");
+        assert_eq!(
+            chat["endpoint"],
+            "https://api.commandcode.ai/provider/v1/chat/completions"
+        );
+        let claude = &entries[0];
+        assert_eq!(claude["provider"], "anthropic");
+        assert_eq!(
+            claude["endpoint"],
+            "https://api.commandcode.ai/provider/v1/messages"
+        );
+    }
+
+    /// A plan-only provider entry must keep the shipped catalog, and two keys
+    /// on different plans must see exactly the models their plan includes.
+    #[test]
+    fn commandcode_plans_filter_models_per_account() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("miao.json"),
+            serde_json::to_string(&json!({
+                "providers": {
+                    "commandcode": {
+                        "plan": "pro",
+                        "account_plans": { "work": "max" },
+                        "models": {},
+                    },
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let database = snapshot_database(
+            directory.path(),
+            &[("cred_default", "default"), ("cred_work", "work")],
+        );
+        let snapshot = json!({
+            "commandcode": {
+                "name": "Command Code",
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "https://api.commandcode.ai",
+                "models": {
+                    "all-plans": {},
+                    "go-only": { "plans": ["go"] },
+                    "pro-and-up": { "plans": ["pro", "max"] },
+                    "max-only": { "plans": ["max"] },
+                },
+            },
+        });
+        let entries = routes_with(
+            &[Source::Dir(directory.path().to_path_buf())],
+            Some(&database),
+            Some(&snapshot),
+        )
+        .unwrap()
+        .unwrap();
+        let ids: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "commandcode/all-plans",
+                "commandcode/all-plans@work",
+                "commandcode/max-only@work",
+                "commandcode/pro-and-up",
+                "commandcode/pro-and-up@work",
+            ],
+            "{}",
+            serde_json::to_string(&entries).unwrap()
+        );
+    }
+
+    #[test]
+    fn plan_aliases_and_unknown_tiers_do_not_hide_models() {
+        assert!(plan_allows(Some("max"), Some(&json!(["max"]))));
+        assert!(plan_allows(Some("max-20x"), Some(&json!(["max"]))));
+        assert!(plan_allows(Some("go plus"), Some(&json!(["go"]))));
+        assert!(!plan_allows(Some("pro"), Some(&json!(["max"]))));
+        assert!(plan_allows(Some("pro"), None));
+        assert!(plan_allows(Some("team"), Some(&json!(["max"]))));
+        assert!(plan_allows(None, Some(&json!(["max"]))));
     }
 }

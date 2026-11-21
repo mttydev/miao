@@ -65,9 +65,31 @@ You can point this at a different source:
 | `MIAO_MODELS_PATH` | Use an exact local catalog file |
 
 [Command Code](https://commandcode.ai) is a subscription provider: connect it
-with `miao auth login commandcode` (browser-assisted) or set `CMD_API_KEY`; its
-models are discovered from your account when it connects. OpenCode Zen / Go
-remain available as optional third-party providers.
+with `miao auth login commandcode` (browser-assisted) or set `CMD_API_KEY`. The
+catalog lists every model it publishes, and the plan decides which ones the
+account can call: set `providers.commandcode.plan` to `go`, `goat`, `pro`, or
+`max` (both Max 10× and 20× are `max`). Two keys on different plans are
+described per account with `account_plans`. An absent plan, or one the catalog
+does not tier (such as `team` or `provider`), hides nothing; models marked
+`deprecated` are always hidden. The Go plan has no API access, so third-party
+clients need GOAT or higher.
+
+```jsonc
+{
+  "providers": {
+    "commandcode": {
+      "plan": "pro",
+      "account_plans": { "work": "max" }
+    }
+  }
+}
+```
+
+[OpenCode](https://opencode.ai) keeps its two offerings as separate providers:
+`opencode` is the pay-as-you-go Console and `opencode-go` is the Go
+subscription. Go, Go Plus, and Go Teams all cover the same models, so
+`opencode-go` does not filter by plan; the plan changes usage limits, not which
+models are selectable.
 
 ### The mtty gateway
 
