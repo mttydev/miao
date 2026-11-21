@@ -2641,9 +2641,38 @@ fn due_in(due_at_ms: Option<u64>) -> String {
 /// the replay cursor keeps the open Session gapless across the respawn.
 async fn reload_provider_routes(connection: &mut Connection, bus: &Bus, open: &mut Option<Opened>) {
     if !connection.restart().await {
-        bus.send(AppEvent::ActionFailed(
-            "this engine cannot rebuild its routes; restart miao to load the stored key".into(),
-        ));
+        // An in-process engine cannot be respawned, so the routes it built at
+        // startup are rebuilt in place: `config_reload` re-derives them from the
+        // configuration and the key store, which is what makes the first key of
+        // a fresh install reach the picker without restarting miao.
+        let client = match connection.connect().await {
+            Ok(client) => client,
+            Err(error) => {
+                bus.send(AppEvent::ActionFailed(format!(
+                    "this engine cannot rebuild its routes: {error}; restart miao to load the stored key"
+                )));
+                return;
+            }
+        };
+        match client.command("config_reload").await {
+            Ok(report)
+                if !report["unsupported"]
+                    .as_array()
+                    .is_some_and(|sections| {
+                        sections
+                            .iter()
+                            .any(|section| section.as_str() == Some("models"))
+                    }) =>
+            {
+                republish(client, bus, open).await;
+            }
+            Ok(_) => bus.send(AppEvent::ActionFailed(
+                "this engine cannot rebuild its routes; restart miao to load the stored key".into(),
+            )),
+            Err(error) => bus.send(AppEvent::ActionFailed(format!(
+                "this engine cannot rebuild its routes: {error}; restart miao to load the stored key"
+            ))),
+        }
         return;
     }
     let client = match connection.connect().await {
@@ -2655,8 +2684,13 @@ async fn reload_provider_routes(connection: &mut Connection, bus: &Bus, open: &m
             return;
         }
     };
-    // The new process answers with the routes its plan rebuilt, so both
-    // catalogs are worth re-reading even when the answer is unchanged.
+    republish(client, bus, open).await;
+}
+
+/// Re-read what a restarted or reloaded engine now serves.
+async fn republish(client: &EngineClient, bus: &Bus, open: &mut Option<Opened>) {
+    // The new routes answer both catalogs, and both are worth re-reading even
+    // when the answer is unchanged.
     if let Ok(value) = client.command("model_catalog").await {
         bus.send(AppEvent::Accounts(AccountInfo::catalog(&value)));
         bus.send(AppEvent::Models(ModelInfo::catalog(&value)));

@@ -190,40 +190,111 @@ impl RouteLimits {
     }
 }
 
-/// Where startup found the route manifest, plus the base provider it layered
-/// over, so a reload rebuilds the catalog from the same sources instead of
-/// re-deriving the operator's transport and credential flags.
+/// Where a start got its routes, plus the base provider they layer over, so a
+/// reload rebuilds the catalog from the same inputs instead of re-deriving the
+/// operator's transport and credential flags.
 #[derive(Clone)]
-pub struct Origin {
-    pub base: Arc<dyn Provider>,
-    pub path: std::path::PathBuf,
-    pub workspace: std::path::PathBuf,
+pub enum Origin {
+    /// A manifest the host wrote before the start; reload re-reads it.
+    File {
+        base: Arc<dyn Provider>,
+        path: std::path::PathBuf,
+        workspace: std::path::PathBuf,
+    },
+    /// Routes the engine derived itself from configuration and the credential
+    /// store. Reloading re-derives them, which is what lets a key stored while
+    /// an in-process engine runs reach the next request: that engine cannot be
+    /// respawned to re-read a manifest.
+    Derived {
+        base: Arc<dyn Provider>,
+        sources: Vec<crate::config_derive::Source>,
+        credential_db: Option<std::path::PathBuf>,
+        workspace: std::path::PathBuf,
+    },
 }
 
 impl Origin {
-    /// Fingerprint of the manifest as it is on disk now, so the caller can
-    /// tell an edit from a replay of what is already running.
+    /// Fingerprint of the routes as they are now, so the caller can tell an
+    /// edit from a replay of what is already running.
     pub async fn digest(&self) -> Result<String, Box<dyn std::error::Error>> {
-        read(&self.path, &self.workspace)
-            .await
-            .map(|(_, fingerprint)| fingerprint)
-            .map_err(|error| format!("{}: {error}", self.path.display()).into())
+        Ok(self.build().await?.2)
     }
 
-    /// Read the manifest again and rebuild the routed catalog over the base
-    /// provider. The caller compares the result with the running catalog and
-    /// swaps only when something actually changed.
+    /// Rebuild the routed catalog over the base provider. The caller compares
+    /// the result with the running catalog and swaps only on a real change.
     pub async fn reload(
         &self,
     ) -> Result<(Arc<dyn Provider>, RouteLimits, String), Box<dyn std::error::Error>> {
-        let path = self.path.display();
-        let (bytes, fingerprint) = read(&self.path, &self.workspace)
-            .await
-            .map_err(|error| format!("{path}: {error}"))?;
-        let (provider, limits) = derive(&bytes, &self.workspace, self.base.clone())
-            .await
-            .map_err(|error| format!("{path}: {error}"))?;
-        Ok((provider, limits, fingerprint))
+        self.build().await
+    }
+
+    async fn build(
+        &self,
+    ) -> Result<(Arc<dyn Provider>, RouteLimits, String), Box<dyn std::error::Error>> {
+        match self {
+            Origin::File {
+                base,
+                path,
+                workspace,
+            } => {
+                let where_ = path.display();
+                let (bytes, fingerprint) = read(path, workspace)
+                    .await
+                    .map_err(|error| format!("{where_}: {error}"))?;
+                let (provider, limits) = derive(&bytes, workspace, base.clone())
+                    .await
+                    .map_err(|error| format!("{where_}: {error}"))?;
+                Ok((provider, limits, fingerprint))
+            }
+            Origin::Derived {
+                base,
+                sources,
+                credential_db,
+                workspace,
+            } => {
+                // The same derivation the standalone start materializes, read
+                // fresh: a provider whose key arrived since the last reload
+                // becomes a route without a restart.
+                let entries = crate::native_routes::routes(sources, credential_db.as_deref())
+                    .map_err(|error| format!("model routes: {error}"))?
+                    .unwrap_or_default();
+                let bytes = serde_json::to_vec(&entries)?;
+                let fingerprint = crate::permission::digest(&bytes);
+                let (provider, limits) = derive(&bytes, workspace, base.clone()).await?;
+                Ok((provider, limits, fingerprint))
+            }
+        }
+    }
+
+    /// The file this origin watches for edits, when it read one. A derived
+    /// origin names no file: its configuration sources are already watched.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Origin::File { path, .. } => Some(path),
+            Origin::Derived { .. } => None,
+        }
+    }
+
+    /// Endpoints the routes currently name, for the startup warmup.
+    pub async fn endpoints(&self) -> Vec<String> {
+        match self {
+            Origin::File {
+                path, workspace, ..
+            } => read(path, workspace)
+                .await
+                .map(|(bytes, _)| endpoints(&bytes))
+                .unwrap_or_default(),
+            Origin::Derived {
+                sources,
+                credential_db,
+                ..
+            } => crate::native_routes::routes(sources, credential_db.as_deref())
+                .ok()
+                .flatten()
+                .and_then(|entries| serde_json::to_vec(&entries).ok())
+                .map(|bytes| endpoints(&bytes))
+                .unwrap_or_default(),
+        }
     }
 }
 
@@ -362,10 +433,21 @@ async fn derive(
         };
         entry.request.validate()?;
         if entry.primary {
-            if default_seen || primary.identity() != provider.identity() {
+            if default_seen {
+                return Err("invalid default model route".into());
+            }
+            // A base without an identity cannot be the route: the sentinel a
+            // first start carries is exactly that state, so the manifest's own
+            // primary entry is what the catalog then serves. A base that does
+            // name an identity has to match, so a host manifest cannot retarget
+            // the provider the host launched with.
+            if primary.identity().is_some() && primary.identity() != provider.identity() {
                 return Err("invalid default model route".into());
             }
             default_seen = true;
+            if primary.identity().is_none() {
+                primary = Arc::clone(&provider);
+            }
             if let Some(auth) = entry.auth.as_ref() {
                 primary = primary.with_route_auth(auth)?;
             }
