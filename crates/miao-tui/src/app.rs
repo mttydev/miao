@@ -6639,6 +6639,44 @@ mod tests {
         );
     }
 
+    /// A read that timed out is not a dead engine. Treating it as one replaced
+    /// a scrolled transcript with the failure line, losing the history the
+    /// operator was reading; a refresh keeps the last projection and says it
+    /// could not update it.
+    #[test]
+    fn a_refresh_failure_notice_keeps_a_scrolled_transcript() {
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_a", 1)),
+            transcript: Box::new(forty_messages()),
+            state: Box::new(SessionState::default()),
+        });
+        draw(&mut app);
+        app.handle(wheel(MouseEventKind::ScrollUp));
+        draw(&mut app);
+        let detached = app.shell.transcript_scroll();
+        let rows = app
+            .shell
+            .transcript()
+            .map(|transcript| transcript.entries.len())
+            .expect("transcript");
+
+        app.handle(AppEvent::Notice(
+            "state refresh timed out · showing the last projection".into(),
+        ));
+        draw(&mut app);
+
+        assert_eq!(
+            app.shell
+                .transcript()
+                .map(|transcript| transcript.entries.len()),
+            Some(rows),
+            "a failed refresh must not replace the transcript"
+        );
+        assert_eq!(app.shell.transcript_scroll(), detached);
+        assert!(!app.shell.following());
+    }
+
     /// The engine re-projects the newest window only, which is shorter than the
     /// pages an operator paged in. Applying that projection under a detached
     /// reader clamped the viewport to the window's end — the newest rows.
