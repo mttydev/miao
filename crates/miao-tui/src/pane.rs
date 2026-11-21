@@ -7961,6 +7961,54 @@ mod tests {
         );
     }
 
+    /// A detached viewport outlived the rows its offset was measured against:
+    /// switching into a shorter Session lands a shorter transcript in the same
+    /// pane while the reader stays where the old rows left them. Rendering used
+    /// to start at `scroll.min(rows - 1)` without clamping the offset, which
+    /// painted one row at the top and left the rest of the viewport blank. The
+    /// paint now clamps the detached offset to the rows it wrapped.
+    #[test]
+    fn a_detached_viewport_past_the_new_rows_paints_the_tail() {
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), home_theme());
+        let mut long = Transcript::default();
+        for index in 0..40 {
+            long.entries.push(Entry::User {
+                text: format!("message {index}"),
+                seq: index + 1,
+            });
+        }
+        shell.set_transcript(&long);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        shell.scroll_transcript(-5);
+        assert!(!shell.following(), "the wheel detaches");
+        // The rows shrink under the reader, as a Session switch does, while the
+        // stored offset still belongs to the old rows.
+        let short = Transcript {
+            entries: vec![
+                Entry::User {
+                    text: "alpha".into(),
+                    seq: 1,
+                },
+                Entry::User {
+                    text: "beta".into(),
+                    seq: 2,
+                },
+            ],
+            ..Transcript::default()
+        };
+        shell.apply_transcript(&short);
+        shell.transcript.follow = false;
+        shell.transcript.scroll = 500;
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let painted = painted_rows(&terminal);
+        assert!(
+            painted.iter().any(|row| row.contains("alpha")),
+            "a stale offset skipped the transcript it no longer fits: {painted:?}"
+        );
+    }
+
     fn painted_rows(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
         let area = terminal.backend().buffer().area;
         (0..area.height)

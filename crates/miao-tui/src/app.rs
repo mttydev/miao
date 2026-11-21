@@ -6654,6 +6654,51 @@ mod tests {
         );
     }
 
+    /// Opening a different Session while the reader is in history follows the
+    /// new tail. The switch's projection cannot be an append over the old
+    /// Session's entries, so it is held and then applied by the reattach; a
+    /// path that forgot the reattach left the pane on the old rows (or on a
+    /// blank viewport) until the next key.
+    #[test]
+    fn switching_sessions_while_reading_history_paints_the_new_tail() {
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_a", 1)),
+            transcript: Box::new(forty_messages()),
+            state: Box::new(SessionState::default()),
+        });
+        draw(&mut app);
+        for _ in 0..4 {
+            app.handle(wheel(MouseEventKind::ScrollUp));
+        }
+        assert!(!app.shell.following(), "the wheel detaches");
+        let mut second = Transcript::default();
+        second.entries.push(crate::session::Entry::User {
+            text: "the second Session's tail".into(),
+            seq: 1,
+        });
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_b", 1)),
+            transcript: Box::new(second),
+            state: Box::new(SessionState::default()),
+        });
+        assert!(app.shell.following(), "opening a Session follows its tail");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 10)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("draw");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("the second Session's tail"),
+            "the opened Session's rows are not painted: {text:?}"
+        );
+    }
+
     /// A read that timed out is not a dead engine. Treating it as one replaced
     /// a scrolled transcript with the failure line, losing the history the
     /// operator was reading; a refresh keeps the last projection and says it
