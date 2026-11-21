@@ -501,6 +501,7 @@ mod tests {
             start: 12,
             end: 23,
             chord: None,
+            tone: Some("accent"),
         }];
         // First sight sends; the same strip stays silent.
         let first = footer_update(&None, Some(&segs)).expect("first report");
@@ -522,6 +523,7 @@ mod tests {
                 start: 2,
                 end: 9,
                 chord: None,
+                tone: Some("warning"),
             },
             FooterWireSeg {
                 id: "model",
@@ -530,6 +532,7 @@ mod tests {
                 start: 12,
                 end: 23,
                 chord: None,
+                tone: Some("accent"),
             },
         ];
         let json = footer_json(true, &segs);
@@ -537,5 +540,6 @@ mod tests {
         assert!(json.contains(crate::VERSION), "{json}");
         assert!(json.contains(r#""id":"approval""#), "{json}");
         assert!(json.contains(r#""start":2"#), "{json}");
+        assert!(json.contains(r#""tone":"accent""#), "{json}");
     }
 }
