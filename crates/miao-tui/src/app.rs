@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::commands::{self, Builtin};
 use crate::dialogs::{
-    session_model, AccountInfo, Action as DialogAction, ConfirmKind, Dialog, ModelInfo,
-    ProviderEntry, Row, TextDialog,
+    session_model, session_model_facts, AccountInfo, Action as DialogAction, ConfirmKind, Dialog,
+    ModelInfo, ProviderEntry, Row, TextDialog,
 };
 use crate::editor::{Action, Mode};
 use crate::engine;
@@ -1094,7 +1094,11 @@ impl App {
             seg.chord = match seg.id {
                 "approval" => self.keys.chord(keybinds::Action::ApprovalToggle),
                 "model" => self.keys.chord(keybinds::Action::ModelList),
-                "provider" => self.keys.chord(keybinds::Action::ProviderList),
+                // The painted strip answers a press on the provider tail with
+                // the model picker, the same fact the model label opens. The
+                // host's row has to land there too; the provider catalog is a
+                // different list with no model to pick.
+                "provider" => self.keys.chord(keybinds::Action::ModelList),
                 _ => None,
             };
         }
@@ -4940,9 +4944,10 @@ impl App {
                 // display name an older install stored; the catalog is what
                 // knows the provider, so the strip can only name it once the
                 // pick is resolved here.
-                .map(|model| match ModelInfo::resolve(&self.models, &model) {
-                    Some(info) => info.identity(),
-                    None => model,
+                .map(|model| {
+                    ModelInfo::resolve(&self.models, &model)
+                        .map(ModelInfo::facts)
+                        .unwrap_or((model, None))
                 })
                 // The remembered choice, or the model the newest Session ran
                 // on: an install that predates the remembering still has
@@ -4952,17 +4957,22 @@ impl App {
                     self.catalog
                         .first()
                         .and_then(|session| session.model.as_ref())
-                        .map(|pin| session_model(&self.models, pin))
+                        .map(|pin| session_model_facts(&self.models, pin))
                 });
             // An install with no route at all leaves the row blank, which
             // reads as a broken status line rather than an empty catalog.
             let lang = self.shell.lang();
-            self.shell.status.model = landing.or_else(|| {
-                Some(match self.keys.chord(keybinds::Action::ModelList) {
-                    Some(chord) => lang.tf("status.no_model_chord", &[&chord]),
-                    None => lang.t("status.no_model").to_string(),
-                })
+            let (model, provider) = landing.unwrap_or_else(|| {
+                (
+                    match self.keys.chord(keybinds::Action::ModelList) {
+                        Some(chord) => lang.tf("status.no_model_chord", &[&chord]),
+                        None => lang.t("status.no_model").to_string(),
+                    },
+                    None,
+                )
             });
+            self.shell.status.model = Some(model);
+            self.shell.status.provider = provider;
             self.shell.status.usage = None;
             self.shell.status.hints.clear();
             // The launch policy holds before any Session opens, so the strip
@@ -5234,31 +5244,36 @@ impl App {
         let labelled = answering
             .as_deref()
             .and_then(|model| ModelInfo::resolve(&self.models, model))
-            .map(ModelInfo::identity);
-        self.shell.status.model = self
+            .map(ModelInfo::facts);
+        let configured = self
+            .settings
+            .as_ref()
+            .map(|settings| settings.model.clone())
+            .filter(|model| model != engine::UNROUTED_MODEL)
+            .map(|model| {
+                ModelInfo::resolve(&self.models, &model)
+                    .map(ModelInfo::facts)
+                    .unwrap_or((model, None))
+            });
+        // The landing screen has nothing else to name: the operator's last
+        // choice is the model the next prompt would run on, and the catalog
+        // knows the provider and protocol that go with it.
+        let remembered = self.remembered_model.clone().map(|model| {
+            ModelInfo::resolve(&self.models, &model)
+                .map(ModelInfo::facts)
+                .unwrap_or((model, None))
+        });
+        let facts = self
             .session
             .as_ref()
             .and_then(|session| session.model.as_ref())
-            .map(|pin| session_model(&self.models, pin))
+            .map(|pin| session_model_facts(&self.models, pin))
             .or(labelled)
-            .or(answering)
-            .or_else(|| {
-                self.settings
-                    .as_ref()
-                    .map(|settings| settings.model.clone())
-                    .filter(|model| model != engine::UNROUTED_MODEL)
-            })
-            // The landing screen has nothing else to name: the operator's last
-            // choice is the model the next prompt would run on, and the catalog
-            // knows the provider and protocol that go with it.
-            .or_else(|| {
-                let model = self.remembered_model.clone()?;
-                Some(
-                    ModelInfo::resolve(&self.models, &model)
-                        .map(ModelInfo::identity)
-                        .unwrap_or(model),
-                )
-            });
+            .or_else(|| answering.map(|model| (model, None)))
+            .or(configured)
+            .or(remembered);
+        self.shell.status.model = facts.as_ref().map(|(model, _)| model.clone());
+        self.shell.status.provider = facts.and_then(|(_, provider)| provider);
         self.shell.status.usage =
             self.usage
                 .as_ref()
@@ -8385,7 +8400,12 @@ mod tests {
         app.update_status();
         assert_eq!(
             app.shell.status.model.as_deref(),
-            Some("glm-5.3-flash · xiaomi · openai-chat"),
+            Some("glm-5.3-flash"),
+            "the model keeps its own fact"
+        );
+        assert_eq!(
+            app.shell.status.provider.as_deref(),
+            Some("xiaomi · openai-chat"),
             "the strip names the provider, not only the transport"
         );
         assert_ne!(
@@ -8420,7 +8440,12 @@ mod tests {
         app.update_status();
         assert_eq!(
             app.shell.status.model.as_deref(),
-            Some("deepseek-v4-1-flash-261017 · deepseek · work · openai-chat"),
+            Some("deepseek-v4-1-flash-261017"),
+            "the strip labels the pin with its model"
+        );
+        assert_eq!(
+            app.shell.status.provider.as_deref(),
+            Some("deepseek · work · openai-chat"),
             "the strip labels the pin with its provider and account"
         );
         // A pin the catalog no longer serves still names the route it carries.
@@ -8431,6 +8456,7 @@ mod tests {
             Some("account/9f2c"),
             "the unresolvable pin falls back to its raw route"
         );
+        assert_eq!(app.shell.status.provider, None);
     }
 
     /// The landing screen has no Session pin and no assistant message, so the
@@ -8464,8 +8490,13 @@ mod tests {
         app.update_status();
         assert_eq!(
             app.shell.status.model.as_deref(),
-            Some("glm-5 · xiaomi · openai-chat"),
-            "the landing strip names the model, its provider and its protocol"
+            Some("glm-5"),
+            "the landing strip names the model"
+        );
+        assert_eq!(
+            app.shell.status.provider.as_deref(),
+            Some("xiaomi · openai-chat"),
+            "the landing strip names its provider and its protocol"
         );
     }
 
@@ -8488,7 +8519,12 @@ mod tests {
         app.update_status();
         assert_eq!(
             app.shell.status.model.as_deref(),
-            Some("deepseek-v4-1-flash-261017 · deepseek · openai-chat"),
+            Some("deepseek-v4-1-flash-261017"),
+            "the remembered display name resolves to the catalog id"
+        );
+        assert_eq!(
+            app.shell.status.provider.as_deref(),
+            Some("deepseek · openai-chat"),
             "the remembered display name still names its provider"
         );
     }
@@ -8511,7 +8547,12 @@ mod tests {
         app.update_status();
         assert_eq!(
             app.shell.status.model.as_deref(),
-            Some("deepseek-v4-1-flash-261017 · deepseek · work · openai-chat"),
+            Some("deepseek-v4-1-flash-261017"),
+            "the landing strip names the model the pick spends"
+        );
+        assert_eq!(
+            app.shell.status.provider.as_deref(),
+            Some("deepseek · work · openai-chat"),
             "the landing strip names the account the pick spends"
         );
     }
@@ -8567,8 +8608,13 @@ mod tests {
         app.update_status();
         assert_eq!(
             app.shell.status.model.as_deref(),
-            Some("glm-5 · xiaomi · openai-chat"),
+            Some("glm-5"),
             "a pinned route id still resolves to the catalog entry"
+        );
+        assert_eq!(
+            app.shell.status.provider.as_deref(),
+            Some("xiaomi · openai-chat"),
+            "a pinned route id still names the provider"
         );
     }
 
@@ -10685,6 +10731,92 @@ mod tests {
     fn leader(app: &mut App, letter: char) {
         app.handle(key(KeyCode::Char('x'), KeyModifiers::CONTROL));
         app.handle(key(KeyCode::Char(letter), KeyModifiers::NONE));
+    }
+
+    /// A press on the merged host footer arrives as the operator's own chord.
+    /// On the landing screen it has to reach the same handler a painted press
+    /// would: the model fact opens the picker, the approval fact asks the
+    /// engine to flip the policy and reports the result back into the strip.
+    #[test]
+    fn a_host_press_on_the_landing_facts_reaches_the_same_handlers() {
+        let mut app = app();
+        app.models = vec![ModelInfo {
+            protocol: "openai-chat".into(),
+            model: "deepseek-v4-1-flash-261017".into(),
+            route_id: Some("volcengine/deepseek-v4-1-flash-261017".into()),
+            variant: None,
+            provider: Some("volcengine".into()),
+            account: None,
+            credential_id: None,
+        }];
+        leader(&mut app, 'm');
+        assert!(
+            matches!(app.dialog, Some(Dialog::Models(_))),
+            "the model fact opens the picker"
+        );
+        app.dialog = None;
+
+        let (engine, mut requests) = engine::Handle::recording();
+        app.attach_engine(engine);
+        leader(&mut app, 'f');
+        assert!(
+            matches!(
+                requests.try_recv().expect("the flip was asked for"),
+                engine::Request::AutoApprove { auto_approve: true }
+            ),
+            "the approval fact asks the engine to turn the policy on"
+        );
+        app.handle(AppEvent::AutoApproveSet(true));
+        assert!(
+            app.shell
+                .status
+                .hints
+                .iter()
+                .any(|hint| hint.segment == Some(FooterSegment::ApprovalMode)),
+            "the landing strip names the policy once the engine confirms it"
+        );
+        leader(&mut app, 'f');
+        assert!(
+            matches!(
+                requests.try_recv().expect("the flip was asked for"),
+                engine::Request::AutoApprove {
+                    auto_approve: false
+                }
+            ),
+            "a second press turns the policy back off"
+        );
+    }
+
+    /// The host's row is fed by this wire: each fact carries the chord the
+    /// keymap spells, so a press lands on the handler the label promises.
+    #[test]
+    fn the_host_footer_wire_carries_each_fact_and_its_chord() {
+        let mut app = app();
+        app.shell.status = crate::pane::StatusStrip {
+            model: Some("deepseek-v4-1-flash-261017".into()),
+            provider: Some("volcengine · openai-chat".into()),
+            usage: None,
+            hints: vec![StatusHint {
+                text: "auto-approve".into(),
+                warning: true,
+                success: false,
+                segment: Some(FooterSegment::ApprovalMode),
+            }],
+        };
+        let wire = app.footer_wire().expect("the facts are on screen");
+        let pairs: Vec<(&str, Option<&str>)> = wire
+            .iter()
+            .map(|seg| (seg.id, seg.chord.as_deref()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("approval", Some("ctrl+x f")),
+                ("model", Some("ctrl+x m")),
+                ("provider", Some("ctrl+x m")),
+            ],
+            "{wire:?}"
+        );
     }
 
     #[test]
