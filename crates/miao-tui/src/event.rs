@@ -19,6 +19,20 @@ pub struct JobRow {
     pub state: String,
     /// What the row is about: a job's command, a subagent's description.
     pub detail: String,
+    /// The command alone, unmerged with the output tail. The waiting line names
+    /// the work it is waiting on, and folding a log line into that would name
+    /// the wrong thing.
+    pub command: String,
+    /// When the engine started the job, so the waiting line's clock needs no
+    /// second read.
+    pub started_at_ms: Option<u64>,
+    /// What the caller said the job would take, when it said anything. The
+    /// waiting line turns this into the countdown; without it the line can only
+    /// count up.
+    pub eta_ms: Option<u64>,
+    /// When the job last wrote output. A job that has gone quiet for minutes is
+    /// the one a reader waiting on it needs told about.
+    pub last_output_at_ms: Option<u64>,
     pub subagent: bool,
 }
 
@@ -132,6 +146,10 @@ pub enum AppEvent {
     /// Background jobs of the open Session, newest first, each row naming the
     /// Session that owns it; the Session's subagent runs follow the jobs.
     Jobs(Vec<JobRow>),
+    /// The open Session's jobs, re-read for the waiting line rather than for a
+    /// dialog: a Session paused on background work shows what is running, how
+    /// long it has run and what it last said, and that has to move on its own.
+    JobStatus(Vec<JobRow>),
     /// The open Session's delegated children, refreshed while any is busy.
     Subagents(Vec<SubagentRow>),
     /// The git worktrees of the checkout the open Session works in, the

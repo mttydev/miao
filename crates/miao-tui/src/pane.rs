@@ -3300,16 +3300,20 @@ fn render_composer_in(
         // reads as moving even while the phase name stays the same. Past half a
         // minute of waiting the tone turns warning, which is the one signal
         // that separates "thinking" from "wedged" without reading the words.
-        let tone = if composer.phase.is_none() {
-            palette.text_muted
-        } else {
-            match (shell, composer.phase_alert) {
+        // A wait on background work is a run in flight as far as the operator
+        // is concerned, so it gets the same spinner: a title that never moves
+        // is what made a twenty-minute build read as a Session that stopped.
+        let live = composer.phase.is_some() || composer.idle_live;
+        let tone = match (composer.phase.is_some(), live) {
+            (false, false) => palette.text_muted,
+            (false, true) => palette.accent,
+            (true, _) => match (shell, composer.phase_alert) {
                 (true, _) => palette.warning,
                 (false, true) => palette.warning,
                 (false, false) => palette.accent,
-            }
+            },
         };
-        if composer.phase.is_some() {
+        if live {
             let frame = SPINNER_FRAMES[(now_ms() / 160) as usize % SPINNER_FRAMES.len()];
             title.push(Span::styled(format!("{frame} "), Style::new().fg(tone)));
         }

@@ -2306,6 +2306,7 @@ impl Tools {
                     cwd: bash.cwd,
                     timeout_ms: bash.timeout_ms,
                     pty: bash.pty,
+                    eta_ms: None,
                 }
             } else {
                 process::Input::parse(prepared.input)?
@@ -2709,7 +2710,16 @@ impl Tools {
                 .expect("background requires process")
                 .clone();
             start.name = "start_job".into();
-            start.description="Admit a sandboxed foreground-sized command as a background job. Returns queued job_id; the job survives turn cancel, but runtime shutdown cancels it. Existing-file edits must account for external-writer races.".into();
+            start.description="Admit a sandboxed foreground-sized command as a background job. Returns queued job_id; the job survives turn cancel, but runtime shutdown cancels it. Existing-file edits must account for external-writer races. Pass eta_ms when you can estimate how long it will run: the operator then sees a remaining-time countdown while it runs instead of a bare elapsed clock.".into();
+            // The estimate is display only, so it is declared on the background
+            // face alone: a foreground `run_command` has an answer inline and
+            // nobody waits beside it.
+            if let Some(properties) = start.input_schema["properties"].as_object_mut() {
+                properties.insert(
+                    "eta_ms".into(),
+                    json!({"type":"integer","minimum":1000,"maximum":86400000}),
+                );
+            }
             definitions.push(start);
             for name in ["job_status", "cancel_job"] {
                 definitions.push(ToolDefinition{name:name.into(),description:if name=="job_status"{"Inspect this Session's job state and bounded terminal output.".into()}else{"Request cancellation of this Session's active background job.".into()},input_schema:json!({"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"],"additionalProperties":false})});

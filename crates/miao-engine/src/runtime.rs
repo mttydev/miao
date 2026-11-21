@@ -74,6 +74,15 @@ const JOBS_PER_SESSION: usize = 2;
 /// How much of a running job's output stays in memory for the list answer; the
 /// list itself shows a 200-character tail of it.
 const LIVE_OUTPUT_CHARS: usize = 400;
+/// The newest output of one running job, and when it arrived.
+///
+/// The time is what separates "quiet for a moment" from "silent for ten
+/// minutes" for a reader who is waiting on the job and can see nothing else.
+#[derive(Default)]
+struct LiveOutput {
+    text: String,
+    at_ms: u64,
+}
 const SUBAGENT_SLOTS: usize = crate::subagent::CONCURRENCY_LIMIT;
 
 /// Queue accounting for one pool: how many calls are waiting, how many were
@@ -281,7 +290,7 @@ struct Inner {
     /// The newest output of each running job. `Store::jobs` reads a tail from
     /// the finished job's result, which does not exist while the command runs,
     /// so the process keeps it in memory until the result lands (#1962).
-    job_output: Mutex<HashMap<String, String>>,
+    job_output: Mutex<HashMap<String, LiveOutput>>,
     terminals: crate::terminal::Registry,
     /// The credential store this start reads, when a host told us. The picker
     /// needs it to tell "this provider has an account but no route" from "this
@@ -10414,7 +10423,10 @@ async fn running_output(inner: &Inner, mut jobs: Vec<Value>) -> Vec<Value> {
         let Some(tail) = job["job_id"].as_str().and_then(|id| tails.get(id)) else {
             continue;
         };
-        job["output"] = json!(tail);
+        job["output"] = json!(tail.text);
+        // When it last said anything, so a host can show the wait as moving
+        // rather than as a bare clock beside a job that stopped talking.
+        job["last_output_at_ms"] = json!(tail.at_ms);
     }
     jobs
 }
@@ -10451,10 +10463,11 @@ async fn background(
             };
             let mut tails = tail_inner.job_output.lock().await;
             let entry = tails.entry(tail_id.clone()).or_default();
-            entry.push_str(text);
-            let count = entry.chars().count();
+            entry.text.push_str(text);
+            entry.at_ms = crate::approval::now_ms();
+            let count = entry.text.chars().count();
             if count > LIVE_OUTPUT_CHARS {
-                *entry = entry.chars().skip(count - LIVE_OUTPUT_CHARS).collect();
+                entry.text = entry.text.chars().skip(count - LIVE_OUTPUT_CHARS).collect();
             }
         }
     });
