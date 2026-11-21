@@ -1487,9 +1487,20 @@ mod tests {
                 "max_provider_turns": null,
                 "continuation_min_interval_ms": 30_000,
                 "budget": null,
+                "max_goal_tokens": 0,
                 "auto": false,
             })
         );
+    }
+
+    #[test]
+    fn the_operator_goal_token_cap_is_derived_and_absent_means_unset() {
+        // An existing configuration predates the key, so it must read as
+        // unset rather than refuse; `Policy` then supplies the default cap.
+        assert_eq!(policy(&documents(&[]), None).max_goal_tokens, 0);
+        let configured =
+            documents(&[serde_json::json!({"budget": {"max_goal_tokens": 5_000_000}})]);
+        assert_eq!(policy(&configured, None).max_goal_tokens, 5_000_000);
     }
 
     #[test]
