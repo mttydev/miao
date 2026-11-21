@@ -3448,9 +3448,16 @@ fn render_composer_body(
         // The work the finished turn left behind outranks the rotating example:
         // it is this Session's own next todo, dim until `Tab` promotes it. The
         // `!` line runs commands, so it keeps its own examples.
+        // The terminal paints its block cursor on the composer's first cell,
+        // and a wide glyph there is cut in half: a CJK hint read as a different
+        // word. The hint starts one cell right of the caret so the whole first
+        // glyph stays visible.
         let line = match composer.suggestion.as_deref().filter(|_| !shell) {
             Some(next) => Line::from(vec![
-                Span::styled(format!("Next: {next}"), Style::new().fg(palette.text_muted)),
+                Span::styled(
+                    format!(" Next: {next}"),
+                    Style::new().fg(palette.text_muted),
+                ),
                 Span::styled(" (tab)", Style::new().fg(palette.text_muted).dim()),
             ]),
             None => {
@@ -3473,7 +3480,7 @@ fn render_composer_body(
                 };
                 let example = examples[composer.placeholder % examples.len()];
                 Line::from(Span::styled(
-                    format!("{verb} \u{201c}{example}\u{201d}"),
+                    format!(" {verb} \u{201c}{example}\u{201d}"),
                     Style::new().fg(palette.text_muted),
                 ))
             }
@@ -6834,6 +6841,42 @@ mod tests {
         assert!(!painted.contains("Ask anything"), "{painted}");
     }
 
+    /// The terminal's block cursor owns the composer's first cell, and a wide
+    /// glyph there is cut in half: the Chinese hint read as another word.
+    /// The hint starts one cell right of the caret instead.
+    #[test]
+    fn a_hint_starts_right_of_the_caret_so_a_wide_first_glyph_survives() {
+        use ratatui::backend::Backend;
+        let theme = home_theme();
+        let mut composer = crate::editor::Composer::new(Path::new("."));
+        composer.lang = crate::lang::Lang::Zh;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 6)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let _ = super::render_composer(
+                    frame,
+                    ratatui::layout::Rect::new(0, 0, 80, 6),
+                    &composer,
+                    &theme,
+                );
+            })
+            .expect("draw");
+        let cursor = terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor position");
+        let buffer = terminal.backend().buffer().clone();
+        let first = (0..80u16)
+            .find(|x| buffer[(*x, cursor.y)].symbol() == "随")
+            .expect("the hint's first glyph is painted");
+        assert_eq!(
+            first,
+            cursor.x + 1,
+            "the caret owns a cell of its own before the hint"
+        );
+    }
+
     /// Context the engine injected is a history note. Painting it behind the
     /// prompt marker claimed the operator typed words they never wrote.
     #[test]
@@ -7607,10 +7650,23 @@ mod tests {
         // No vertical borders: the cells beside the band stay blank.
         assert_eq!(buffer[(21, top)].symbol(), " ");
         assert_eq!(buffer[(97, top)].symbol(), " ");
-        // The draft starts two cells in from the edge, on the element ground.
-        assert_eq!(buffer[(24, top + 1)].symbol(), "A");
-        assert_eq!(buffer[(24, top + 1)].bg, theme.palette.element);
+        // A draft starts two cells in from the edge, on the element ground.
+        // The empty band's hint keeps the caret's cell to itself — a block
+        // cursor would cut a wide first glyph in half — so it reads one cell
+        // right of that, which the second draw below pins.
+        assert_eq!(buffer[(25, top + 1)].symbol(), "A");
+        assert_eq!(buffer[(25, top + 1)].bg, theme.palette.element);
         assert!(row(top + 1).contains("Ask anything"), "{:?}", row(top + 1));
+        let mut typed = crate::editor::Composer::new(Path::new("."));
+        typed.editor.insert_str("Ask");
+        terminal
+            .draw(|frame| home.render(frame, frame.area(), &mut typed, &StatusStrip::default()))
+            .expect("draw");
+        assert_eq!(
+            terminal.backend().buffer()[(24, top + 1)].symbol(),
+            "A",
+            "a draft starts two cells in from the edge"
+        );
         // The banner sits above it, centred as one block.
         let banner_row = row(top - 6);
         assert!(banner_row.contains("/\\/\\"), "{banner_row:?}");
