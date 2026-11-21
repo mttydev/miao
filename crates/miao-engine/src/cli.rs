@@ -525,7 +525,7 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     let mode = args.first().map(String::as_str);
     if !matches!(mode, Some("serve" | "acp")) {
         eprintln!(
-            "Usage: miao-engine serve --db PATH --workspace PATH --model MODEL [--provider anthropic|openai-chat|openai-responses|subscription-responses|gemini|amazon-bedrock] [--endpoint URL] [--policy PATH] [--agent-config PATH | --agent-name NAME] [--config-dir PATH] [--mode read-only|workspace] [--permission-root-db PATH --permission-project ID] [--verify-command COMMAND] [--prompt-cache on|off] [--responses-cache-contract JSON] [--responses-websocket-contract JSON] [--tool-disclosure full|compact] [--mcp-disclosure off|threshold|always [--mcp-disclosure-allowlist ALIAS,...]] [--lsp-diagnostics on|off] [--codegraph on|off] [--context-limits JSON] [--optimizations JSON] [--http ADDR [--http-token TOKEN]]\n       miao-engine acp --db PATH --workspace PATH --model MODEL [--provider ...] [--endpoint URL] [--policy PATH] [--agent-config PATH] [--config-dir PATH] [--mode read-only|workspace] [--permission-root-db PATH --permission-project ID] [--verify-command COMMAND] [--prompt-cache on|off] [--responses-cache-contract JSON] [--responses-websocket-contract JSON] [--tool-disclosure full|compact] [--mcp-disclosure off|threshold|always [--mcp-disclosure-allowlist ALIAS,...]] [--lsp-diagnostics on|off]\n       miao-engine export --db PATH --session ID [--after CURSOR]\n       miao-engine config explain --config-dir PATH | --config-sources JSON|-\n       miao-engine doctor [--db PATH]\n       miao-engine retention --db PATH [--session ID] [--apply]\n       miao-engine permissions --db PATH --project ID [--directory PATH [--workspace-id ID]]\n       miao-engine permission-source --db PATH --project ID --directory PATH\nUse ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY for the selected provider. Bedrock uses AWS_BEARER_TOKEN_BEDROCK or the AWS SDK credential chain (--aws-region/--aws-profile). An explicit engine database is required."
+            "Usage: miao-engine serve --db PATH --workspace PATH [--model MODEL] [--provider anthropic|openai-chat|openai-responses|subscription-responses|gemini|amazon-bedrock] [--endpoint URL] [--policy PATH] [--agent-config PATH | --agent-name NAME] [--config-dir PATH] [--mode read-only|workspace] [--permission-root-db PATH --permission-project ID] [--verify-command COMMAND] [--prompt-cache on|off] [--responses-cache-contract JSON] [--responses-websocket-contract JSON] [--tool-disclosure full|compact] [--mcp-disclosure off|threshold|always [--mcp-disclosure-allowlist ALIAS,...]] [--lsp-diagnostics on|off] [--codegraph on|off] [--context-limits JSON] [--optimizations JSON] [--http ADDR [--http-token TOKEN]]\n       miao-engine acp --db PATH --workspace PATH [--model MODEL] [--provider ...] [--endpoint URL] [--policy PATH] [--agent-config PATH] [--config-dir PATH] [--mode read-only|workspace] [--permission-root-db PATH --permission-project ID] [--verify-command COMMAND] [--prompt-cache on|off] [--responses-cache-contract JSON] [--responses-websocket-contract JSON] [--tool-disclosure full|compact] [--mcp-disclosure off|threshold|always [--mcp-disclosure-allowlist ALIAS,...]] [--lsp-diagnostics on|off]\n       miao-engine export --db PATH --session ID [--after CURSOR]\n       miao-engine config explain --config-dir PATH | --config-sources JSON|-\n       miao-engine doctor [--db PATH]\n       miao-engine retention --db PATH [--session ID] [--apply]\n       miao-engine permissions --db PATH --project ID [--directory PATH [--workspace-id ID]]\n       miao-engine permission-source --db PATH --project ID --directory PATH\nUse ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY for the selected provider. Bedrock uses AWS_BEARER_TOKEN_BEDROCK or the AWS SDK credential chain (--aws-region/--aws-profile). An explicit engine database is required."
 
         );
         std::process::exit(2);
@@ -537,6 +537,7 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     // product credential store — the same plan the product's shim used to
     // build. An explicit `--model` or `--provider` keeps the operator's own
     // single-route selection, and a manifest the host passed wins outright.
+    let mut generated_routes = None;
     if !options.contains_key("--model-routes-config")
         && !options.contains_key("--model")
         && !options.contains_key("--provider")
@@ -545,6 +546,7 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
             match miao_engine::native_routes::materialize(&sources, stored_default().as_deref()) {
                 Ok(Some(path)) => {
                     options.insert("--model-routes-config".into(), path.display().to_string());
+                    generated_routes = Some(sources);
                 }
                 Ok(None) => {}
                 Err(error) => eprintln!("miao-engine native routes: {error}"),
@@ -568,273 +570,26 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     let workspace = miao_engine::placement::identity(std::path::Path::new(workspace))
         .display()
         .to_string();
-    let model = match options.get("--model") {
-        Some(model) => model.clone(),
-        None => configured_model(&options)?.ok_or("--model is required")?,
-    };
-    // A `provider/model` value also names the host-side provider, which is what a
-    // credential is stored under: `volcengine/deepseek-v4-1` bills the volcengine
-    // credential even though the transport underneath is OpenAI-compatible.
-    let model_provider = model
-        .split_once('/')
-        .map(|(prefix, _)| prefix.to_owned())
-        .filter(|prefix| !prefix.is_empty());
-    let bare_model = match model.split_once('/') {
-        Some((_, bare)) => bare.to_owned(),
-        None => model.to_owned(),
-    };
-    // Naming only the model is enough: the transport and endpoint then come from
-    // the provider's entry in configuration, exactly where the product's route
-    // plan read them.
-    let configured = configured_route(&options, model_provider.as_deref(), &bare_model).await?;
-    let provider_name = options
-        .get("--provider")
-        .map(String::as_str)
-        .map(str::to_owned)
-        .or_else(|| configured.as_ref().map(|(transport, _)| transport.clone()))
-        .unwrap_or_else(|| "anthropic".to_string());
-    let provider_name = provider_name.as_str();
-    // A prefix that resolved to a configured provider is the host-side provider,
-    // so the model is the bare id. A prefix that resolves to nothing is part of
-    // the model name and stays whole (`fixture/fixture`).
-    let named_provider = configured.is_some();
-    let endpoint: Option<String> = options
-        .get("--endpoint")
-        .cloned()
-        .or_else(|| configured.and_then(|(_, endpoint)| endpoint));
-    // A `provider/model` --model value names the provider for host-side
-    // routing; when the provider is given explicitly (the acp mode always
-    // does), the transport wants the bare model id, mirroring serve-mode
-    // route resolution.
-    let model: String = match model.split_once('/') {
-        Some((prefix, bare)) if prefix == provider_name => bare.to_owned(),
-        Some(_) if named_provider => bare_model,
-        _ => model,
-    };
-    if ![
-        "anthropic",
-        "openai-chat",
-        "openai-responses",
-        "subscription-responses",
-        "gemini",
-        "amazon-bedrock",
-    ]
-    .contains(&provider_name)
-    {
-        return Err("unknown provider".into());
-    }
-    if provider_name != "amazon-bedrock"
-        && (options.contains_key("--aws-region") || options.contains_key("--aws-profile"))
-    {
-        return Err("AWS selection is only supported by amazon-bedrock".into());
-    }
-    let integration = options
-        .get("--credential-integration")
-        .cloned()
-        .or_else(|| {
-            model_provider
-                .clone()
-                .filter(|prefix| prefix != provider_name)
-        })
-        .unwrap_or_else(|| match provider_name {
-            "anthropic" => "anthropic".into(),
-            "amazon-bedrock" => "amazon-bedrock".into(),
-            "gemini" => "google".into(),
-            "openai-chat" | "openai-responses" | "subscription-responses" => "openai".into(),
-            // The product names a third-party provider's integration after the
-            // provider itself (`provider.integrationID ?? provider.id`), which is
-            // where a route like volcengine stores its credential.
-            other => other.to_string(),
-        });
-    if options.contains_key("--credential-db") && options.contains_key("--auth-file") {
-        return Err("select only one credential source".into());
-    }
-    if options.contains_key("--credential-socket")
-        && (options.contains_key("--credential-db") || options.contains_key("--auth-file"))
-    {
-        return Err("select only one credential source".into());
-    }
-    let source = if let Some(socket) = options.get("--credential-socket") {
-        Source::Daemon {
-            #[cfg(unix)]
-            socket: tokio::fs::canonicalize(socket).await?,
-            #[cfg(windows)]
-            socket: std::path::PathBuf::from(socket),
-            id: options
-                .get("--credential-id")
-                .ok_or("--credential-id is required")?
-                .clone(),
-            integration,
-        }
-    } else if let Some(path) = options.get("--credential-db") {
-        let path = tokio::fs::canonicalize(path).await?;
-        // Naming the database is enough: a host that does not choose between the
-        // credentials stored for this integration leaves it to the engine, which
-        // refuses to guess when two of them are live.
-        let id = match options.get("--credential-id") {
-            Some(id) => id.clone(),
-            None => stored_credential(&path, &integration)?,
+    let unmodeled = !options.contains_key("--model") && configured_model(&options)?.is_none();
+    // A first start with nothing configured anywhere is onboarding, not an
+    // error: the engine still serves its catalogs and the key storage the
+    // picker drives, and the sentinel provider answers every prompt with the
+    // same words the startup failure used to carry. Once a model is
+    // configured, this start resolves exactly as it always has.
+    let (provider, provider_name, source, endpoint) = if unmodeled {
+        (
+            Arc::new(UnmodeledProvider) as Arc<dyn Provider>,
+            String::new(),
+            Source::Static(Credential::key(String::new())),
+            None,
+        )
+    } else {
+        let model = match options.get("--model") {
+            Some(model) => model.clone(),
+            None => configured_model(&options)?
+                .expect("a configured model exists when this start is modeled"),
         };
-        Source::Database {
-            path,
-            id,
-            integration,
-        }
-    } else if let Some(path) = options.get("--auth-file") {
-        if options.contains_key("--credential-id") {
-            return Err("credential-id requires a database or socket source".into());
-        }
-        Source::Legacy {
-            path: tokio::fs::canonicalize(path).await?,
-            integration,
-        }
-    } else {
-        // A selection without a source resolves against the store the product
-        // installation writes, which is what a single-binary start has.
-        if (options.contains_key("--credential-id")
-            || options.contains_key("--credential-integration"))
-            && stored_default().is_none()
-        {
-            return Err("credential selection requires a file, database, or socket source".into());
-        }
-        if provider_name == "amazon-bedrock" {
-            match std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
-                Ok(token) => Source::Static(Credential::key(token)),
-                Err(_) => Source::Aws {
-                    region: options
-                        .get("--aws-region")
-                        .cloned()
-                        .or_else(|| std::env::var("AWS_REGION").ok())
-                        .unwrap_or_else(|| "us-east-1".into()),
-                    profile: options
-                        .get("--aws-profile")
-                        .cloned()
-                        .or_else(|| std::env::var("AWS_PROFILE").ok()),
-                },
-            }
-        } else if provider_name == "subscription-responses" {
-            Source::Static(Credential::token(
-                std::env::var("OPENAI_ACCESS_TOKEN")
-                    .map_err(|_| "OPENAI_ACCESS_TOKEN is required")?,
-                std::env::var("OPENAI_ACCOUNT_ID").ok(),
-            ))
-        } else {
-            let name = if provider_name == "anthropic" {
-                "ANTHROPIC_API_KEY"
-            } else if provider_name == "gemini" {
-                "GEMINI_API_KEY"
-            } else {
-                "OPENAI_API_KEY"
-            };
-            // An exported key is the operator's own override, so it wins. Without
-            // one, a single-binary start reads the product store the installation
-            // writes, because it has no host to pass `--credential-db`.
-            match std::env::var(name) {
-                Ok(key) => Source::Static(Credential::key(key)),
-                Err(_) => {
-                    let stored = match stored_default() {
-                        Some(path) => {
-                            let path = tokio::fs::canonicalize(&path).await?;
-                            let id = match options.get("--credential-id") {
-                                Some(id) => Some(id.clone()),
-                                None => stored_credential(&path, &integration).ok(),
-                            };
-                            id.map(|id| (path, id))
-                        }
-                        None => None,
-                    };
-                    match stored {
-                        Some((path, id)) => Source::Database {
-                            path,
-                            id,
-                            integration,
-                        },
-                        None => {
-                            return Err("API key or explicit credential source is required".into());
-                        }
-                    }
-                }
-            }
-        }
-    };
-    source.validate().await?;
-    if options.contains_key("--fallback-endpoint") && !options.contains_key("--fallback-model") {
-        return Err("fallback-endpoint requires fallback-model".into());
-    }
-    if provider_name == "gemini"
-        && options.contains_key("--fallback-model")
-        && options.contains_key("--endpoint")
-        && !options.contains_key("--fallback-endpoint")
-    {
-        return Err("custom Gemini endpoint requires an explicit fallback-endpoint".into());
-    }
-    // Prompt caching is a pure win for the transports that consume the flag
-    // (Anthropic and Bedrock charge 0.1x for cache reads), so it defaults on;
-    // `--prompt-cache off` opts out explicitly.
-    let prompt_cache = match options.get("--prompt-cache").map(String::as_str) {
-        None | Some("on") => true,
-        Some("off") => false,
-        Some(_) => return Err("--prompt-cache must be on or off".into()),
-    };
-    let cache_contract = options
-        .get("--responses-cache-contract")
-        .map(|value| miao_engine::responses_cache::Contract::from_wire(value))
-        .transpose()?;
-    let websocket_contract = options
-        .get("--responses-websocket-contract")
-        .map(|value| miao_engine::responses_websocket::Contract::from_wire(value))
-        .transpose()
-        .map_err(std::io::Error::other)?;
-    let provider = if provider_name == "amazon-bedrock" {
-        if cache_contract.is_some() || websocket_contract.is_some() {
-            return Err("Responses continuation contracts are unsupported by Bedrock".into());
-        }
-        miao_engine::routing::build_bedrock(
-            endpoint.as_deref(),
-            source.clone(),
-            model.clone(),
-            options.get("--aws-region").map(String::as_str),
-            prompt_cache,
-        )?
-    } else {
-        miao_engine::routing::build_with_responses(
-            provider_name,
-            endpoint.as_deref(),
-            source.clone(),
-            model.clone(),
-            prompt_cache,
-            cache_contract,
-            websocket_contract,
-        )?
-    };
-    let provider: Arc<dyn Provider> = if let Some(model) = options.get("--fallback-model") {
-        let endpoint = options.get("--fallback-endpoint").or_else(|| {
-            if provider_name == "gemini" {
-                None
-            } else {
-                endpoint.as_ref()
-            }
-        });
-        let fallback = if provider_name == "amazon-bedrock" {
-            miao_engine::routing::build_bedrock(
-                endpoint.map(String::as_str),
-                source.clone(),
-                model.clone(),
-                options.get("--aws-region").map(String::as_str),
-                prompt_cache,
-            )?
-        } else {
-            miao_engine::routing::build(
-                provider_name,
-                endpoint.map(String::as_str),
-                source.clone(),
-                model.clone(),
-                prompt_cache,
-            )?
-        };
-        Arc::new(miao_engine::routing::Fallback::new(provider, fallback)?)
-    } else {
-        provider
+        resolve_provider(&options, model).await?
     };
     // An explicit flag wins over both the entry default and the policy file,
     // so an operator can keep a shared policy and pick the mode per launch.
@@ -945,6 +700,13 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     ]
     .iter()
     .any(|flag| options.contains_key(*flag));
+    // The store a key stored while this engine runs lands in, named whether or
+    // not the file exists yet: onboarding stores the first key after startup,
+    // and the reload that follows has to find it.
+    let credential_db = options
+        .get("--credential-db")
+        .map(std::path::PathBuf::from)
+        .or_else(|| data_home().map(|home| home.join("miao.db")));
     let provider = if let Some(path) = options.get("--model-routes-config") {
         let path = tokio::fs::canonicalize(path).await?;
         let workspace = std::path::PathBuf::from(tools.location());
@@ -959,26 +721,45 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
                 })?;
         tools = tools.with_protected_resource(&path);
         route_limits = route_limits_new;
-        model_origin = Some(miao_engine::model_routes::Origin {
-            base,
-            path,
-            workspace,
+        model_origin = Some(match generated_routes {
+            // A manifest this start derived itself is re-derived on reload, so
+            // a key stored afterwards is served without restarting the engine.
+            Some(sources) => miao_engine::model_routes::Origin::Derived {
+                base,
+                sources,
+                credential_db: credential_db.clone(),
+                workspace,
+            },
+            // A manifest the host wrote is the host's to rewrite.
+            None => miao_engine::model_routes::Origin::File {
+                base,
+                path,
+                workspace,
+            },
         });
         provider
     } else if !operator_named_route {
+        let workspace = std::path::PathBuf::from(tools.location());
+        // Even when nothing is routable yet the origin is recorded: the first
+        // key, stored while this engine runs, becomes a route on reload.
+        let derived = miao_engine::model_routes::Origin::Derived {
+            base: provider.clone(),
+            sources: config_sources(&options)?.unwrap_or_default(),
+            credential_db: credential_db.clone(),
+            workspace: workspace.clone(),
+        };
         // The picker should answer with every configured model, the way the
         // product host answers. A manifest that cannot be derived or loaded
         // keeps the single configured provider: a degraded list beats a
         // start that refuses.
         match config_routes_manifest(&options, stored_default().as_deref()).await {
             Ok(Some(path)) => {
-                let workspace = std::path::PathBuf::from(tools.location());
                 let base = provider.clone();
                 match miao_engine::model_routes::load(&path, &workspace, base.clone()).await {
                     Ok((routed, limits)) => {
                         tools = tools.with_protected_resource(&path);
                         route_limits = limits;
-                        model_origin = Some(miao_engine::model_routes::Origin {
+                        model_origin = Some(miao_engine::model_routes::Origin::File {
                             base,
                             path,
                             workspace,
@@ -989,15 +770,20 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
                         eprintln!(
                             "miao-engine generated model routes unavailable: {error}; serving only the configured model"
                         );
+                        model_origin = Some(derived);
                         provider
                     }
                 }
             }
-            Ok(None) => provider,
+            Ok(None) => {
+                model_origin = Some(derived);
+                provider
+            }
             Err(error) => {
                 eprintln!(
                     "miao-engine generated model routes unavailable: {error}; serving only the configured model"
                 );
+                model_origin = Some(derived);
                 provider
             }
         }
@@ -1266,8 +1052,8 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
         if let Some(origin) = &mcp_origin {
             files.extend(origin.files());
         }
-        if let Some(origin) = &model_origin {
-            files.push(origin.path.clone());
+        if let Some(path) = model_origin.as_ref().and_then(|origin| origin.path()) {
+            files.push(path.to_path_buf());
         }
         files.extend(context_origin.files());
         files.sort();
@@ -1296,9 +1082,7 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
     let mut endpoints = endpoint.iter().cloned().collect::<Vec<_>>();
     endpoints.extend(options.get("--fallback-endpoint").cloned());
     if let Some(origin) = &model_origin {
-        if let Ok(bytes) = tokio::fs::read(&origin.path).await {
-            endpoints.extend(miao_engine::model_routes::endpoints(&bytes));
-        }
+        endpoints.extend(origin.endpoints().await);
     }
     let warm = miao_engine::prewarm::targets(endpoints)
         .into_iter()
@@ -1312,6 +1096,365 @@ pub async fn configure(args: &[String]) -> Result<Configured, Box<dyn Error + Se
         options,
         acp,
     })
+}
+
+/// Resolve the model's provider, credential source and endpoint: the whole
+/// chain a modeled start runs before its transport is built. Kept apart from
+/// `configure` so an unmodeled start (`UnmodeledProvider`) skips it
+/// wholesale instead of threading an absent model through it.
+async fn resolve_provider(
+    options: &HashMap<String, String>,
+    model: String,
+) -> Result<(Arc<dyn Provider>, String, Source, Option<String>), Box<dyn Error + Send + Sync>> {
+    // A `provider/model` value also names the host-side provider, which is what a
+    // credential is stored under: `volcengine/deepseek-v4-1` bills the volcengine
+    // credential even though the transport underneath is OpenAI-compatible.
+    let model_provider = model
+        .split_once('/')
+        .map(|(prefix, _)| prefix.to_owned())
+        .filter(|prefix| !prefix.is_empty());
+    let bare_model = match model.split_once('/') {
+        Some((_, bare)) => bare.to_owned(),
+        None => model.to_owned(),
+    };
+    // Naming only the model is enough: the transport and endpoint then come from
+    // the provider's entry in configuration, exactly where the product's route
+    // plan read them.
+    let configured = configured_route(options, model_provider.as_deref(), &bare_model).await?;
+    let provider_name = options
+        .get("--provider")
+        .map(String::as_str)
+        .map(str::to_owned)
+        .or_else(|| configured.as_ref().map(|(transport, _)| transport.clone()))
+        .unwrap_or_else(|| "anthropic".to_string());
+    let provider_name = provider_name.as_str();
+    // A prefix that resolved to a configured provider is the host-side provider,
+    // so the model is the bare id. A prefix that resolves to nothing is part of
+    // the model name and stays whole (`fixture/fixture`).
+    let named_provider = configured.is_some();
+    let endpoint: Option<String> = options
+        .get("--endpoint")
+        .cloned()
+        .or_else(|| configured.and_then(|(_, endpoint)| endpoint));
+    // A `provider/model` --model value names the provider for host-side
+    // routing; when the provider is given explicitly (the acp mode always
+    // does), the transport wants the bare model id, mirroring serve-mode
+    // route resolution.
+    let model: String = match model.split_once('/') {
+        Some((prefix, bare)) if prefix == provider_name => bare.to_owned(),
+        Some(_) if named_provider => bare_model,
+        _ => model,
+    };
+    if ![
+        "anthropic",
+        "openai-chat",
+        "openai-responses",
+        "subscription-responses",
+        "gemini",
+        "amazon-bedrock",
+    ]
+    .contains(&provider_name)
+    {
+        return Err("unknown provider".into());
+    }
+    if provider_name != "amazon-bedrock"
+        && (options.contains_key("--aws-region") || options.contains_key("--aws-profile"))
+    {
+        return Err("AWS selection is only supported by amazon-bedrock".into());
+    }
+    let integration = options
+        .get("--credential-integration")
+        .cloned()
+        .or_else(|| {
+            model_provider
+                .clone()
+                .filter(|prefix| prefix != provider_name)
+        })
+        .unwrap_or_else(|| match provider_name {
+            "anthropic" => "anthropic".into(),
+            "amazon-bedrock" => "amazon-bedrock".into(),
+            "gemini" => "google".into(),
+            "openai-chat" | "openai-responses" | "subscription-responses" => "openai".into(),
+            // The product names a third-party provider's integration after the
+            // provider itself (`provider.integrationID ?? provider.id`), which is
+            // where a route like volcengine stores its credential.
+            other => other.to_string(),
+        });
+    if options.contains_key("--credential-db") && options.contains_key("--auth-file") {
+        return Err("select only one credential source".into());
+    }
+    if options.contains_key("--credential-socket")
+        && (options.contains_key("--credential-db") || options.contains_key("--auth-file"))
+    {
+        return Err("select only one credential source".into());
+    }
+    let source = if let Some(socket) = options.get("--credential-socket") {
+        Source::Daemon {
+            #[cfg(unix)]
+            socket: tokio::fs::canonicalize(socket).await?,
+            #[cfg(windows)]
+            socket: std::path::PathBuf::from(socket),
+            id: options
+                .get("--credential-id")
+                .ok_or("--credential-id is required")?
+                .clone(),
+            integration,
+        }
+    } else if let Some(path) = options.get("--credential-db") {
+        let path = tokio::fs::canonicalize(path).await?;
+        // Naming the database is enough: a host that does not choose between the
+        // credentials stored for this integration leaves it to the engine, which
+        // refuses to guess when two of them are live.
+        let id = match options.get("--credential-id") {
+            Some(id) => id.clone(),
+            None => stored_credential(&path, &integration)?,
+        };
+        Source::Database {
+            path,
+            id,
+            integration,
+        }
+    } else if let Some(path) = options.get("--auth-file") {
+        if options.contains_key("--credential-id") {
+            return Err("credential-id requires a database or socket source".into());
+        }
+        Source::Legacy {
+            path: tokio::fs::canonicalize(path).await?,
+            integration,
+        }
+    } else {
+        // A selection without a source resolves against the store the product
+        // installation writes, which is what a single-binary start has.
+        if (options.contains_key("--credential-id")
+            || options.contains_key("--credential-integration"))
+            && stored_default().is_none()
+        {
+            return Err("credential selection requires a file, database, or socket source".into());
+        }
+        if provider_name == "amazon-bedrock" {
+            match std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
+                Ok(token) => Source::Static(Credential::key(token)),
+                Err(_) => Source::Aws {
+                    region: options
+                        .get("--aws-region")
+                        .cloned()
+                        .or_else(|| std::env::var("AWS_REGION").ok())
+                        .unwrap_or_else(|| "us-east-1".into()),
+                    profile: options
+                        .get("--aws-profile")
+                        .cloned()
+                        .or_else(|| std::env::var("AWS_PROFILE").ok()),
+                },
+            }
+        } else if provider_name == "subscription-responses" {
+            Source::Static(Credential::token(
+                std::env::var("OPENAI_ACCESS_TOKEN")
+                    .map_err(|_| "OPENAI_ACCESS_TOKEN is required")?,
+                std::env::var("OPENAI_ACCOUNT_ID").ok(),
+            ))
+        } else {
+            let name = if provider_name == "anthropic" {
+                "ANTHROPIC_API_KEY"
+            } else if provider_name == "gemini" {
+                "GEMINI_API_KEY"
+            } else {
+                "OPENAI_API_KEY"
+            };
+            // An exported key is the operator's own override, so it wins. Without
+            // one, a single-binary start reads the product store the installation
+            // writes, because it has no host to pass `--credential-db`.
+            match std::env::var(name) {
+                Ok(key) => Source::Static(Credential::key(key)),
+                Err(_) => {
+                    let stored = match stored_default() {
+                        Some(path) => {
+                            let path = tokio::fs::canonicalize(&path).await?;
+                            let id = match options.get("--credential-id") {
+                                Some(id) => Some(id.clone()),
+                                None => stored_credential(&path, &integration).ok(),
+                            };
+                            id.map(|id| (path, id))
+                        }
+                        None => None,
+                    };
+                    match stored {
+                        Some((path, id)) => Source::Database {
+                            path,
+                            id,
+                            integration,
+                        },
+                        None => {
+                            return Err("API key or explicit credential source is required".into());
+                        }
+                    }
+                }
+            }
+        }
+    };
+    source.validate().await?;
+    if options.contains_key("--fallback-endpoint") && !options.contains_key("--fallback-model") {
+        return Err("fallback-endpoint requires fallback-model".into());
+    }
+    if provider_name == "gemini"
+        && options.contains_key("--fallback-model")
+        && options.contains_key("--endpoint")
+        && !options.contains_key("--fallback-endpoint")
+    {
+        return Err("custom Gemini endpoint requires an explicit fallback-endpoint".into());
+    }
+    // Prompt caching is a pure win for the transports that consume the flag
+    // (Anthropic and Bedrock charge 0.1x for cache reads), so it defaults on;
+    // `--prompt-cache off` opts out explicitly.
+    let prompt_cache = match options.get("--prompt-cache").map(String::as_str) {
+        None | Some("on") => true,
+        Some("off") => false,
+        Some(_) => return Err("--prompt-cache must be on or off".into()),
+    };
+    let cache_contract = options
+        .get("--responses-cache-contract")
+        .map(|value| miao_engine::responses_cache::Contract::from_wire(value))
+        .transpose()?;
+    let websocket_contract = options
+        .get("--responses-websocket-contract")
+        .map(|value| miao_engine::responses_websocket::Contract::from_wire(value))
+        .transpose()
+        .map_err(std::io::Error::other)?;
+    let provider = if provider_name == "amazon-bedrock" {
+        if cache_contract.is_some() || websocket_contract.is_some() {
+            return Err("Responses continuation contracts are unsupported by Bedrock".into());
+        }
+        miao_engine::routing::build_bedrock(
+            endpoint.as_deref(),
+            source.clone(),
+            model.clone(),
+            options.get("--aws-region").map(String::as_str),
+            prompt_cache,
+        )?
+    } else {
+        miao_engine::routing::build_with_responses(
+            provider_name,
+            endpoint.as_deref(),
+            source.clone(),
+            model.clone(),
+            prompt_cache,
+            cache_contract,
+            websocket_contract,
+        )?
+    };
+    let provider: Arc<dyn Provider> = if let Some(model) = options.get("--fallback-model") {
+        let endpoint = options.get("--fallback-endpoint").or_else(|| {
+            if provider_name == "gemini" {
+                None
+            } else {
+                endpoint.as_ref()
+            }
+        });
+        let fallback = if provider_name == "amazon-bedrock" {
+            miao_engine::routing::build_bedrock(
+                endpoint.map(String::as_str),
+                source.clone(),
+                model.clone(),
+                options.get("--aws-region").map(String::as_str),
+                prompt_cache,
+            )?
+        } else {
+            miao_engine::routing::build(
+                provider_name,
+                endpoint.map(String::as_str),
+                source.clone(),
+                model.clone(),
+                prompt_cache,
+            )?
+        };
+        Arc::new(miao_engine::routing::Fallback::new(provider, fallback)?)
+    } else {
+        provider
+    };
+    Ok((provider, provider_name.to_string(), source, endpoint))
+}
+
+/// The provider a first-run start serves when nothing is configured yet: the
+/// catalogs and the key storage work, and a prompt meets the same diagnosis
+/// the startup failure used to carry.
+pub struct UnmodeledProvider;
+
+#[async_trait::async_trait]
+impl Provider for UnmodeledProvider {
+    async fn stream(
+        &self,
+        _request: miao_engine::protocol::ModelRequest,
+        _progress: tokio::sync::mpsc::Sender<serde_json::Value>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<miao_engine::provider::Reply, miao_engine::provider::ProviderError> {
+        Err(miao_engine::provider::ProviderError::Stream(
+            "no model is configured: store a key with `miao auth login <provider> <key>`, then pick a model".into(),
+        ))
+    }
+
+    /// The picker fills from the models the install ships, narrowed to the
+    /// providers this start holds keys for: storing a key is what turns a
+    /// "needs auth" row into a pickable model.
+    fn model_catalog(&self) -> Vec<miao_engine::model_catalog::Info> {
+        let Some(path) = stored_default() else {
+            return Vec::new();
+        };
+        let keyed: std::collections::BTreeSet<String> =
+            miao_engine::credential::list_database(&path)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|credential| !credential.expired)
+                .map(|credential| credential.integration)
+                .collect();
+        catalog_for(models_snapshot().as_ref(), &keyed)
+    }
+}
+
+/// The catalog a fresh start offers: every snapshot model of a provider whose
+/// credential the store holds. Split from the provider so a test can pin the
+/// pairing without the machine's own install.
+fn catalog_for(
+    document: Option<&serde_json::Value>,
+    keyed: &std::collections::BTreeSet<String>,
+) -> Vec<miao_engine::model_catalog::Info> {
+    let Some(entries) = document.and_then(|document| document.as_object()) else {
+        return Vec::new();
+    };
+    let mut catalog = Vec::new();
+    for integration in keyed {
+        let Some(entry) = entries.get(integration) else {
+            continue;
+        };
+        let protocol = unmodeled_protocol(integration);
+        let Some(models) = entry.get("models").and_then(|models| models.as_object()) else {
+            continue;
+        };
+        for id in models.keys() {
+            catalog.push(miao_engine::model_catalog::Info {
+                route_id: None,
+                protocol: protocol.to_string(),
+                model: id.clone(),
+                variants: vec![],
+                model_key: Some(format!("{integration}/{id}")),
+                credential_id: None,
+                account: None,
+            });
+        }
+    }
+    catalog
+}
+
+/// The transport an unconfigured start names for a provider. The snapshot's
+/// own `api` field is an endpoint URL, not a protocol, so the known families
+/// map explicitly and everything else is OpenAI-compatible, the same default
+/// the product applies to third-party providers.
+fn unmodeled_protocol(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "anthropic",
+        "gemini" => "gemini",
+        "amazon-bedrock" => "amazon-bedrock",
+        "subscription-responses" => "subscription-responses",
+        _ => "openai-chat",
+    }
 }
 
 type StartupError = Box<dyn Error + Send + Sync>;
@@ -1697,5 +1840,74 @@ mod tests {
         );
         // A valued flag still requires its value.
         assert!(parse_options(&["--db".to_string()]).is_err());
+    }
+
+    /// A fresh install's picker offers only the providers the store holds a
+    /// key for, and each model names the transport its provider family uses:
+    /// the snapshot's `api` field is an endpoint, not a protocol, so a wrong
+    /// guess here would build a route that cannot speak to the provider.
+    #[test]
+    fn an_unmodeled_catalog_lists_keyed_providers_only() {
+        let document = serde_json::json!({
+            "anthropic": {
+                "api": "https://api.anthropic.com",
+                "models": { "claude-sonnet": {}, "claude-haiku": {} }
+            },
+            "zhipuai-coding-plan": {
+                "api": "https://open.bigmodel.cn/api/paas/v4",
+                "models": { "glm-5.3-flash": {} }
+            }
+        });
+        let keyed = ["zhipuai-coding-plan".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let catalog = catalog_for(Some(&document), &keyed);
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].model, "glm-5.3-flash");
+        assert_eq!(catalog[0].protocol, "openai-chat");
+        assert_eq!(
+            catalog[0].model_key.as_deref(),
+            Some("zhipuai-coding-plan/glm-5.3-flash")
+        );
+        // No route is registered yet: the pick becomes one after the restart
+        // that derives routes from the stored key.
+        assert!(catalog[0].route_id.is_none());
+        // No key, no models: a provider row exists but nothing is pickable.
+        assert!(catalog_for(Some(&document), &Default::default()).is_empty());
+        // A key for a provider the snapshot does not describe contributes
+        // nothing instead of a model no transport could serve.
+        let unmatched = ["not-in-the-snapshot".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(catalog_for(Some(&document), &unmatched).is_empty());
+        assert_eq!(unmodeled_protocol("anthropic"), "anthropic");
+        assert_eq!(unmodeled_protocol("gemini"), "gemini");
+        assert_eq!(unmodeled_protocol("amazon-bedrock"), "amazon-bedrock");
+        assert_eq!(
+            unmodeled_protocol("subscription-responses"),
+            "subscription-responses"
+        );
+    }
+
+    /// The only turn an unmodeled start can answer is the one that names what
+    /// configures it, and it answers before any transport is touched.
+    #[tokio::test]
+    async fn an_unmodeled_prompt_names_the_setup_step() {
+        let (progress, _receiver) = tokio::sync::mpsc::channel(1);
+        let error = UnmodeledProvider
+            .stream(
+                miao_engine::protocol::ModelRequest {
+                    system: String::new(),
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                },
+                progress,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("an unmodeled start refuses every prompt");
+        let message = error.to_string();
+        assert!(message.contains("no model is configured"), "{message}");
+        assert!(message.contains("miao auth login"), "{message}");
     }
 }

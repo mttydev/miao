@@ -118,7 +118,7 @@ async fn engine_with(workspace: &Path, manifest: &Path, base: Arc<dyn Provider>)
     .unwrap();
     runtime.set_route_limits(limits).await;
     runtime
-        .set_model_origin(Origin {
+        .set_model_origin(Origin::File {
             base,
             path: manifest.to_path_buf(),
             workspace,

@@ -3425,7 +3425,7 @@ impl App {
                     return;
                 }
                 self.notice(&format!(
-                    "stored the {provider} key as {label}; restarting the engine to load its models"
+                    "stored the {provider} key as {label}; reloading the engine's routes"
                 ));
                 if let Some(engine) = self.engine.as_ref() {
                     engine.reload_provider_routes();
@@ -3474,7 +3474,7 @@ impl App {
                     return;
                 }
                 self.notice(&format!(
-                    "deleted the {provider} {named} key; restarting the engine to drop its routes"
+                    "deleted the {provider} {named} key; reloading the engine's routes"
                 ));
                 if let Some(engine) = self.engine.as_ref() {
                     engine.reload_provider_routes();
@@ -11391,7 +11391,7 @@ mod tests {
         );
         let notice = app.shell.composer.notice.clone().expect("notice");
         assert!(
-            notice.contains("restarting the engine"),
+            notice.contains("reloading the engine's routes"),
             "says what happens next: {notice}"
         );
         assert!(
