@@ -256,7 +256,21 @@ pub fn policy(documents: &[Document], miao_sandbox: Option<&str>) -> permission:
         max_provider_turns: None,
         continuation_min_interval_ms: 30_000,
         budget: budget_declaration(&normalized),
+        max_goal_tokens: max_goal_tokens(&normalized),
     }
+}
+
+/// The model-facing cap on a Goal token budget (`budget.max_goal_tokens`).
+/// Absent reads as zero, which `Policy` resolves to the documented default, so
+/// a configuration written before this key existed needs no rewrite. A value
+/// past the engine ceiling is left for `Policy::new` to refuse, where the error
+/// names the key.
+fn max_goal_tokens(normalized: &Value) -> u64 {
+    normalized
+        .get("budget")
+        .and_then(|budget| budget.get("max_goal_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
 }
 
 /// The Session's cost, time, and turn budget (COST-02): the `budget` section,
@@ -1473,9 +1487,20 @@ mod tests {
                 "max_provider_turns": null,
                 "continuation_min_interval_ms": 30_000,
                 "budget": null,
+                "max_goal_tokens": 0,
                 "auto": false,
             })
         );
+    }
+
+    #[test]
+    fn the_operator_goal_token_cap_is_derived_and_absent_means_unset() {
+        // An existing configuration predates the key, so it must read as
+        // unset rather than refuse; `Policy` then supplies the default cap.
+        assert_eq!(policy(&documents(&[]), None).max_goal_tokens, 0);
+        let configured =
+            documents(&[serde_json::json!({"budget": {"max_goal_tokens": 5_000_000}})]);
+        assert_eq!(policy(&configured, None).max_goal_tokens, 5_000_000);
     }
 
     #[test]

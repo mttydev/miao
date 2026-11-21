@@ -5667,17 +5667,28 @@ command: None,
                                     name,
                                     prepared.input().clone(),
                                 ) {
-                                    Ok(mutation) => match inner
-                                        .store
-                                        .update_state(session, &format!("{run}:{id}"), mutation)
-                                        .await
+                                    Ok(mutation) => match (name == "goal")
+                                        .then(|| {
+                                            crate::budget::goal_token_cap(
+                                                &mutation.value,
+                                                policy.max_goal_tokens(),
+                                            )
+                                        })
+                                        .flatten()
                                     {
-                                        Ok(value) => Ok(value),
-                                        Err(Error::Conflict) => Err(ToolError::External(
-                                            "Session state revision conflict; reload session_state"
-                                                .into(),
-                                        )),
-                                        Err(error) => return Err(error),
+                                        Some(refusal) => Err(ToolError::External(refusal)),
+                                        None => match inner
+                                            .store
+                                            .update_state(session, &format!("{run}:{id}"), mutation)
+                                            .await
+                                        {
+                                            Ok(value) => Ok(value),
+                                            Err(Error::Conflict) => Err(ToolError::External(
+                                                "Session state revision conflict; reload session_state"
+                                                    .into(),
+                                            )),
+                                            Err(error) => return Err(error),
+                                        },
                                     },
                                     Err(error) => Err(error),
                                 },

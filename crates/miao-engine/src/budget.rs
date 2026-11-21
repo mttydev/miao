@@ -35,6 +35,29 @@ pub const TOKEN_CEILING: u64 = 2_000_000_000;
 pub const TURN_CEILING: u64 = 10_000;
 pub const WALLCLOCK_CEILING_MS: u64 = 86_400_000;
 
+/// The ceiling on a token budget a model may state for one Goal. The operator
+/// raises or lowers it with `budget.max_goal_tokens`; a configuration written
+/// before that key existed reads this default, so no file rewrite is needed.
+///
+/// It is a spend guard, not a judgement about the work: at 100k of context a
+/// turn bills roughly 100k tokens, so this is a long stretch, and work that
+/// needs more asks the operator for an envelope in observable units first.
+pub const DEFAULT_MAX_GOAL_TOKENS: u64 = 20_000_000;
+
+/// The refusal a Goal mutation earns when it states a token budget past the
+/// operator's cap, or `None` when the declaration fits or states no tokens.
+/// The message has to be actionable: the model cannot estimate tokens, so it
+/// is told to ask for an envelope in units it can observe and the user can
+/// judge.
+pub fn goal_token_cap(value: &Value, cap: u64) -> Option<String> {
+    let declared = value.get("budget")?.get("tokens")?.as_u64()?;
+    (declared > cap).then(|| {
+        format!(
+            "Goal token budget {declared} exceeds the operator cap of {cap} (budget.max_goal_tokens). Ask the user once with the question tool, offering envelopes in observable units (for example 30 minutes, two hours, or until the next checkpoint), then record the answer as iterations or wallclock_ms. Tokens are an operator axis: you cannot estimate them, so never invent a figure."
+        )
+    })
+}
+
 /// One budget declaration, in the units the run can actually observe. Every
 /// axis is optional, but a declaration states at least one: an empty one would
 /// read as "no limit" while looking like a bound the operator set.
@@ -479,6 +502,22 @@ fn usd(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_goal_token_budget_past_the_operator_cap_is_refused_with_an_envelope_hint() {
+        let over = json!({"objective":"x","status":"active","budget":{"tokens":30_000_000}});
+        let note = goal_token_cap(&over, DEFAULT_MAX_GOAL_TOKENS).expect("over the cap");
+        assert!(note.contains("budget.max_goal_tokens"), "{note}");
+        assert!(note.contains("question"), "{note}");
+        assert!(goal_token_cap(
+            &json!({"budget":{"tokens":20_000_000}}),
+            DEFAULT_MAX_GOAL_TOKENS
+        )
+        .is_none());
+        assert!(
+            goal_token_cap(&json!({"budget":{"iterations":5}}), DEFAULT_MAX_GOAL_TOKENS).is_none()
+        );
+    }
 
     fn declaration(value: Value) -> Declaration {
         serde_json::from_value(value).unwrap()

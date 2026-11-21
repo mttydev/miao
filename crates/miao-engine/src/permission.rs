@@ -101,6 +101,12 @@ pub struct Config {
     /// it, so an operator states a limit once here and sees what is left.
     #[serde(default)]
     pub budget: Option<crate::budget::Declaration>,
+    /// The operator's cap on a token budget a model may declare for one Goal
+    /// (`budget.max_goal_tokens`). Zero is "unset": `Policy` then applies
+    /// `budget::DEFAULT_MAX_GOAL_TOKENS`, so an existing configuration keeps
+    /// one documented behaviour without being rewritten.
+    #[serde(default)]
+    pub max_goal_tokens: u64,
 }
 fn provider_turns() -> Option<u32> {
     None
@@ -151,6 +157,7 @@ impl Default for Config {
             max_provider_turns: provider_turns(),
             continuation_min_interval_ms: continuation_interval(),
             budget: None,
+            max_goal_tokens: 0,
         }
     }
 }
@@ -266,6 +273,15 @@ impl Policy {
         self.config.budget
     }
 
+    /// The ceiling a model-declared Goal token budget must fit. Unset means the
+    /// documented default, never "no cap".
+    pub fn max_goal_tokens(&self) -> u64 {
+        match self.config.max_goal_tokens {
+            0 => crate::budget::DEFAULT_MAX_GOAL_TOKENS,
+            value => value,
+        }
+    }
+
     pub fn new(config: Config) -> Result<Self, Error> {
         if !(1..=600_000).contains(&config.approval_timeout_ms)
             || config
@@ -277,6 +293,11 @@ impl Policy {
         }
         if let Some(budget) = config.budget {
             budget.validate().map_err(Error::Invalid)?;
+        }
+        if config.max_goal_tokens > crate::budget::TOKEN_CEILING {
+            return Err(Error::Invalid(
+                "max_goal_tokens must be at most 2000000000".into(),
+            ));
         }
         let revision = digest(&serde_json::to_vec(&config)?);
         let matchers = config
