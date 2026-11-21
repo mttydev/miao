@@ -3733,13 +3733,17 @@ fn model_row(name: &str, input: u64, output: u64, hit: &str, width: usize) -> St
 /// nothing, so an empty answer leaves the sidebar as it was.
 fn quota_lines(
     quota: Option<&crate::status::PlanQuota>,
+    lang: Lang,
     palette: &crate::theme::Palette,
 ) -> Vec<Line<'static>> {
     let Some(quota) = quota.filter(|quota| !quota.is_empty()) else {
         return Vec::new();
     };
     let muted = Style::new().fg(palette.text_muted);
-    let mut lines = vec![section_header("PLAN · QUOTA", palette.syntax.variable)];
+    let mut lines = vec![section_header(
+        lang.t("quota.title"),
+        palette.syntax.variable,
+    )];
     for provider in &quota.providers {
         let name = match provider.plan.is_empty() {
             true => provider.provider.clone(),
@@ -3757,7 +3761,7 @@ fn quota_lines(
             };
             let reset = window
                 .resets_at_ms
-                .map(|at| format!(" · {}", until_reset(at)))
+                .map(|at| format!(" · {}", until_reset(lang, at)))
                 .unwrap_or_default();
             let label = match window.label.is_empty() {
                 true => window.id.clone(),
@@ -3775,14 +3779,14 @@ fn quota_lines(
 
 /// How long a window has left, in the unit a reader would say it in. A reset
 /// that already passed reads "now" rather than a negative countdown.
-fn until_reset(at_ms: u64) -> String {
+fn until_reset(lang: Lang, at_ms: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0);
     let left = at_ms.saturating_sub(now) / 1_000;
     match left {
-        0 => "now".to_owned(),
+        0 => lang.t("quota.now").to_owned(),
         1..=59 => format!("{left}s"),
         60..=3_599 => format!("{}m", left / 60),
         3_600..=86_399 => format!("{}h{}m", left / 3_600, (left % 3_600) / 60),
@@ -3931,7 +3935,7 @@ fn hourly_lines(
         if index == MODEL_ROWS {
             let more = usage.models.len() - MODEL_ROWS;
             lines.push(Line::from(Span::styled(
-                format!("  … {} more", more),
+                format!("  {}", lang.tf("usage.more", &[&more.to_string()])),
                 muted,
             )));
             break;
@@ -3981,10 +3985,9 @@ fn hourly_lines(
         money.push(Span::styled(" · ", muted));
     }
     money.push(Span::styled(
-        format!(
-            "{} turn{}",
-            usage.turns,
-            if usage.turns == 1 { "" } else { "s" }
+        lang.tf(
+            "usage.turns",
+            &[&usage.turns.to_string(), plural(usage.turns)],
         ),
         muted,
     ));
@@ -4019,14 +4022,14 @@ fn hourly_lines(
     }
     if low_cache {
         lines.push(Line::from(vec![
-            Span::styled("low cache hit: ", Style::new().fg(palette.warning)),
+            Span::styled(lang.t("usage.low_cache"), Style::new().fg(palette.warning)),
             Span::styled("/compact", Style::new().fg(palette.secondary)),
-            Span::styled(" trims the input later turns resend", muted),
+            Span::styled(lang.t("usage.low_cache_hint"), muted),
         ]));
     }
     if usage.truncated {
         lines.push(Line::from(Span::styled(
-            "partial: retention removed older rows",
+            lang.t("usage.truncated"),
             Style::new().fg(palette.warning),
         )));
     }
@@ -4142,7 +4145,7 @@ impl Pane for SidebarPane {
             // Plan quota answers a different question from the ledger below:
             // how much of the subscription is left, not what this workspace
             // already spent. It only appears when a provider published a meter.
-            let quota = quota_lines(self.quota.as_ref(), &palette);
+            let quota = quota_lines(self.quota.as_ref(), self.lang, &palette);
             if !quota.is_empty() {
                 lines.push(Line::default());
                 lines.extend(quota);
@@ -4158,7 +4161,7 @@ impl Pane for SidebarPane {
             ));
             match &self.usage {
                 None => lines.push(Line::from(Span::styled(
-                    "  no usage yet",
+                    format!("  {}", self.lang.t("usage.none_yet")),
                     Style::new().fg(palette.text_muted),
                 ))),
                 Some(usage) => {
@@ -4194,11 +4197,13 @@ impl Pane for SidebarPane {
                             inner,
                             &mut lines,
                             self.lang.t("context"),
-                            &format!(
-                                "{} of {} · {}%",
-                                crate::status::compact_tokens(tokens),
-                                crate::status::compact_tokens(window),
-                                percent
+                            &self.lang.tf(
+                                "context.value",
+                                &[
+                                    &crate::status::compact_tokens(tokens),
+                                    &crate::status::compact_tokens(window),
+                                    &percent.to_string(),
+                                ],
                             ),
                             Style::new().fg(if percent >= 80 {
                                 palette.warning
@@ -4208,11 +4213,13 @@ impl Pane for SidebarPane {
                             &palette,
                         );
                         if let Some(row) = self.hover_rows.last_mut() {
-                            row.text = format!(
-                                "context {} of {} · {}% of the input ceiling — the conversation the model can still read; compaction runs before it is full",
-                                crate::status::compact_tokens(tokens),
-                                crate::status::compact_tokens(window),
-                                percent
+                            row.text = self.lang.tf(
+                                "context.detail",
+                                &[
+                                    &crate::status::compact_tokens(tokens),
+                                    &crate::status::compact_tokens(window),
+                                    &percent.to_string(),
+                                ],
                             );
                         }
                     }
@@ -4274,13 +4281,18 @@ impl Pane for SidebarPane {
                     if usage.replayed_turns > 0 || usage.failed_attempts > 0 {
                         let mut parts = Vec::new();
                         if usage.replayed_turns > 0 {
-                            parts.push(format!("retried {}", usage.replayed_turns));
+                            parts.push(
+                                self.lang
+                                    .tf("activity.retried", &[&usage.replayed_turns.to_string()]),
+                            );
                         }
                         if usage.failed_attempts > 0 {
-                            parts.push(format!(
-                                "{} failed attempt{}",
-                                usage.failed_attempts,
-                                plural(usage.failed_attempts)
+                            parts.push(self.lang.tf(
+                                "activity.failed_attempt",
+                                &[
+                                    &usage.failed_attempts.to_string(),
+                                    plural(usage.failed_attempts),
+                                ],
                             ));
                         }
                         // The engine reports the attempt count beside the two
@@ -4290,10 +4302,9 @@ impl Pane for SidebarPane {
                         // (see the comment on the row). State it only when it
                         // carries a count of its own.
                         if usage.attempts > 0 {
-                            parts.push(format!(
-                                "{} attempt{}",
-                                usage.attempts,
-                                plural(usage.attempts)
+                            parts.push(self.lang.tf(
+                                "activity.attempt",
+                                &[&usage.attempts.to_string(), plural(usage.attempts)],
                             ));
                         }
                         hoverable_line(
@@ -4310,10 +4321,12 @@ impl Pane for SidebarPane {
                             &mut self.hover_rows,
                             inner,
                             &mut lines,
-                            format!(
-                                "rework {} · tool-input error{}",
-                                usage.tool_input_errors,
-                                plural(usage.tool_input_errors)
+                            self.lang.tf(
+                                "activity.rework",
+                                &[
+                                    &usage.tool_input_errors.to_string(),
+                                    plural(usage.tool_input_errors),
+                                ],
                             ),
                             Style::new().fg(palette.warning),
                             text_width,
@@ -4333,31 +4346,27 @@ impl Pane for SidebarPane {
                             parts.push(usage.approvals.to_string());
                         }
                         if usage.answers > 0 {
-                            parts.push(format!(
-                                "{} answer{}",
-                                usage.answers,
-                                plural(usage.answers)
+                            parts.push(self.lang.tf(
+                                "activity.answer",
+                                &[&usage.answers.to_string(), plural(usage.answers)],
                             ));
                         }
                         if usage.rejections > 0 {
-                            parts.push(format!(
-                                "{} rejection{}",
-                                usage.rejections,
-                                plural(usage.rejections)
+                            parts.push(self.lang.tf(
+                                "activity.rejection",
+                                &[&usage.rejections.to_string(), plural(usage.rejections)],
                             ));
                         }
                         if usage.cancels > 0 {
-                            parts.push(format!(
-                                "{} cancel{}",
-                                usage.cancels,
-                                plural(usage.cancels)
+                            parts.push(self.lang.tf(
+                                "activity.cancel",
+                                &[&usage.cancels.to_string(), plural(usage.cancels)],
                             ));
                         }
                         if usage.input_edits > 0 {
-                            parts.push(format!(
-                                "{} edit{}",
-                                usage.input_edits,
-                                plural(usage.input_edits)
+                            parts.push(self.lang.tf(
+                                "activity.edit",
+                                &[&usage.input_edits.to_string(), plural(usage.input_edits)],
                             ));
                         }
                         hoverable_line(
@@ -4461,8 +4470,10 @@ impl Pane for SidebarPane {
                 lines.push(Line::default());
                 lines.push(section_header(
                     &match running {
-                        0 => format!("SUBAGENTS {}", self.subagents.len()),
-                        _ => format!("SUBAGENTS · {running} running"),
+                        0 => self
+                            .lang
+                            .tf("subagents.title", &[&self.subagents.len().to_string()]),
+                        _ => self.lang.tf("subagents.running", &[&running.to_string()]),
                     },
                     palette.syntax.function,
                 ));
@@ -4476,10 +4487,13 @@ impl Pane for SidebarPane {
                                 facts.push(duration_ms(now.saturating_sub(started)));
                             }
                         }
-                        false => facts.push("idle".to_string()),
+                        false => facts.push(self.lang.t("subagents.idle").to_string()),
                     }
                     if row.messages > 0 {
-                        facts.push(format!("{} msg{}", row.messages, plural(row.messages)));
+                        facts.push(self.lang.tf(
+                            "subagents.messages",
+                            &[&row.messages.to_string(), plural(row.messages)],
+                        ));
                     }
                     lines.push(Line::from(Span::styled(
                         clip_cells(&format!("{name} · {}", facts.join(" · ")), 0, width),
@@ -4540,21 +4554,29 @@ impl Pane for SidebarPane {
             if let Some(goal) = &self.goal {
                 // The state word is the one thing here that can need the
                 // operator, so it keeps colour only when it does.
-                let state = goal_state(goal, &self.todos);
-                let goal_style = match state.split(' ').next().unwrap_or_default() {
-                    "blocked" | "waiting" => Style::new().fg(palette.warning),
-                    "done" => Style::new().fg(palette.success),
+                let state_key = goal_state(goal, &self.todos);
+                let goal_style = match state_key {
+                    Some("goal.state.blocked" | "goal.state.waiting") => {
+                        Style::new().fg(palette.warning)
+                    }
+                    Some("goal.state.done") => Style::new().fg(palette.success),
                     _ => Style::new().fg(palette.text_muted),
                 };
                 lines.push(Line::default());
                 lines.push(Line::from(vec![
                     Span::styled(
-                        "GOAL · ",
+                        format!("{} · ", self.lang.t("goal.title")),
                         Style::new()
                             .fg(palette.text_muted)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(state, goal_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        state_key
+                            .map(|key| self.lang.t(key))
+                            .unwrap_or(goal.status.as_str())
+                            .to_string(),
+                        goal_style.add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 lines.push(Line::from(Span::styled(
                     format!(
@@ -4568,7 +4590,7 @@ impl Pane for SidebarPane {
                         &mut self.hover_rows,
                         inner,
                         &mut lines,
-                        "budget",
+                        self.lang.t("goal.budget"),
                         budget,
                         Style::new().fg(palette.text_muted),
                         &palette,
@@ -4583,14 +4605,26 @@ impl Pane for SidebarPane {
                     _ => Style::new().fg(palette.text_muted),
                 };
                 lines.push(Line::default());
+                let status_key = match plan.status.as_str() {
+                    "approved" => Some("plan.status.approved"),
+                    "pending" => Some("plan.status.pending"),
+                    "superseded" => Some("plan.status.superseded"),
+                    _ => None,
+                };
                 lines.push(Line::from(vec![
                     Span::styled(
-                        "PLAN · ",
+                        format!("{} · ", self.lang.t("plan.title")),
                         Style::new()
                             .fg(palette.text_muted)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(plan.status.clone(), plan_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        status_key
+                            .map(|key| self.lang.t(key))
+                            .unwrap_or(plan.status.as_str())
+                            .to_string(),
+                        plan_style.add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 lines.push(Line::from(Span::styled(
                     format!(
@@ -4604,7 +4638,7 @@ impl Pane for SidebarPane {
                         &mut self.hover_rows,
                         inner,
                         &mut lines,
-                        "steps",
+                        self.lang.t("plan.steps"),
                         &format!("{}", plan.steps),
                         Style::new().fg(palette.text_muted),
                         &palette,
@@ -5615,12 +5649,18 @@ fn panel_lines(panel: &Panel, lang: Lang, theme: &Theme) -> Vec<Line<'static>> {
 /// refuses the mutation otherwise), and `done` speaks for itself. An active Goal
 /// is either working through its checklist or waiting on work only the outside
 /// can move, and the checklist says which by leaving nothing runnable behind.
-fn goal_state(goal: &crate::session::GoalView, todos: &[crate::session::TodoView]) -> String {
+fn goal_state(
+    goal: &crate::session::GoalView,
+    todos: &[crate::session::TodoView],
+) -> Option<&'static str> {
     if goal.status == "blocked" {
-        return "blocked · external".into();
+        return Some("goal.state.blocked");
     }
-    if goal.status != "active" {
-        return goal.status.clone();
+    match goal.status.as_str() {
+        "active" => {}
+        "done" => return Some("goal.state.done"),
+        "paused" => return Some("goal.state.paused"),
+        _ => return None,
     }
     let open = todos
         .iter()
@@ -5632,9 +5672,9 @@ fn goal_state(goal: &crate::session::GoalView, todos: &[crate::session::TodoView
         .all(|status| matches!(*status, "waiting" | "blocked"))
         && !open.is_empty()
     {
-        return "waiting · external".into();
+        return Some("goal.state.waiting");
     }
-    "working · decomposing".into()
+    Some("goal.state.working")
 }
 
 #[cfg(test)]
@@ -5655,41 +5695,47 @@ mod tests {
         // moving; only a checklist that leaves nothing runnable is a wait.
         assert_eq!(
             super::goal_state(&goal("active"), &[]),
-            "working · decomposing"
+            Some("goal.state.working")
         );
         assert_eq!(
             super::goal_state(&goal("active"), &[todo("completed"), todo("pending")]),
-            "working · decomposing"
+            Some("goal.state.working")
         );
         assert_eq!(
             super::goal_state(&goal("active"), &[todo("completed"), todo("waiting")]),
-            "waiting · external"
+            Some("goal.state.waiting")
         );
         assert_eq!(
             super::goal_state(&goal("active"), &[todo("blocked")]),
-            "waiting · external"
+            Some("goal.state.waiting")
         );
         // The engine refuses a blocked Goal whose evidence names nothing
         // outside the Session, so the qualifier is the engine's own reading.
         assert_eq!(
             super::goal_state(&goal("blocked"), &[]),
-            "blocked · external"
+            Some("goal.state.blocked")
         );
-        assert_eq!(super::goal_state(&goal("done"), &[]), "done");
+        assert_eq!(
+            super::goal_state(&goal("done"), &[]),
+            Some("goal.state.done")
+        );
     }
 
     #[test]
     fn the_plan_block_paints_windows_and_skips_an_empty_answer() {
         let palette = home_theme().palette;
-        assert!(
-            super::quota_lines(Some(&crate::status::PlanQuota::default()), &palette).is_empty()
-        );
+        assert!(super::quota_lines(
+            Some(&crate::status::PlanQuota::default()),
+            Lang::En,
+            &palette,
+        )
+        .is_empty());
         let quota = crate::status::PlanQuota::from_value(&serde_json::json!({
             "providers": [{"provider":"zhipuai-coding-plan","plan":"lite","windows":[
                 {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null}
             ]}]
         }));
-        let text = super::quota_lines(Some(&quota), &palette)
+        let text = super::quota_lines(Some(&quota), Lang::En, &palette)
             .iter()
             .map(|line| {
                 line.spans
@@ -6039,6 +6085,65 @@ mod tests {
             text.contains("wire the parser"),
             "the checklist is still shown: {text}"
         );
+    }
+
+    /// The Goal section speaks the operator's language too: its header, state
+    /// word and budget label used to be hardcoded English and stayed English
+    /// after `/lang zh`, leaving the column half translated.
+    #[test]
+    fn the_goal_section_speaks_the_picked_language() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let mut shell = Shell::new(
+            Path::new("."),
+            Theme {
+                name: crate::theme::DEFAULT_THEME.to_string(),
+                palette,
+            },
+        );
+        shell.set_session(Some(&SessionSummary {
+            id: "ses_zh".into(),
+            title: Some("目标语言".into()),
+            parent_id: None,
+            updated_at_ms: Some(10),
+            archived_at_ms: None,
+            pinned_at_ms: None,
+            directory: Some("/work/miao".into()),
+            model: None,
+            credential_id: None,
+            preview: None,
+            active_run: None,
+            todos_open: None,
+            goal_armed: None,
+        }));
+        shell.set_lang(Lang::Zh);
+        shell.set_goal(Some(&crate::session::GoalView {
+            objective: "ship the offset reporting".into(),
+            status: "active".into(),
+            budget: Some("two hours".into()),
+            evidence: None,
+        }));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let sidebar = shell.sidebar.as_mut().expect("sidebar");
+                sidebar.render(frame, frame.area());
+            })
+            .expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .flat_map(|cell| cell.symbol().chars())
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(text.contains("目标·工作中·分解中"), "{text}");
+        assert!(text.contains("预算"), "{text}");
+        assert!(!text.contains("GOAL"), "{text}");
+        assert!(!text.contains("budget"), "{text}");
     }
 
     /// #1969: the third durable row gets its own section, between the Goal
