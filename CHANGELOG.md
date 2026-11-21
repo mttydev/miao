@@ -13,6 +13,20 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-11-21
+
+### Added
+- **tui**: report each host-footer fact's tone (#3289) (`a1f361c91b`)
+- **tui**: show live progress while a Session waits on a job (#3282) (`08323ef134`)
+- **tui**: keep a compaction pass visible in the transcript (#3283) (`6a14b9774f`)
+
+### Fixed
+- **engine**: keep catalog models routable and gate them by plan (#3290) (`c9604db2f2`)
+- **tui**: keep the composer hint clear of the caret (#3288) (`f86e492a82`)
+- **engine**: answer an interrupted call once so compaction can cut (#3287) (`daabd5c039`)
+- **tui**: show why a turn stopped and record the stop origin (#3286) (`0edf1cba8a`)
+- **engine**: stop narrating a self-resolving wait (#3284) (`7903a9209e`)
+
 ## [0.4.8] - 2026-11-21
 
 ### Added
