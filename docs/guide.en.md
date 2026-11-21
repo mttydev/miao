@@ -71,7 +71,7 @@ lsof -p <pid> | grep '.versions/'
 ## 3. Quick start
 
 ```bash
-miao providers login   # credentials are written to auth.json
+miao auth login <integration> <key>   # or use /accounts in the TUI for OAuth / API key login
 miao models                  # list available models
 cd /path/to/project
 miao                         # start the TUI
@@ -121,9 +121,8 @@ the file that won it. Main fields:
 | `experimental`                                                    | experimental flags (e.g. Code Mode)                                                                                                                  |
 
 **Native currency**: set `providers.<id>.models.<m>.cost` in the provider's own currency (for
-example DeepSeek in CNY) to estimate costs using the declared currency; `/currency` in the TUI switches the
-display currency (defaults to USD, with a static conversion for providers without a declared
-currency).
+example DeepSeek in CNY) to estimate costs using the declared currency. Amounts are recorded in
+that currency and never converted; the ledger keeps one bucket per currency.
 
 **Engine**: the engine runs inside the `miao` binary, so there is no separate engine to install or
 point at. `MIAO_ENGINE_STORAGE` overrides where it keeps its storage (default
@@ -171,14 +170,15 @@ Rebind in `~/.config/miao/tui.json` (or `keybinds` in miao.jsonc).
 
 - `/model` or `ctrl+x m` switches models (the last model per agent is remembered).
 - `miao session list` / `miao export <sessionID>` manage and export sessions
-  (`--format jsonl` writes one message per line for grep/backup).
+  (JSONL with one committed event per line, for grep/backup).
 - `miao run "..."` runs once non-interactively.
 
 ### 5.3 Commands and skills
 
 - Slash commands come from the `commands` config and are triggered by `/`.
 - Skills are matched by description; the model loads skill content with the `skill` tool.
-- `miao agent create` generates a custom agent.
+- Custom agents are defined under `agents` in configuration; `miao agent list` shows them.
+- See the [command reference](commands.en.md) for the full list.
 
 ### 5.4 MCP
 
@@ -242,7 +242,7 @@ In V2, an input is admitted durably before execution is scheduled. Input sent du
 
 For example, after asking for a bug fix, add “Keep the public API unchanged and run the package tests.” The pending-input display records that the requirement is waiting to be promoted. The public V2 API also supports queue delivery and `resume: false` for admission without execution.
 
-Reopen sessions from the session list or export them with `miao export <sessionID> --format jsonl`. Persisted history survives a terminal lifetime, but a crash does not automatically retry unfinished provider execution. Resume deliberately, inspect completed changes, and verify any commands with external side effects before repeating them.
+Reopen sessions from the session list or export them with `miao export <sessionID>` (JSONL). Persisted history survives a terminal lifetime, but a crash does not automatically retry unfinished provider execution. Resume deliberately, inspect completed changes, and verify any commands with external side effects before repeating them.
 
 ### 5.10 Specialist agents and project-local messages
 
@@ -278,55 +278,30 @@ All shipped clients use the single V2 session runtime; the V1 session runtime an
 
 ## 7. FAQ
 
-**Sidebar LSP always says "LSPs are disabled"?**
-`lsp` is omitted (omitted means disabled). Add `"lsp": true`: the native engine reloads the config
-and connects the server without a restart; the TypeScript engine still needs a restart.
+The frequently asked questions now live on their own page: [FAQ](faq.en.md), covering install and
+upgrade, providers and models, permissions, configuration, MCP, data locations and troubleshooting.
+Two answers are kept here because they affect basic usability:
 
-**`ctrl+x b` does not open the sidebar?**
-Child sessions (spawned by task/subagent, non-empty `parent_id`) force-hide the sidebar;
-top-level sessions work. Narrow terminals (width ≤ 120) do not show it in `auto` mode, but the
-manual toggle still works.
-
-**How do I configure models/providers?**
-`miao providers login` writes credentials; `miao models` lists them; customize under
-`providers` in `miao.jsonc`. Use `miao debug config` to inspect resolved configuration and `miao debug info` for installation and plugin diagnostics; `miao debug` lists its subcommands.
-
-**How do I use my Command Code subscription?**
-Connect once with `miao auth login commandcode` (a browser-assisted login), or set
-`CMD_API_KEY` to an API key from [commandcode.ai Studio](https://commandcode.ai/studio/).
-Its models are discovered from your account when it connects. Command Code uses its CLI
-subscription endpoint rather than the documented Provider API, so model capabilities and
-pricing are conservative until the catalog reports them.
-
-**Cost does not match the bill?**
-Use native-currency pricing (`providers.<id>.models.<m>.cost`), or switch display currency with
-`/currency`.
-
-**Native (Rust) addon problems?**
-`MIAO_NATIVE=0` disables the addon, and the TypeScript implementations of edit matching and patch derivation take over. The addon also backs the OS sandbox runner. See the [native component scope](native-benchmarks.en.md).
-
-**Can it keep working autonomously like a single long run?**
-Use the `loop` config (§5.8), or an external loop `miao run --continue "...continue..."`.
-
-**Does it modify my git repo?**
-Snapshots use a separate git directory (`~/.local/share/miao/snapshot/…`), so the worktree is not
-polluted; edits and commands follow the configured permission rules.
+- The sidebar says “LSPs are disabled”: `lsp` is omitted, and omitted means disabled. Add
+  `"lsp": true` to `miao.jsonc`; the native engine reloads the configuration and connects the server.
+- `ctrl+x b` does not open the sidebar: child sessions (spawned by task/subagent, non-empty
+  `parent_id`) force-hide it; narrow terminals (width ≤ 120) do not show it in `auto` mode, but the
+  manual toggle still works.
 
 ## 8. Troubleshooting
 
 ```bash
 miao db path              # database path
 miao db stats             # per-table/event usage (find bloat)
-miao db vacuum            # checkpoint + VACUUM to reclaim free pages
-miao db backfill          # project legacy V1 session messages into the V2 schema (idempotent)
-miao db compact           # after backfill: drop the retired message/part tables and their events
-miao export <sessionID> --format jsonl
+miao db vacuum --apply    # reclaim free pages
+miao db backup --to <path>  # verified database backup
+miao export <sessionID>   # export a session as JSONL
 MIAO_CONFIG=/path/miao.jsonc miao
 ```
 
-Logs live in `~/.local/share/miao/log/`. In databases written before V2, bloat comes mainly from
-legacy per-delta events; use `miao db stats` to monitor, `miao db compact` to retire the old tables,
-and `vacuum` to reclaim free pages.
+Logs live in `~/.local/share/miao/log/`. Use `miao db stats` to monitor growth and
+`miao db vacuum --apply` to reclaim free pages; `miao db retention` only reports events a retention
+policy could drop and never deletes them.
 
 ## 9. Development
 
