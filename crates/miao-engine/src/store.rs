@@ -2241,10 +2241,11 @@ impl Store {
                 .optional()?
                 .ok_or_else(|| Error::Invalid("Session does not exist".into()))?;
             let mut pending = std::collections::HashSet::new();
+            let mut settled = std::collections::HashSet::new();
             let point = projected(&tx, &session, watermark, false)?
                 .iter()
                 .try_fold(0u64, |point, message| -> Result<u64, Error> {
-                    track_tools(&mut pending, &message["content"])?;
+                    track_tools(&mut pending, &mut settled, &message["content"])?;
                     Ok(match (pending.is_empty(), message["seq"].as_u64()) {
                         (true, Some(seq)) => seq,
                         _ => point,
@@ -4468,6 +4469,16 @@ fn reconcile_tools(tx: &Transaction<'_>, session: &str, run: &str) -> Result<(),
     for (input, state) in inputs {
         let data: Value = serde_json::from_str(&input)?;
         if let Some(id) = data["provider_id"].as_str() {
+            let answered: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_message m, json_each(m.content) p \
+                 WHERE m.session_id=?1 AND json_extract(p.value,'$.type')='tool_result' \
+                   AND json_extract(p.value,'$.tool_use_id')=?2)",
+                params![session, id],
+                |row| row.get(0),
+            )?;
+            if answered {
+                continue;
+            }
             let reason = if state == "planned" {
                 "Execution stopped before dispatch; no tool operation was started."
             } else {
@@ -4643,8 +4654,9 @@ fn assistant_profile(
 
 pub(crate) fn closed_prefix(messages: &[Value]) -> Result<(), Error> {
     let mut pending = std::collections::HashSet::new();
+    let mut settled = std::collections::HashSet::new();
     for message in messages {
-        track_tools(&mut pending, &message["content"])?;
+        track_tools(&mut pending, &mut settled, &message["content"])?;
     }
     if !pending.is_empty() {
         return Err(Error::Invalid("boundary has unresolved tool calls".into()));
@@ -4654,6 +4666,7 @@ pub(crate) fn closed_prefix(messages: &[Value]) -> Result<(), Error> {
 
 pub(crate) fn track_tools(
     pending: &mut std::collections::HashSet<String>,
+    settled: &mut std::collections::HashSet<String>,
     content: &Value,
 ) -> Result<(), Error> {
     for block in content
@@ -4675,7 +4688,14 @@ pub(crate) fn track_tools(
                 let id = block["tool_use_id"]
                     .as_str()
                     .ok_or_else(|| Error::Invalid("tool result id".into()))?;
-                if !pending.remove(id) {
+                // An interrupted turn could write the same answer twice: the
+                // unexecuted-call path settles it and the run's reconciliation
+                // then settles the still-planned call again. The repeat is
+                // redundant, not an orphan; treating it as one used to make
+                // every later compaction cut fail on that prefix.
+                if pending.remove(id) {
+                    settled.insert(id.to_owned());
+                } else if !settled.contains(id) {
                     return Err(Error::Invalid("unmatched tool result".into()));
                 }
             }

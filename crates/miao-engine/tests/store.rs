@@ -949,3 +949,62 @@ async fn a_repeated_context_selection_is_not_recorded_again() {
         .unwrap();
     assert_eq!(count().await, 2, "a changed selection is a new fact");
 }
+
+/// An interrupted turn settles an unexecuted call itself and the run's
+/// reconciliation then sees the same call still planned. Writing a second
+/// answer for it leaves an orphan result that no later compaction cut accepts.
+#[tokio::test]
+async fn an_interrupted_run_answers_an_already_settled_call_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store.admit(input("go", Delivery::Steer)).await.unwrap();
+    store.promote("s", true).await.unwrap();
+    store.start_run("s", "run").await.unwrap();
+    store
+        .assistant_reply_profiled(
+            "s",
+            "run",
+            0,
+            None,
+            json!([
+                {"type":"text","text":"dispatching"},
+                {"type":"tool_use","id":"settled","name":"bash","input":{}},
+                {"type":"tool_use","id":"waiting","name":"bash","input":{}}
+            ]),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .message(
+            "s",
+            "user",
+            json!([{"type":"tool_result","tool_use_id":"settled","content":"stopped","is_error":true}]),
+        )
+        .await
+        .unwrap();
+    store.finish_run("s", "run", "interrupted").await.unwrap();
+    let history = store.history("s").await.unwrap();
+    let results = history
+        .iter()
+        .flat_map(|message| message.content.as_array().cloned().unwrap_or_default())
+        .filter(|block| block["type"] == "tool_result")
+        .collect::<Vec<_>>();
+    let answered = |id: &str| {
+        results
+            .iter()
+            .filter(|block| block["tool_use_id"] == id)
+            .count()
+    };
+    assert_eq!(
+        answered("settled"),
+        1,
+        "the settled call is not answered twice"
+    );
+    assert_eq!(
+        answered("waiting"),
+        1,
+        "the never-answered call still gets a result"
+    );
+}
