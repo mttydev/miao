@@ -172,6 +172,27 @@ impl Harness {
         .unwrap()
     }
 
+    /// Wait until one more drain than `seen` has finished, so a test can watch
+    /// a second prompt without matching the first drain's terminal event.
+    async fn next_finished_after(&self, seen: usize) -> Vec<Event> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let events = self.store.events("s", 0, 1000).await.unwrap();
+                if events
+                    .iter()
+                    .filter(|event| event.kind == "run.finished")
+                    .count()
+                    > seen
+                {
+                    break events;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     fn event<'a>(events: &'a [Event], kind: &str) -> &'a Event {
         events
             .iter()
@@ -450,5 +471,53 @@ async fn the_usage_report_carries_the_remaining_amount() {
     assert_eq!(budget["level"], json!("within"));
     assert_eq!(budget["remaining"]["cost_usd"], json!(0.6));
     assert_eq!(budget["limit"]["cost_usd"], json!(1.0));
+    harness.runtime.shutdown().await;
+}
+
+/// A Goal budget the model declared for one stretch of work is not a veto over
+/// the owner's next instruction: a waiting message reopens the Goal's window
+/// and runs even when the previous stretch spent the whole allowance.
+#[tokio::test]
+async fn a_new_user_message_reopens_an_exhausted_goal_window() {
+    let harness = Harness::open(None, (0..4).map(|_| uncharged(180, 20)).collect()).await;
+    harness
+        .admit("one", "hold the line", Delivery::Steer, false)
+        .await;
+    harness
+        .store
+        .update_state(
+            "s",
+            "goal-op",
+            Mutation::parse(
+                "goal",
+                json!({"objective":"hold the line","status":"active","budget":{"tokens":400}}),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    harness.runtime.resume("s").await.unwrap();
+    let first = harness.finished().await;
+
+    assert_eq!(harness.calls(), 2, "the Goal bounds the first stretch");
+    assert_eq!(
+        Harness::event(&first, "budget.stopped").data["scope"],
+        json!("Goal")
+    );
+
+    let seen = first
+        .iter()
+        .filter(|event| event.kind == "run.finished")
+        .count();
+    harness
+        .admit("two", "continue", Delivery::Steer, true)
+        .await;
+    harness.next_finished_after(seen).await;
+
+    assert_eq!(
+        harness.calls(),
+        4,
+        "the owner's message opened a fresh Goal window and it ran"
+    );
     harness.runtime.shutdown().await;
 }

@@ -5,8 +5,10 @@
 //! (`goal.budget`, AGT-04). The two scopes keep separate accounting windows: the
 //! Session counts every turn it ever ran, while a Goal counts the turns since
 //! the model recorded it, so a budget stated for a stretch of work is not
-//! charged with the work that prompted it. The run loop evaluates both at every
-//! provider-turn boundary and the stricter one wins: four fifths spent asks the
+//! charged with the work that prompted it. A newly promoted human instruction
+//! reopens the Goal's window, so a budget a model declared for the previous
+//! stretch cannot veto the owner's next message. The run loop evaluates both at
+//! every provider-turn boundary and the stricter one wins: four fifths spent asks the
 //! model to close the operation in progress, and a spent limit ends the drain
 //! with a visible history fact. Every admitted input survives that stop in the
 //! durable inbox, so raising the budget and sending the next message continues
