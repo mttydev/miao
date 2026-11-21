@@ -163,7 +163,7 @@ impl Shell {
     pub fn footer_wire(&self) -> Option<Vec<FooterWireSeg>> {
         match self.leader_hint.is_some() {
             true => None,
-            false => wire_from_status(&self.status, false),
+            false => wire_from_status(&self.status),
         }
     }
 
@@ -1773,7 +1773,7 @@ impl Home {
     /// straight from the strip: labels only, no cells. `None` while nothing
     /// is on screen for the host to show.
     pub fn footer_wire(&self, status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
-        wire_from_status(status, true)
+        wire_from_status(status)
     }
 
     /// The strip fact a press at this position acts on, if the last paint
@@ -2487,6 +2487,11 @@ const COMPACT_CELLS: usize = 80;
 #[derive(Default)]
 pub struct StatusStrip {
     pub model: Option<String>,
+    /// The tail serving the model: the provider, its account when it is not
+    /// the default, the wire protocol and the variant. It paints after the
+    /// model and travels as its own fact, so the merged host footer keeps both
+    /// halves addressable instead of one run-on label.
+    pub provider: Option<String>,
     pub usage: Option<String>,
     /// What the run waits on and what the next key does, right-aligned: an
     /// approval that blocks the turn, a queued prompt, the interrupt key.
@@ -2568,13 +2573,13 @@ fn hint_label(hint: &StatusHint) -> String {
     }
 }
 
-/// The wire the embedded host renders, read straight from the strip: the
-/// approval hint, then the model, then — on the landing screen — the
-/// provider · protocol tail. Labels only: the host's row is its own surface
-/// and a press there arrives as the operator's own chord, so the geometry
-/// stays zero and an older host that still synthesizes by cell refuses the
-/// press instead of landing it on the transcript.
-fn wire_from_status(status: &StatusStrip, usage: bool) -> Option<Vec<FooterWireSeg>> {
+/// The wire the embedded host renders, read straight from the strip in the
+/// order the row reads: the approval hint, then the model, then the provider
+/// tail that serves it. Labels only: the host's row is its own surface and a
+/// press there arrives as the operator's own chord, so the geometry stays zero
+/// and an older host that still synthesizes by cell refuses the press instead
+/// of landing it on the transcript.
+fn wire_from_status(status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
     let mut segs: Vec<FooterWireSeg> = status
         .hints
         .iter()
@@ -2598,17 +2603,15 @@ fn wire_from_status(status: &StatusStrip, usage: bool) -> Option<Vec<FooterWireS
             chord: None,
         });
     }
-    if usage {
-        if let Some(usage) = &status.usage {
-            segs.push(FooterWireSeg {
-                id: FooterSegment::Provider.id(),
-                text: usage.clone(),
-                row: 0,
-                start: 0,
-                end: 0,
-                chord: None,
-            });
-        }
+    if let Some(provider) = &status.provider {
+        segs.push(FooterWireSeg {
+            id: FooterSegment::Provider.id(),
+            text: provider.clone(),
+            row: 0,
+            start: 0,
+            end: 0,
+            chord: None,
+        });
     }
     (!segs.is_empty()).then_some(segs)
 }
@@ -2647,14 +2650,20 @@ fn footer_status_spans(
             Some(FooterSegment::Model),
         ));
     }
-    if let Some(usage) = &status.usage {
+    if let Some(provider) = &status.provider {
         if !pairs.is_empty() {
             pairs.push((Span::styled(" · ", muted), None));
         }
         pairs.push((
-            Span::styled(usage.clone(), muted),
+            Span::styled(provider.clone(), muted),
             Some(FooterSegment::Provider),
         ));
+    }
+    if let Some(usage) = &status.usage {
+        if !pairs.is_empty() {
+            pairs.push((Span::styled(" · ", muted), None));
+        }
+        pairs.push((Span::styled(usage.clone(), muted), None));
     }
     pairs
 }
@@ -2713,6 +2722,18 @@ fn composer_status_spans(
                     .add_modifier(Modifier::BOLD),
             ),
             Some(FooterSegment::Model),
+        ));
+    }
+    if let Some(provider) = &status.provider {
+        if !pairs.is_empty() {
+            pairs.push((
+                Span::styled(" · ", Style::new().fg(theme.palette.text_muted)),
+                None,
+            ));
+        }
+        pairs.push((
+            Span::styled(provider.clone(), Style::new().fg(theme.palette.text_muted)),
+            Some(FooterSegment::Provider),
         ));
     }
     pairs
@@ -6304,6 +6325,7 @@ mod tests {
         // of the row, ahead of the model.
         let status = StatusStrip {
             model: Some("fake/model".into()),
+            provider: None,
             usage: None,
             hints: vec![
                 StatusHint {
@@ -10143,14 +10165,15 @@ mod draft_gap_tests {
     }
 
     /// The landing prompt merges the same way: no painted facts on the rule,
-    /// a wire that names the provider tail the Session strip does not carry.
+    /// a wire that names the model and the provider tail serving it.
     #[test]
     fn embedded_landing_paints_no_facts_and_reports_the_wire() {
         let mut home = Home::new(strip_theme());
         home.set_embedded_footer(true);
         let status = StatusStrip {
             model: Some("deepseek-v4".into()),
-            usage: Some("volcengine · mtp".into()),
+            provider: Some("volcengine · mtp".into()),
+            usage: None,
             hints: Vec::new(),
         };
         let mut composer = crate::editor::Composer::new(Path::new("."));
@@ -10180,6 +10203,40 @@ mod draft_gap_tests {
         assert_eq!(wire[1].text, "volcengine · mtp", "{wire:?}");
     }
 
+    /// The wire keeps the row's reading order: the approval hint first, then
+    /// the model, then the provider tail that serves it. The cost summary is
+    /// not a fact about what answers, so it never takes the provider slot.
+    #[test]
+    fn the_wire_reads_approval_model_then_provider() {
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), strip_theme());
+        shell.status = StatusStrip {
+            model: Some("deepseek-v4-1-flash-261017".into()),
+            provider: Some("volcengine · openai-chat".into()),
+            usage: Some("4 turns · 12k in · 900 out".into()),
+            hints: vec![StatusHint {
+                text: "auto-approve".into(),
+                warning: true,
+                success: false,
+                segment: Some(FooterSegment::ApprovalMode),
+            }],
+        };
+        let wire = shell.footer_wire().expect("there are facts");
+        let pairs: Vec<(&str, &str)> = wire.iter().map(|seg| (seg.id, seg.text.as_str())).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("approval", "! auto-approve"),
+                ("model", "deepseek-v4-1-flash-261017"),
+                ("provider", "volcengine · openai-chat"),
+            ],
+            "{wire:?}"
+        );
+        assert!(
+            !wire.iter().any(|seg| seg.text.contains("turns")),
+            "the cost summary took a fact slot: {wire:?}"
+        );
+    }
+
     /// Two paints must leave two segments, not four: the strip's hits belong
     /// to the frame that laid them out, and the merged-footer wire reports
     /// exactly what is on screen now. The ranges were never cleared between
@@ -10205,7 +10262,8 @@ mod draft_gap_tests {
         home.set_embedded_footer(true);
         let status = StatusStrip {
             model: Some("deepseek-v4".into()),
-            usage: Some("volcengine · mtp".into()),
+            provider: Some("volcengine · mtp".into()),
+            usage: None,
             hints: Vec::new(),
         };
         let mut composer = crate::editor::Composer::new(Path::new("."));

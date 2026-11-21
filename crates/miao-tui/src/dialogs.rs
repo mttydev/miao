@@ -148,22 +148,37 @@ impl ModelInfo {
     /// header, and `deepseek-v4-1-flash-261017 · openai-chat` named the
     /// transport without ever saying which provider answered.
     pub fn identity(&self) -> String {
-        let mut parts = vec![self.model.clone()];
+        let (model, serving) = self.facts();
+        match serving {
+            Some(serving) => format!("{model} · {serving}"),
+            None => model,
+        }
+    }
+
+    /// The model and the facts that serve it, as the two spans the facts row
+    /// paints. Splitting them keeps the provider addressable on its own: the
+    /// merged host footer reports each fact separately, so a press lands on
+    /// the model or the provider rather than one run-on label.
+    pub fn facts(&self) -> (String, Option<String>) {
+        let mut serving = Vec::new();
         if let Some(provider) = &self.provider {
-            parts.push(provider.clone());
+            serving.push(provider.clone());
         }
         if let Some(account) = self
             .account
             .as_deref()
             .filter(|account| *account != "default")
         {
-            parts.push(account.to_string());
+            serving.push(account.to_string());
         }
-        parts.push(self.protocol.clone());
+        serving.push(self.protocol.clone());
         if let Some(variant) = &self.variant {
-            parts.push(variant.clone());
+            serving.push(variant.clone());
         }
-        parts.join(" · ")
+        (
+            self.model.clone(),
+            (!serving.is_empty()).then(|| serving.join(" · ")),
+        )
     }
 
     /// Distinct providers the catalog names, in first-appearance order. The
@@ -241,6 +256,17 @@ impl ModelInfo {
 /// which named no provider at all, and left two accounts of one provider
 /// looking like the same choice.
 pub fn session_model(models: &[ModelInfo], pin: &ModelPin) -> String {
+    let (model, serving) = session_model_facts(models, pin);
+    match serving {
+        Some(serving) => format!("{model} · {serving}"),
+        None => model,
+    }
+}
+
+/// The model a Session runs on as the two spans the facts row paints: the
+/// model and the provider tail. The resolution is [`session_model`]'s; only
+/// the labelling differs, so a press on either span still names the route.
+pub fn session_model_facts(models: &[ModelInfo], pin: &ModelPin) -> (String, Option<String>) {
     let known = models.iter().find(|info| {
         let named = match &pin.route_id {
             Some(route_id) => info.route_id.as_deref() == Some(route_id.as_str()),
@@ -256,8 +282,8 @@ pub fn session_model(models: &[ModelInfo], pin: &ModelPin) -> String {
     // selection. Only a route the catalog no longer serves falls back to the
     // raw pin, which is better than naming nothing.
     match known {
-        Some(known) => known.identity(),
-        None => pin.label(),
+        Some(known) => known.facts(),
+        None => (pin.label(), None),
     }
 }
 
