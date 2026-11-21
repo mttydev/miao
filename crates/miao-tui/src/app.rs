@@ -542,6 +542,10 @@ pub struct App {
     /// nothing is working, and the loop may wait for events alone.
     subagent_poll: Option<Instant>,
     dialog: Option<Dialog>,
+    /// The theme in effect when the `/theme` picker opened. Every row the
+    /// cursor lands on is painted at once; Esc puts this one back and Enter
+    /// keeps the picked one.
+    theme_preview: Option<String>,
     permission_generation: u64,
     workspace_changes_generation: u64,
     /// The revert preview in flight and the scope that asked for it. Two
@@ -816,6 +820,7 @@ impl App {
             older: None,
             older_loading: false,
             dialog: None,
+            theme_preview: None,
             permission_generation: 0,
             workspace_changes_generation: 0,
             pending_revert: None,
@@ -2040,6 +2045,12 @@ impl App {
             return;
         };
         let action = dialog.handle_key(key);
+        // A list cursor moving is an answer of its own in the theme picker:
+        // the row under it is what the screen will look like, so paint it
+        // before the key's action (Enter or Esc) decides whether it stays.
+        if matches!(action, DialogAction::None) {
+            self.preview_theme();
+        }
         self.dialog_action(action);
     }
 
@@ -2244,6 +2255,9 @@ impl App {
 
     fn open_theme(&mut self) {
         let current = self.shell.theme().name.clone();
+        // Opening the picker keeps the theme it started from: a preview is
+        // cancellable, so Esc has something to go back to.
+        self.theme_preview = Some(current.clone());
         let lock = crate::state::preferences()
             .theme_mode_lock
             .and_then(|mode| theme::ThemeMode::parse(&mode));
@@ -2470,7 +2484,12 @@ impl App {
                 }
             }
             DialogAction::None => {}
-            DialogAction::Close => self.dialog = None,
+            DialogAction::Close => {
+                if matches!(self.dialog, Some(Dialog::Theme(_))) {
+                    self.restore_theme_preview();
+                }
+                self.dialog = None;
+            }
             DialogAction::Chosen(index) => self.choose(index),
             DialogAction::EditSchedule(entry) => {
                 let (kind, id) = entry
@@ -2767,6 +2786,8 @@ impl App {
                 let Some(row) = list.rows.get(index) else {
                     return;
                 };
+                // A decision is landing: the preview stops being cancellable.
+                self.theme_preview = None;
                 match row.id.as_str() {
                     "mode:dark" => self.set_mode_lock(Some("dark")),
                     "mode:light" => self.set_mode_lock(Some("light")),
@@ -4034,16 +4055,55 @@ impl App {
     }
 
     fn apply_theme(&mut self, name: &str) {
+        self.theme_preview = None;
+        if self.show_theme(name) {
+            state::save_theme(name);
+        }
+    }
+
+    /// Paint one theme without saving it. The picker previews every row it
+    /// moves over; only Enter writes the choice to preferences.
+    fn show_theme(&mut self, name: &str) -> bool {
         let Some(palette) = self.themes.palette(name) else {
-            return;
+            return false;
         };
-        state::save_theme(name);
         let theme = Theme {
             name: name.to_string(),
             palette,
         };
         self.shell.set_theme(theme.clone());
         self.home.set_theme(theme);
+        true
+    }
+
+    /// Follow the theme picker's cursor. A list that only applied on Enter
+    /// made every row a guess; the mode rows swap the catalog rather than a
+    /// palette, so they preview nothing and let Enter handle them.
+    fn preview_theme(&mut self) {
+        let Some(Dialog::Theme(list)) = self.dialog.as_ref() else {
+            return;
+        };
+        let Some(row) = list
+            .visible
+            .get(list.selected)
+            .and_then(|index| list.rows.get(*index))
+        else {
+            return;
+        };
+        let Some(name) = row.id.parse::<usize>().ok().and_then(|index| {
+            let names = self.themes.names();
+            names.get(index).map(|name| (*name).to_string())
+        }) else {
+            return;
+        };
+        self.show_theme(&name);
+    }
+
+    /// Put the theme the picker opened with back on screen without saving it.
+    fn restore_theme_preview(&mut self) {
+        if let Some(name) = self.theme_preview.take() {
+            self.show_theme(&name);
+        }
     }
 
     fn set_mode_lock(&mut self, mode: Option<&str>) {
@@ -11015,6 +11075,99 @@ mod tests {
         app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.dialog.is_none());
         assert_eq!(app.screen, Screen::Session);
+    }
+
+    /// `/theme` previews the row under the cursor: a list that only applied on
+    /// Enter made every row a guess. Esc puts the opened theme back; Enter
+    /// keeps the previewed one and saves it.
+    #[test]
+    fn the_theme_picker_previews_each_row_and_esc_restores_the_opened_theme() {
+        fn position_of(app: &App, name: &str) -> usize {
+            let names: Vec<String> = app
+                .themes
+                .names()
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect();
+            let Some(Dialog::Theme(list)) = app.dialog.as_ref() else {
+                panic!("theme dialog");
+            };
+            let row = list
+                .rows
+                .iter()
+                .position(|row| {
+                    row.id
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| names.get(index))
+                        .is_some_and(|candidate| candidate == name)
+                })
+                .expect("theme row");
+            list.visible
+                .iter()
+                .position(|index| *index == row)
+                .expect("visible theme row")
+        }
+
+        let _env = crate::state::env_lock();
+        let state =
+            std::env::temp_dir().join(format!("miao-tui-theme-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::env::set_var("MIAO_TUI_STATE_DIR", &state);
+
+        let mut app = app();
+        let original = app.shell.theme().name.clone();
+        let target = app
+            .themes
+            .names()
+            .iter()
+            .find(|name| **name != original)
+            .map(|name| (*name).to_string())
+            .expect("another theme is installed");
+
+        app.run_builtin(Builtin::Theme);
+        // Park the cursor one row above the target, then move: movement is
+        // what repaints.
+        let position = position_of(&app, &target);
+        assert!(position > 0, "theme rows sit below the mode rows");
+        if let Some(Dialog::Theme(list)) = app.dialog.as_mut() {
+            list.selected = position - 1;
+        }
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.shell.theme().name,
+            target,
+            "the row previews before Enter"
+        );
+        assert_eq!(
+            crate::state::preferences().theme,
+            None,
+            "a preview is not a saved choice"
+        );
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.shell.theme().name,
+            original,
+            "Esc puts the opened theme back"
+        );
+
+        app.run_builtin(Builtin::Theme);
+        let position = position_of(&app, &target);
+        if let Some(Dialog::Theme(list)) = app.dialog.as_mut() {
+            list.selected = position;
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.shell.theme().name, target);
+        assert_eq!(
+            crate::state::preferences().theme.as_deref(),
+            Some(target.as_str()),
+            "Enter saves the previewed theme"
+        );
+
+        std::env::remove_var("MIAO_TUI_STATE_DIR");
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     #[test]
