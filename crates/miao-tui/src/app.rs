@@ -4917,6 +4917,27 @@ impl App {
         Some(wait.map_or(poll, |wait| wait.min(poll)))
     }
 
+    /// The approval fact, named in the mode it is in. It stays on screen in
+    /// both modes: a label that disappears when its policy flips leaves
+    /// nothing to press that would flip it back.
+    fn approval_hint(&self) -> StatusHint {
+        let auto = self.approval_auto;
+        StatusHint {
+            text: self
+                .shell
+                .lang()
+                .t(if auto {
+                    "status.auto_approve"
+                } else {
+                    "status.approval_manual"
+                })
+                .to_string(),
+            warning: auto,
+            success: false,
+            segment: Some(FooterSegment::ApprovalMode),
+        }
+    }
+
     fn update_status(&mut self) {
         // The composer mirrors the durable queue every frame so the count stays
         // live without the composer owning it.
@@ -4978,14 +4999,7 @@ impl App {
             // The launch policy holds before any Session opens, so the strip
             // names it on the launcher too: a person starting work under
             // `--auto` should not have to open a Session to find that out.
-            if self.approval_auto {
-                self.shell.status.hints.push(StatusHint {
-                    text: lang.t("status.auto_approve").to_string(),
-                    warning: true,
-                    success: false,
-                    segment: Some(FooterSegment::ApprovalMode),
-                });
-            }
+            self.shell.status.hints.push(self.approval_hint());
             self.mtty_state.update(crate::mtty_state::State::Idle);
             return;
         }
@@ -5352,14 +5366,9 @@ impl App {
         // policy in effect, not as the absence of one — the same reason the
         // warning flag exists. Read-only is the other side worth naming: it
         // refuses writes, which surprises anyone who expects a workspace mode.
-        if self.approval_auto {
-            hints.push(StatusHint {
-                text: self.shell.lang().t("status.auto_approve").to_string(),
-                warning: true,
-                success: false,
-                segment: Some(FooterSegment::ApprovalMode),
-            });
-        }
+        // The fact stays when the policy is the default one: it is also the
+        // press that turns auto-approve back on.
+        hints.push(self.approval_hint());
         // A hidden column took its own chord with it. Naming it here is what
         // keeps the key findable after the only thing that advertised it is
         // off the screen.
@@ -8871,12 +8880,20 @@ mod tests {
     fn the_composer_title_names_the_state_instead_of_going_blank() {
         let mut app = session_app();
         app.update_status();
-        assert!(strip_hints(&app).is_empty());
+        assert_eq!(
+            strip_hints(&app),
+            vec!["ask approval"],
+            "the approval fact is the only row item while idle"
+        );
         assert_eq!(app.shell.composer.idle.as_deref(), Some("Idle"));
 
         app.state.active_run = Some("run-1".into());
         app.update_status();
-        assert!(strip_hints(&app).is_empty());
+        assert_eq!(
+            strip_hints(&app),
+            vec!["ask approval"],
+            "the approval fact stays while a run is in flight"
+        );
         assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
         assert_eq!(
             app.shell.composer.phase_action.as_deref(),
@@ -8895,7 +8912,11 @@ mod tests {
             expires_at_ms: None,
         });
         app.update_status();
-        assert!(strip_hints(&app).is_empty());
+        assert_eq!(
+            strip_hints(&app),
+            vec!["ask approval"],
+            "the blocking call is the phase; the strip only names the mode"
+        );
         assert_eq!(
             app.shell.composer.phase.as_deref(),
             Some("needs approval · bash")
@@ -9096,12 +9117,9 @@ mod tests {
             app.shell.title.status(),
             Some("needs approval · bash · Esc interrupt")
         );
-        // The approval is the phase, so the strip carries only the key fact and
-        // never repeats the approval as a second line.
-        assert!(
-            !hints.iter().any(|hint| hint.contains("approval")),
-            "{hints:?}"
-        );
+        // The blocking approval is the phase, so the strip carries only the
+        // approval-mode fact and never repeats the blocking call as a hint.
+        assert_eq!(hints, vec!["ask approval"], "{hints:?}");
         assert_eq!(
             app.shell.composer.phase_action.as_deref(),
             Some("Esc interrupt")
@@ -9112,7 +9130,7 @@ mod tests {
         app.update_status();
         // Idle still names itself where the operator types: the title says
         // "Idle" even when the facts row below carries only the model.
-        assert!(strip_hints(&app).is_empty());
+        assert_eq!(strip_hints(&app), vec!["ask approval"]);
         assert!(app.shell.composer.idle.is_some());
     }
 
@@ -9144,7 +9162,7 @@ mod tests {
     }
 
     #[test]
-    fn a_default_session_carries_no_auto_hint() {
+    fn a_default_session_names_the_manual_approval_it_will_ask_for() {
         let mut app = app_with(Startup {
             session: None,
             continue_last: false,
@@ -9161,7 +9179,18 @@ mod tests {
             .iter()
             .map(|hint| hint.text.as_str())
             .collect();
-        assert!(!hints.contains(&"auto-approve"), "{hints:?}");
+        assert!(
+            hints.contains(&"ask approval"),
+            "the default mode is named, not left blank: {hints:?}"
+        );
+        let approval = app
+            .shell
+            .status
+            .hints
+            .iter()
+            .find(|hint| hint.segment == Some(FooterSegment::ApprovalMode))
+            .expect("the approval fact stays pressable");
+        assert!(!approval.warning, "a default policy is not a warning");
     }
 
     #[test]
@@ -10492,7 +10521,11 @@ mod tests {
         );
         app.handle(opened(Transcript::default(), None));
         assert!(app.tool_running.is_none(), "no tool is still running");
-        assert!(strip_hints(&app).is_empty());
+        assert_eq!(
+            strip_hints(&app),
+            vec!["ask approval"],
+            "the finished tool leaves no running hint"
+        );
         assert!(app.shell.composer.idle.is_some());
         assert_eq!(app.shell.title.status(), Some("Idle"));
     }
@@ -10784,6 +10817,23 @@ mod tests {
                 }
             ),
             "a second press turns the policy back off"
+        );
+        // Turning it off must not remove the fact that turned it on: the same
+        // label is the only way back.
+        app.handle(AppEvent::AutoApproveSet(false));
+        let wire = app.footer_wire().expect("the facts stay on screen");
+        assert!(
+            wire.iter()
+                .any(|seg| seg.id == "approval" && seg.text == "ask approval"),
+            "the approval fact survives its own flip: {wire:?}"
+        );
+        leader(&mut app, 'f');
+        assert!(
+            matches!(
+                requests.try_recv().expect("the flip was asked for"),
+                engine::Request::AutoApprove { auto_approve: true }
+            ),
+            "the surviving fact turns the policy back on"
         );
     }
 
