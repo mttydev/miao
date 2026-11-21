@@ -653,6 +653,19 @@ pub enum Entry {
     /// message, so the snapshot cannot project this: it comes from the
     /// `stop_failure` event and is carried across refreshes like `displays`.
     Error { message: String },
+    /// A drain that was stopped rather than finished. The transcript used to
+    /// end at the last tool output with nothing saying the turn had been cut
+    /// short, which reads as a crash or a hang; this row names the stop and the
+    /// origin the engine recorded for it.
+    Interrupted { by: Option<String> },
+}
+
+/// Why a run was stopped, as far as the engine recorded it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Interrupted {
+    /// The origin the engine wrote with the cancel request: `operator`,
+    /// `take_back`, `shutdown`, … `None` when the journal predates it.
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,6 +696,14 @@ pub struct Transcript {
     /// the screen showed a quiet idle Session and the operator had to guess why
     /// nothing moved, which is the "it stopped and I cannot tell why" report.
     pub paused: Option<(u64, String)>,
+    /// The last run that an interrupt ended, with the sequence that reported
+    /// it. Event-only, like `failure`: `push_interrupted` turns it into a tail
+    /// entry, so it shows while it is the newest thing that happened.
+    pub interrupted: Option<(u64, Interrupted)>,
+    /// Why the newest run was cancelled, from `run.cancel_requested`: the run
+    /// id the request named and the engine's origin (`operator`, `shutdown`,
+    /// `take_back`, …). A local cancel used to leave no trace at all.
+    pub cancel_request: Option<(String, String)>,
 }
 
 impl Transcript {
@@ -982,6 +1003,35 @@ impl Transcript {
             // A later drain that ended any other way supersedes the failure.
             "stop" => self.failure = None,
             "tool.completed" => self.push_display(data),
+            // The engine records who asked for a stop before it cancels the
+            // run. Keeping it keyed by run id means a late request cannot
+            // explain a different run's finish.
+            "run.cancel_requested" => {
+                if let (Some(run), Some(reason)) = (
+                    data.get("run_id").and_then(Value::as_str),
+                    data.get("reason").and_then(Value::as_str),
+                ) {
+                    self.cancel_request = Some((run.to_string(), reason.to_string()));
+                    // On a contended store the finish can be written before the
+                    // origin that explains it. The interruption is still the
+                    // same run, so name it now that the origin arrived instead
+                    // of leaving a generic row behind.
+                    if let Some((_, interruption)) = self.interrupted.as_mut() {
+                        if interruption.by.is_none() {
+                            interruption.by = Some(reason.to_string());
+                        }
+                    }
+                }
+            }
+            "run.finished" if interrupted(data) => {
+                let run = data.get("run_id").and_then(Value::as_str);
+                let by = self
+                    .cancel_request
+                    .as_ref()
+                    .filter(|(id, _)| run.is_none_or(|run| id == run))
+                    .map(|(_, reason)| reason.clone());
+                self.interrupted = Some((seq, Interrupted { by }));
+            }
             // A classified stop is a status fact, not a message: the engine
             // already persists the full notice as an injected-context message,
             // so this only records what the loop is waiting on. It is painted
@@ -998,7 +1048,22 @@ impl Transcript {
             }
             // The state ended: the loop re-armed itself, or the next drain
             // started. The engine's own notice stays in the history.
-            "loop.continuation" | "loop.armed" | "run.started" => self.clear_pause(),
+            "loop.continuation" | "loop.armed" => self.clear_pause(),
+            // A newer run means the last stop no longer describes what the
+            // screen is doing; the row it painted belongs to the turn before.
+            "run.started" => {
+                self.clear_pause();
+                if self.interrupted.as_ref().is_some_and(|(at, _)| *at < seq) {
+                    self.interrupted = None;
+                }
+            }
+            // A message committed after the stop means the operator (or the
+            // engine) moved past that turn; its notice no longer describes the
+            // tail. The row is dropped for the same reason `push_failure`
+            // stops painting a failure once history continues.
+            "message.committed" if self.interrupted.as_ref().is_some_and(|(at, _)| *at < seq) => {
+                self.interrupted = None;
+            }
             _ => {}
         }
     }
@@ -1029,6 +1094,25 @@ impl Transcript {
             return;
         }
         self.entries.push(Entry::Error { message });
+    }
+
+    /// Append the interruption once the snapshot and the replayed events are
+    /// folded in. Like the failure row it belongs to the transcript only while
+    /// it is the tail: a message committed after it means the operator already
+    /// moved past that turn.
+    pub fn push_interrupted(&mut self) {
+        let Some((seq, interruption)) = self.interrupted.clone() else {
+            return;
+        };
+        if seq <= self.tail_seq {
+            return;
+        }
+        if matches!(self.entries.last(), Some(Entry::Interrupted { .. })) {
+            return;
+        }
+        self.entries.push(Entry::Interrupted {
+            by: interruption.by,
+        });
     }
 
     fn push_display(&mut self, data: &Value) {
@@ -1095,6 +1179,11 @@ pub fn epilogue(session: &SessionSummary) -> String {
 /// one must not render an empty block.
 fn failure_of(seq: u64, data: &Value) -> Option<(u64, String)> {
     Some((seq, text(data.get("message"))?))
+}
+
+/// Whether this `run.finished`/`stop` ended because the run was interrupted.
+fn interrupted(data: &Value) -> bool {
+    data.get("reason").and_then(Value::as_str) == Some("interrupted")
 }
 
 #[cfg(test)]
@@ -1865,6 +1954,96 @@ mod tests {
                 message: "provider unavailable".into()
             })
         );
+    }
+
+    #[test]
+    fn an_interrupted_run_reaches_the_transcript_with_its_origin() {
+        let mut transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "messages": [{ "seq": 4, "role": "user", "content": "hello" }]
+        }));
+        transcript.apply_event(9, "run.started", &json!({ "run_id": "run-1" }));
+        transcript.apply_event(
+            10,
+            "run.cancel_requested",
+            &json!({ "run_id": "run-1", "reason": "operator" }),
+        );
+        transcript.apply_event(
+            11,
+            "run.finished",
+            &json!({ "run_id": "run-1", "reason": "interrupted" }),
+        );
+        transcript.apply_event(
+            12,
+            "stop",
+            &json!({ "run_id": "run-1", "reason": "interrupted" }),
+        );
+        transcript.push_interrupted();
+        assert_eq!(
+            transcript.entries.last(),
+            Some(&Entry::Interrupted {
+                by: Some("operator".into())
+            })
+        );
+
+        // The run boundary is what stops a turn; `stop` is the lifecycle hook
+        // that shadows it, not a second interruption.
+        assert_eq!(transcript.interrupted.as_ref().map(|(at, _)| *at), Some(11));
+        // The next run is not explained by the old stop.
+        transcript.apply_event(20, "run.started", &json!({ "run_id": "run-2" }));
+        assert!(transcript.interrupted.is_none());
+    }
+
+    #[test]
+    fn a_late_origin_still_names_the_interruption_it_explains() {
+        let mut transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "messages": [{ "seq": 4, "role": "user", "content": "hello" }]
+        }));
+        // A contended store can serialize the finish before the origin write,
+        // so the row has to become specific when the request lands late.
+        transcript.apply_event(
+            9,
+            "run.finished",
+            &json!({ "run_id": "run-1", "reason": "interrupted" }),
+        );
+        assert_eq!(transcript.interrupted, Some((9, Interrupted { by: None })));
+        transcript.apply_event(
+            10,
+            "run.cancel_requested",
+            &json!({ "run_id": "run-1", "reason": "shutdown" }),
+        );
+        assert_eq!(
+            transcript.interrupted,
+            Some((
+                9,
+                Interrupted {
+                    by: Some("shutdown".into())
+                }
+            ))
+        );
+        transcript.push_interrupted();
+        assert_eq!(
+            transcript.entries.last(),
+            Some(&Entry::Interrupted {
+                by: Some("shutdown".into())
+            })
+        );
+    }
+
+    #[test]
+    fn an_interrupted_run_does_not_trail_history_the_operator_moved_past() {
+        let mut transcript = Transcript::from_snapshot(&json!({
+            "session_id": "ses_a",
+            "messages": [{ "seq": 4, "role": "user", "content": "hello" }]
+        }));
+        transcript.apply_event(
+            9,
+            "stop",
+            &json!({ "run_id": "run-1", "reason": "interrupted" }),
+        );
+        transcript.apply_event(10, "message.committed", &json!({}));
+        assert!(transcript.interrupted.is_none());
     }
 
     /// Context the engine injected reaches the provider as a user message, so

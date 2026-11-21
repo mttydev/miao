@@ -427,6 +427,7 @@ impl Shell {
                 }
                 Entry::User { .. }
                 | Entry::Error { .. }
+                | Entry::Interrupted { .. }
                 | Entry::Context { .. }
                 | Entry::Compacted { .. } => None,
             })?;
@@ -2498,6 +2499,18 @@ fn transcript_lines(
                     ])));
                 }
             }
+            Entry::Interrupted { by } => {
+                inline_run = false;
+                rows.push(Row::plain(Line::default()));
+                rows.push(Row::plain(Line::from(vec![
+                    Span::styled("⏹ ", Style::new().fg(palette.warning)),
+                    Span::styled("Interrupted", Style::new().fg(palette.warning)),
+                    Span::styled(
+                        format!(" · {}", interrupt_reason(by.as_deref())),
+                        Style::new().fg(palette.text_muted),
+                    ),
+                ])));
+            }
         }
     }
     if rows.len() <= 1 {
@@ -2507,6 +2520,24 @@ fn transcript_lines(
         ))));
     }
     Projected { rows, anchors }
+}
+
+/// The sentence an interruption row adds after its marker.
+///
+/// Keyed by the origin the engine wrote with the cancel request. An origin this
+/// build does not know is shown as the engine wrote it rather than hidden
+/// behind a generic word: the whole point of the row is that the operator can
+/// tell why the turn stopped.
+fn interrupt_reason(by: Option<&str>) -> String {
+    let why = match by {
+        Some("operator") => "stopped by the operator (Esc)".to_string(),
+        Some("take_back") => "stopped while taking back a queued message".to_string(),
+        Some("shutdown") => "stopped because miao was shutting down".to_string(),
+        Some("session_closed") => "stopped because the Session was closed".to_string(),
+        Some(other) => format!("stopped ({other})"),
+        None => "stopped before it finished".to_string(),
+    };
+    format!("{why}. Nothing is running now; send a message to continue.")
 }
 
 /// Capitalize each word like the TS `Locale.titlecase` the footer and live
@@ -8385,6 +8416,32 @@ mod tests {
         let lines = transcript_lines(&transcript, &theme, false, None).rows;
         assert_eq!(row_text(&lines[2]), "✗ provider unavailable");
         assert_eq!(lines[2].line.spans[0].style.fg, Some(theme.palette.error));
+    }
+
+    #[test]
+    fn an_interrupted_turn_says_so_and_names_its_origin() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let transcript = Transcript {
+            entries: vec![Entry::Interrupted {
+                by: Some("operator".into()),
+            }],
+            ..Transcript::default()
+        };
+        let lines = transcript_lines(&transcript, &theme, false, None).rows;
+        assert_eq!(
+            row_text(&lines[2]),
+            "⏹ Interrupted · stopped by the operator (Esc). Nothing is running now; send a message to continue."
+        );
+        assert_eq!(lines[2].line.spans[0].style.fg, Some(theme.palette.warning));
+        // An origin this build has not learned yet is printed as recorded.
+        assert!(interrupt_reason(Some("remote")).contains("remote"));
+        assert!(interrupt_reason(None).contains("send a message to continue"));
     }
 
     #[test]

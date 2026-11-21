@@ -5311,9 +5311,16 @@ impl App {
                 ],
             )),
         };
+        // A stopped turn is not a quiet Session: the host badges it as
+        // incomplete instead of the empty ring that reads as never having run.
+        let interrupted = self
+            .shell
+            .transcript()
+            .is_some_and(|transcript| transcript.interrupted.is_some());
         self.mtty_state.update(crate::mtty_state::State::of(
             blocking.is_some(),
             self.state.active_run.is_some(),
+            interrupted,
         ));
         let phase_needs_operator = blocking.is_some();
         // Time the run from the moment it was first seen active, so a run that
@@ -5465,6 +5472,11 @@ impl App {
             .transcript()
             .and_then(|transcript| transcript.paused.as_ref())
             .map(|(_, reason)| lang.tf("status.paused", &[reason]));
+        let stopped = self
+            .shell
+            .transcript()
+            .is_some_and(|transcript| transcript.interrupted.is_some())
+            .then(|| lang.t("status.interrupted").to_string());
         // A pause on background work supersedes both: the run it follows is
         // over, and "paused: waiting" is the one word that says least while the
         // operator is looking at a job that has been running for ten minutes.
@@ -5479,7 +5491,7 @@ impl App {
                     &[&crate::pane::duration_ms(worked.as_millis() as u64)],
                 )
             });
-            Some(match (waiting, worked, pause) {
+            Some(match (waiting, worked, pause.or(stopped)) {
                 (Some(waiting), _, _) => waiting,
                 (None, Some(worked), Some(pause)) => format!("{worked} · {pause}"),
                 (None, Some(worked), None) => worked,

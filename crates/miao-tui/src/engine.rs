@@ -2876,6 +2876,7 @@ async fn project(client: &EngineClient, bus: &Bus, state: &mut Opened, initial: 
     state.displays = transcript.displays.clone();
     state.failure = transcript.failure.clone();
     transcript.push_failure();
+    transcript.push_interrupted();
     let cursor = snapshot.get("cursor").and_then(Value::as_u64).unwrap_or(0);
     state.live_after = cursor.max(state.live_after);
     let _ = client.subscribe(&state.id, cursor).await;

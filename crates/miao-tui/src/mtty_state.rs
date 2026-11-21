@@ -19,6 +19,10 @@ pub enum State {
     Idle,
     Processing,
     Awaiting,
+    /// No run is active, but the newest one was stopped rather than finished.
+    /// mtty draws it as a paused badge, so a cancelled turn is no longer
+    /// indistinguishable from a Session that was never working.
+    Incomplete,
 }
 
 impl State {
@@ -27,15 +31,17 @@ impl State {
             State::Idle => "idle",
             State::Processing => "processing",
             State::Awaiting => "awaiting",
+            State::Incomplete => "incomplete",
         }
     }
 
     /// What a Session's run looks like from outside: a blocking approval or
     /// question outranks a running turn, and no turn at all is idle.
-    pub fn of(blocking: bool, running: bool) -> Self {
+    pub fn of(blocking: bool, running: bool, interrupted: bool) -> Self {
         match (blocking, running) {
             (true, _) => State::Awaiting,
             (false, true) => State::Processing,
+            (false, false) if interrupted => State::Incomplete,
             (false, false) => State::Idle,
         }
     }
@@ -296,13 +302,17 @@ mod tests {
     #[test]
     fn state_follows_the_blocking_and_run_signals() {
         assert_eq!(
-            State::of(true, true),
+            State::of(true, true, false),
             State::Awaiting,
             "a question outranks a run"
         );
-        assert_eq!(State::of(true, false), State::Awaiting);
-        assert_eq!(State::of(false, true), State::Processing);
-        assert_eq!(State::of(false, false), State::Idle);
+        assert_eq!(State::of(true, false, false), State::Awaiting);
+        assert_eq!(State::of(false, true, false), State::Processing);
+        assert_eq!(State::of(false, false, false), State::Idle);
+        // A stopped turn is not an idle Session: the host paints a paused badge
+        // instead of the empty ring that reads as "nothing happened here".
+        assert_eq!(State::of(false, false, true), State::Incomplete);
+        assert_eq!(State::Incomplete.name(), "incomplete");
         assert_eq!(State::Awaiting.name(), "awaiting");
     }
 
