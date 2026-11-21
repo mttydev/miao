@@ -253,10 +253,22 @@ impl Shell {
         // a longer loaded history here shortened the transcript and clamped the
         // viewport to the window's end — the newest rows. Hold the projection
         // until the reader returns to the tail.
-        if !self.transcript.follow {
+        //
+        // A projection that only appends to the loaded entries is not that: it
+        // drops no page and puts its rows below the reader. Holding it was how
+        // a just-finished answer vanished from a viewport still covering its
+        // rows — the commit clears the streamed draft first, so the words were
+        // gone from both the draft and the painted transcript until End.
+        let only_appends = self
+            .last
+            .as_ref()
+            .is_some_and(|last| Self::appends_to_loaded(last, transcript));
+        if !self.transcript.follow && !only_appends {
             self.pending_transcript = Some(transcript.clone());
             return;
         }
+        // This projection is newer than anything held, so it supersedes it.
+        self.pending_transcript = None;
         self.apply_transcript(transcript);
     }
 
@@ -270,9 +282,21 @@ impl Shell {
         );
         self.transcript.set_rows(projected.rows);
         self.transcript.user_anchors = projected.anchors;
-        let max = self.transcript.max_scroll();
-        self.transcript.scroll = self.transcript.scroll.min(max);
+        // The scroll offset is clamped by the next paint, against the rows it
+        // wrapped. `max_scroll` reads `body`, which still holds the previous
+        // frame's rows here: clamping with it shrank a detached reader's offset
+        // by the rows an appended projection had not wrapped yet, jumping the
+        // viewport back above the answer that had just arrived.
         self.last = Some(transcript.clone());
+    }
+
+    /// Whether `incoming` keeps every entry already loaded and only adds to
+    /// them: the one projection a detached reader can take without losing a
+    /// page they paged in. The engine's window slides above what is loaded,
+    /// so anything that does not start with those entries stays held.
+    fn appends_to_loaded(loaded: &Transcript, incoming: &Transcript) -> bool {
+        incoming.entries.len() >= loaded.entries.len()
+            && incoming.entries[..loaded.entries.len()] == loaded.entries[..]
     }
 
     /// Whether the oldest row is on screen, so scrolling further back has
@@ -1104,6 +1128,11 @@ impl Pane for TranscriptPane {
         let rows = draft_end;
         if self.follow {
             self.scroll = rows.saturating_sub(viewport) as u16;
+        } else {
+            // A detached reader keeps their offset across a projection that
+            // only grew the transcript; a shorter one still has to settle on
+            // the last full viewport instead of a window running past the end.
+            self.scroll = self.scroll.min(rows.saturating_sub(viewport) as u16);
         }
         let start = (self.scroll as usize).min(rows.saturating_sub(1));
         let mut visible = (start..rows)
@@ -7847,6 +7876,85 @@ mod tests {
             "{:?}",
             text(&terminal)
         );
+    }
+
+    /// A finished answer must not disappear under a reader who is in history.
+    /// The commit clears the streamed draft, and the projection that carries
+    /// the same words used to be held until the reader pressed End: a
+    /// transcript whose tail the viewport still covered went blank where the
+    /// answer had just streamed. A projection that only appends to the loaded
+    /// entries drops no page, so it paints in place.
+    #[test]
+    fn a_committed_answer_keeps_painting_while_the_reader_is_in_history() {
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), home_theme());
+        let opening = Transcript {
+            entries: vec![
+                Entry::User {
+                    text: "question".into(),
+                    seq: 1,
+                },
+                Entry::Assistant {
+                    agent: None,
+                    model: None,
+                    parts: vec![Part::Text("answer. ".repeat(40).trim_end().into())],
+                },
+            ],
+            ..Transcript::default()
+        };
+        shell.set_transcript(&opening);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        // The answer streams into the tail, and the operator wheels back a
+        // notch while it is still provisional.
+        let answer = "the committed answer ".repeat(8).trim_end().to_string();
+        shell.set_draft(&[DraftPart::Text(answer.clone())]);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        assert!(
+            painted_rows(&terminal)
+                .iter()
+                .any(|row| row.contains("the committed answer")),
+            "the streamed draft is on screen: {:?}",
+            painted_rows(&terminal)
+        );
+        shell.scroll_transcript(-3);
+        assert!(!shell.following(), "the wheel detaches");
+        // The message commits: the draft is cleared first, then the projection
+        // carrying the same words as an entry arrives.
+        shell.set_draft(&[]);
+        let mut committed = opening.clone();
+        committed.entries.push(Entry::Assistant {
+            agent: None,
+            model: None,
+            parts: vec![Part::Text(answer)],
+        });
+        shell.set_transcript(&committed);
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let painted = painted_rows(&terminal);
+        assert!(
+            painted
+                .iter()
+                .any(|row| row.contains("the committed answer")),
+            "the finished answer vanished from the transcript: {painted:?}"
+        );
+    }
+
+    fn painted_rows(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
+        let area = terminal.backend().buffer().area;
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell(ratatui::prelude::Position::new(x, y))
+                            .map(|cell| cell.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect()
     }
 
     /// The in-flight call's row never passes the wrapper that clips completed
