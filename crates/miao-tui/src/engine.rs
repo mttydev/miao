@@ -1298,7 +1298,7 @@ async fn run(
                 Request::Refresh => {
                     dirty = None;
                     if let Some(state) = open.as_mut() {
-                        project(client, &bus, state).await;
+                        project(client, &bus, state, false).await;
                     }
                 }
                 Request::Open(session_id) => {
@@ -2201,7 +2201,7 @@ async fn run(
                 dirty = None;
                 if let Some(state) = open.as_mut() {
                     if let Ok(client) = connection.connect().await {
-                        project(client, &bus, state).await;
+                        project(client, &bus, state, false).await;
                     }
                 }
             }
@@ -2213,7 +2213,7 @@ async fn run(
                 resync_backoff = (resync_backoff * 2).min(RESYNC_CEILING);
                 if let Some(state) = open.as_mut() {
                     if let Ok(client) = connection.connect().await {
-                        project(client, &bus, state).await;
+                        project(client, &bus, state, false).await;
                         bus.send(AppEvent::Notice(
                             "engine frames went quiet · recovered state from the journal".into(),
                         ));
@@ -2666,7 +2666,7 @@ async fn reload_provider_routes(connection: &mut Connection, bus: &Bus, open: &m
     }
     refresh_sessions(client, bus).await;
     if let Some(state) = open.as_mut() {
-        project(client, bus, state).await;
+        project(client, bus, state, false).await;
     }
 }
 
@@ -2729,7 +2729,7 @@ async fn open_session(
         displays: HashMap::new(),
         failure: None,
     };
-    project(client, bus, &mut state).await;
+    project(client, bus, &mut state, true).await;
     *open = Some(state);
 }
 
@@ -2738,12 +2738,12 @@ async fn open_session(
 /// messages, and the journal is replayed only across that page. Opening a
 /// long Session therefore costs the screenful it shows instead of its whole
 /// history; older pages arrive through `Request::LoadOlder`.
-async fn project(client: &EngineClient, bus: &Bus, state: &mut Opened) {
+async fn project(client: &EngineClient, bus: &Bus, state: &mut Opened, initial: bool) {
     let started = Instant::now();
     let snapshot = match client.snapshot_metadata(&state.id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            bus.send(AppEvent::EngineFailure(error.to_string()));
+            bus.send(projection_failure(&error, initial));
             return;
         }
     };
@@ -2753,7 +2753,7 @@ async fn project(client: &EngineClient, bus: &Bus, state: &mut Opened) {
     {
         Ok(window) => window,
         Err(error) => {
-            bus.send(AppEvent::EngineFailure(error.to_string()));
+            bus.send(projection_failure(&error, initial));
             return;
         }
     };
@@ -2833,6 +2833,18 @@ async fn project(client: &EngineClient, bus: &Bus, state: &mut Opened) {
             elapsed.as_millis()
         )));
     }
+}
+
+/// A read that timed out is not a dead engine. A refresh keeps the projection
+/// already on screen; only the first projection of a Session has nothing to
+/// show and has to report the failure.
+fn projection_failure(error: &transport::TransportError, initial: bool) -> AppEvent {
+    if !initial && matches!(error, transport::TransportError::Timeout { .. }) {
+        return AppEvent::Notice(format!(
+            "state refresh timed out · showing the last projection ({error})"
+        ));
+    }
+    AppEvent::EngineFailure(error.to_string())
 }
 
 /// An event the user should hear about if attention is enabled. Approval and
@@ -3290,5 +3302,37 @@ mod schedule_tests {
         );
         assert_eq!(rows[0].0, "wakeup:t1");
         assert_eq!(rows[0].2, "in 1m · Europe/Berlin");
+    }
+
+    /// A read that timed out is not a dead engine. Treating it as one replaced
+    /// a scrolled transcript with the failure line, losing the history the
+    /// operator was reading; a refresh now keeps the last projection.
+    #[test]
+    fn a_timed_out_refresh_keeps_the_last_projection() {
+        let timeout = transport::TransportError::Timeout {
+            method: "snapshot".into(),
+            millis: 60_000,
+        };
+        match projection_failure(&timeout, false) {
+            AppEvent::Notice(message) => {
+                assert!(message.contains("last projection"), "{message}");
+            }
+            _ => panic!("a refresh timeout must not end the transport"),
+        }
+        // The first projection of a Session has nothing to keep, so it still
+        // reports the failure instead of showing an empty pane.
+        assert!(matches!(
+            projection_failure(&timeout, true),
+            AppEvent::EngineFailure(_)
+        ));
+        // A closed transport really is terminal and must stay one.
+        let closed = transport::TransportError::Closed(transport::EngineFailure {
+            code: "engine_closed".into(),
+            message: "gone".into(),
+        });
+        assert!(matches!(
+            projection_failure(&closed, false),
+            AppEvent::EngineFailure(_)
+        ));
     }
 }
