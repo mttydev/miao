@@ -2657,6 +2657,12 @@ pub struct FooterWireSeg {
     /// works no matter which surface the facts render on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chord: Option<String>,
+    /// How the fact is painted, in the host's palette: the strip's own tone
+    /// (`accent` for the model, `muted` for the provider, `warning` for a
+    /// blocking approval). A host that predates the field ignores it and
+    /// falls back to its own text colour, so the wire stays compatible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tone: Option<&'static str>,
 }
 
 /// What a hint reads like painted: a warning keeps its glyph, so the host's
@@ -2686,6 +2692,12 @@ fn wire_from_status(status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
             start: 0,
             end: 0,
             chord: None,
+            // The strip paints a blocking approval in the warning tone and a
+            // settled policy muted; the merged row keeps that distinction.
+            tone: Some(match hint.warning {
+                true => "warning",
+                false => "muted",
+            }),
         })
         .collect();
     if let Some(model) = &status.model {
@@ -2696,6 +2708,8 @@ fn wire_from_status(status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
             start: 0,
             end: 0,
             chord: None,
+            // The model the window runs on is the strip's accent fact.
+            tone: Some("accent"),
         });
     }
     if let Some(provider) = &status.provider {
@@ -2706,6 +2720,7 @@ fn wire_from_status(status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
             start: 0,
             end: 0,
             chord: None,
+            tone: Some("muted"),
         });
     }
     (!segs.is_empty()).then_some(segs)
