@@ -111,9 +111,9 @@ impl Store {
             if run.is_none() && tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_run WHERE session_id=?1 AND state='running')",[&session],|r|r.get::<_,bool>(0))? {return Err(Error::Invalid("compaction requires an idle Session".into()));}
             let role:Option<String>=tx.query_row("SELECT role FROM engine_message WHERE session_id=?1 AND seq=?2",params![session,through],|r|r.get(0)).optional()?;
             if role.as_deref()!=Some("assistant"){return Err(Error::Invalid("compaction needs an assistant message boundary".into()));}
-            let mut pending=std::collections::HashSet::new();let mut last=None;
+            let mut pending=std::collections::HashSet::new();let mut settled=std::collections::HashSet::new();let mut last=None;
             {let mut stmt=tx.prepare("SELECT content FROM engine_message WHERE session_id=?1 AND seq<=?2 ORDER BY seq")?;let mut rows=stmt.query(params![session,through])?;
-                while let Some(row)=rows.next()?{let content:Value=serde_json::from_str(&row.get::<_,String>(0)?)?;track_tools(&mut pending,&content)?;last=Some(content);}
+                while let Some(row)=rows.next()?{let content:Value=serde_json::from_str(&row.get::<_,String>(0)?)?;track_tools(&mut pending,&mut settled,&content)?;last=Some(content);}
             }
             if !pending.is_empty()||!last.is_some_and(|content|content.as_array().is_some_and(|parts|parts.iter().any(|p|p["type"]=="text"&&p["text"].as_str().is_some_and(|s|!s.is_empty())))){return Err(Error::Invalid("compaction cannot cut a tool continuation".into()));}
             let previous:Option<u64>=tx.query_row("SELECT through_seq FROM engine_compaction WHERE session_id=?1 ORDER BY created_seq DESC LIMIT 1",[&session],|r|r.get(0)).optional()?;

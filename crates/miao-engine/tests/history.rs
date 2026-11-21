@@ -370,3 +370,65 @@ async fn snapshot_captures_visibility_and_compaction_selection_together() {
     assert!(reverted["selection"].is_null());
     assert!(reverted["messages"].as_array().unwrap().is_empty());
 }
+
+/// A history that already carries the same answer twice — the shape older
+/// builds left behind when a stopped turn and its run reconciliation both
+/// settled one call — must still compact. The repeat is redundant, not an
+/// orphan, and refusing the cut left the Session growing to its wall.
+#[tokio::test]
+async fn a_repeated_result_for_a_settled_call_does_not_block_the_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store
+        .admit(Input {
+            agent_references: Default::default(),
+            command: None,
+            session_id: "s".into(),
+            input_id: "one".into(),
+            prompt: "run the tests".into(),
+            delivery: Delivery::Steer,
+        })
+        .await
+        .unwrap();
+    store.promote("s", true).await.unwrap();
+    store
+        .message(
+            "s",
+            "assistant",
+            json!([
+                {"type":"text","text":"dispatching"},
+                {"type":"tool_use","id":"call","name":"bash","input":{}}
+            ]),
+        )
+        .await
+        .unwrap();
+    for reason in ["stopped before it ran", "stopped before dispatch"] {
+        store
+            .message(
+                "s",
+                "user",
+                json!([{"type":"tool_result","tool_use_id":"call","content":reason,"is_error":true}]),
+            )
+            .await
+            .unwrap();
+    }
+    let boundary = store
+        .message("s", "assistant", json!([{"type":"text","text":"done"}]))
+        .await
+        .unwrap()
+        .seq;
+    store
+        .compact("s", "cut", boundary, "The tests are still pending.".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .events("s", 0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == "history.compacted")
+            .count(),
+        1
+    );
+}
