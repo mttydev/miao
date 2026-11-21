@@ -80,6 +80,36 @@ const SUBAGENT_POLL: Duration = Duration::from_secs(2);
 /// How often a running turn looks for a delegation it has not seen yet. A turn
 /// that never delegates must not cost a read every couple of seconds.
 const SUBAGENT_DISCOVER: Duration = Duration::from_secs(10);
+/// How often a Session that is waiting on background work re-reads it. The
+/// waiting line's clock changes on the second, so this is as fast as the line
+/// can visibly move, and it only runs while a job does.
+const JOB_POLL: Duration = Duration::from_secs(1);
+
+/// Whether a job row is finished with, as the engine spells its states. A row
+/// that has settled stops the clock: nothing about it will change again.
+fn job_finished(state: &str) -> bool {
+    matches!(
+        state,
+        "completed" | "failed" | "cancelled" | "interrupted" | "unknown"
+    )
+}
+
+/// One line of a job's command, short enough to sit in a composer title.
+///
+/// The command is what tells a reader *which* of their jobs this is, so it is
+/// worth its space — but only its own line: a heredoc body would eat the
+/// countdown that follows it.
+fn command_excerpt(command: &str) -> Option<String> {
+    let joined = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.is_empty() {
+        return None;
+    }
+    let mut excerpt = joined.chars().take(60).collect::<String>();
+    if joined.chars().count() > 60 {
+        excerpt.push('…');
+    }
+    Some(excerpt)
+}
 
 /// Whether the sidebar's usage report is worth asking for.
 fn usage_due(force: bool, last_requested: Option<Instant>) -> bool {
@@ -541,6 +571,19 @@ pub struct App {
     /// When the next child read is due. `None` means nothing is delegated or
     /// nothing is working, and the loop may wait for events alone.
     subagent_poll: Option<Instant>,
+    /// The open Session's background jobs as the engine last reported them.
+    ///
+    /// A Session paused on background work used to show one frozen sentence
+    /// and no way to tell a long build from a wedged one. These rows are the
+    /// live half of that: what is running, for how long, and what it last said.
+    jobs: Vec<crate::event::JobRow>,
+    /// When the next job read is due. `None` means nothing is paused on a job
+    /// and nothing is running, so there is no clock to advance.
+    job_poll: Option<Instant>,
+    /// The pause whose job read has already been started. A pause carries the
+    /// sequence it was reported at, so a new pause starts a new cycle without
+    /// the rows of the previous one having to be cleared first.
+    job_poll_pause: Option<u64>,
     dialog: Option<Dialog>,
     /// The theme in effect when the `/theme` picker opened. Every row the
     /// cursor lands on is painted at once; Esc puts this one back and Enter
@@ -817,6 +860,9 @@ impl App {
             pending_update: None,
             subagents: Vec::new(),
             subagent_poll: None,
+            jobs: Vec::new(),
+            job_poll: None,
+            job_poll_pause: None,
             older: None,
             older_loading: false,
             dialog: None,
@@ -1393,6 +1439,13 @@ impl App {
             // than on a placeholder that never fills.
             AppEvent::Jobs(rows) => {
                 self.open_dialog(Dialog::jobs(&rows));
+            }
+            // The waiting line's read. It never opens anything: it exists so a
+            // Session paused on a job can show the job moving, and it keeps the
+            // next read scheduled only while one is actually running.
+            AppEvent::JobStatus(rows) => {
+                self.jobs = rows;
+                self.schedule_job_poll();
             }
             // The child list is read for the sidebar rather than for a dialog:
             // it stays on screen while the delegation runs, and re-reads
@@ -4897,6 +4950,36 @@ impl App {
         if self.screen != Screen::Session {
             return;
         }
+        self.poll_subagents();
+        self.start_job_poll_on_pause();
+        self.poll_jobs();
+    }
+
+    /// Start the job clock when a pause on background work is what put the
+    /// Session here.
+    ///
+    /// Nothing else on an idle Session knows a job exists: the pause is the
+    /// only signal, so the first read is keyed on the pause's own sequence and
+    /// the rows take over from there. A resumed Session drops both.
+    fn start_job_poll_on_pause(&mut self) {
+        let pause = self
+            .shell
+            .transcript()
+            .and_then(|transcript| transcript.paused.clone());
+        let Some((seq, _)) = pause.filter(|(_, reason)| reason.starts_with("waiting")) else {
+            self.job_poll_pause = None;
+            self.job_poll = None;
+            return;
+        };
+        if self.job_poll_pause == Some(seq) {
+            return;
+        }
+        self.job_poll_pause = Some(seq);
+        self.job_poll = Some(Instant::now());
+    }
+
+    /// One read of the delegated children, when one is due.
+    fn poll_subagents(&mut self) {
         let working = self.subagents.iter().any(|row| row.busy);
         let interval = match working {
             true => SUBAGENT_POLL,
@@ -4917,6 +5000,25 @@ impl App {
         self.subagent_poll = Some(Instant::now() + interval);
     }
 
+    /// One read of the Session's background jobs, when one is due.
+    ///
+    /// This is the read behind the waiting line, so it is driven by the same
+    /// question the operator asks: is the thing I am waiting on still moving?
+    fn poll_jobs(&mut self) {
+        let due = self.job_poll.is_some_and(|at| Instant::now() >= at);
+        if !due {
+            return;
+        }
+        let Some(session_id) = self.session_id() else {
+            return;
+        };
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        engine.job_status(&session_id);
+        self.job_poll = Some(Instant::now() + JOB_POLL);
+    }
+
     /// The next read, decided by what the last answer showed: a working child
     /// keeps the block on the fast interval, and a turn that delegated nothing
     /// yet keeps looking at the slow one.
@@ -4932,6 +5034,100 @@ impl App {
             ),
             false => None,
         };
+    }
+
+    /// The next job read, decided by what the last answer showed. The clock
+    /// stops the moment nothing is running: an idle Session asks the engine
+    /// nothing at all, and a paused one asks once a second because that is what
+    /// makes its wait visible.
+    fn schedule_job_poll(&mut self) {
+        self.job_poll = match self.watching_jobs() {
+            true => Some(Instant::now() + JOB_POLL),
+            false => None,
+        };
+    }
+
+    /// Whether anything is worth asking about.
+    ///
+    /// A running job keeps its own clock alive. A paused wait on one is the
+    /// other half, and it has to be here: the pause is what the first poll
+    /// discovers the job from, so requiring a known job would stop the line
+    /// before it ever started.
+    fn watching_jobs(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|row| !row.subagent && !job_finished(&row.state))
+            || (self.jobs.is_empty() && self.paused_on_jobs())
+    }
+
+    /// The pause the engine raised because background work is still running.
+    fn paused_on_jobs(&self) -> bool {
+        self.shell
+            .transcript()
+            .and_then(|transcript| transcript.paused.as_ref())
+            .is_some_and(|(_, reason)| reason.starts_with("waiting"))
+    }
+
+    /// What a Session paused on background work says beside its input.
+    ///
+    /// The engine's pause names a count, which is the whole decision for the
+    /// loop but says nothing to someone watching a job: what is it doing, how
+    /// long has it been at it, and is it still moving? This answers those with
+    /// the row the engine already serves — the command, its start, the estimate
+    /// its caller declared, and when it last printed — so a twenty-minute build
+    /// reads as a countdown instead of a Session that stopped.
+    fn waiting_line(&self) -> Option<String> {
+        if self.state.active_run.is_some() {
+            return None;
+        }
+        let running = self
+            .jobs
+            .iter()
+            .filter(|row| !row.subagent && !job_finished(&row.state))
+            .collect::<Vec<_>>();
+        let (job, count) = (running.first()?, running.len());
+        let lang = self.shell.lang();
+        let now = crate::pane::now_ms();
+        let elapsed = job.started_at_ms.map(|started| now.saturating_sub(started));
+        let mut parts = vec![match count {
+            1 => lang.t("status.waiting_job").to_string(),
+            count => lang.tf("status.waiting_jobs", &[&count.to_string()]),
+        }];
+        // The clock leads: it is the part that answers "is this stuck?" at a
+        // glance, and it is the part a narrow terminal must not clip away.
+        if let Some(elapsed) = elapsed {
+            parts.push(lang.tf(
+                "status.waiting_elapsed",
+                &[&crate::pane::duration_ms(elapsed)],
+            ));
+        }
+        match (job.eta_ms, elapsed) {
+            (Some(eta), elapsed) => {
+                parts.push(match elapsed.and_then(|ran| eta.checked_sub(ran)) {
+                    Some(left) => {
+                        lang.tf("status.waiting_left", &[&crate::pane::duration_ms(left)])
+                    }
+                    None => lang.tf("status.waiting_over", &[&crate::pane::duration_ms(eta)]),
+                })
+            }
+            // No estimate: say when it last spoke instead. A job that has
+            // printed nothing for minutes is the one worth a second look.
+            (None, _) => {
+                if let Some(quiet) = job
+                    .last_output_at_ms
+                    .map(|at| now.saturating_sub(at))
+                    .filter(|quiet| *quiet >= 15_000)
+                {
+                    parts.push(
+                        lang.tf("status.waiting_output", &[&crate::pane::duration_ms(quiet)]),
+                    );
+                }
+            }
+        }
+        if let Some(command) = command_excerpt(&job.command) {
+            parts.push(command);
+        }
+        Some(parts.join(" · "))
     }
 
     /// How long the painted relative timestamps stay true, so an idle TUI wakes
@@ -4977,13 +5173,23 @@ impl App {
         // A delegated child that is still working keeps this clock: its elapsed
         // row must tick, and the next read must happen even while the parent
         // turn is over and nothing else on the screen changes.
-        let Some(due) = self.subagent_poll else {
-            return wait;
-        };
-        let poll = due
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_secs(1));
-        Some(wait.map_or(poll, |wait| wait.min(poll)))
+        //
+        // A background job the Session is paused on is the same kind of fact:
+        // its elapsed clock and its remaining-time countdown both change on the
+        // second, and an idle Session has nothing else to wake for.
+        let poll = self
+            .subagent_poll
+            .into_iter()
+            .chain(self.job_poll)
+            .map(|due| {
+                due.saturating_duration_since(Instant::now())
+                    .min(Duration::from_secs(1))
+            })
+            .min();
+        match (wait, poll) {
+            (Some(wait), Some(poll)) => Some(wait.min(poll)),
+            (wait, poll) => wait.or(poll),
+        }
     }
 
     /// The approval fact, named in the mode it is in. It stays on screen in
@@ -5259,6 +5465,11 @@ impl App {
             .transcript()
             .and_then(|transcript| transcript.paused.as_ref())
             .map(|(_, reason)| lang.tf("status.paused", &[reason]));
+        // A pause on background work supersedes both: the run it follows is
+        // over, and "paused: waiting" is the one word that says least while the
+        // operator is looking at a job that has been running for ten minutes.
+        let waiting = self.waiting_line();
+        self.shell.composer.idle_live = waiting.is_some();
         self.shell.composer.idle = if self.shell.composer.phase.is_some() {
             None
         } else {
@@ -5268,11 +5479,12 @@ impl App {
                     &[&crate::pane::duration_ms(worked.as_millis() as u64)],
                 )
             });
-            Some(match (worked, pause) {
-                (Some(worked), Some(pause)) => format!("{worked} · {pause}"),
-                (Some(worked), None) => worked,
-                (None, Some(pause)) => pause,
-                (None, None) => lang.t("status.idle").to_string(),
+            Some(match (waiting, worked, pause) {
+                (Some(waiting), _, _) => waiting,
+                (None, Some(worked), Some(pause)) => format!("{worked} · {pause}"),
+                (None, Some(worked), None) => worked,
+                (None, None, Some(pause)) => pause,
+                (None, None, None) => lang.t("status.idle").to_string(),
             })
         };
         // A compaction the transcript just gained announces itself once, in
@@ -8984,6 +9196,70 @@ mod tests {
         app.update_status();
         let idle = app.shell.composer.idle.clone().expect("idle title");
         assert!(!idle.contains("paused"), "{idle}");
+    }
+
+    /// One running job as the waiting line reads it. The last output is recent:
+    /// these tests are about the clock and the countdown, and a silence warning
+    /// would sit beside them in every line.
+    fn running_job(started_ago_ms: u64, eta_ms: Option<u64>) -> crate::event::JobRow {
+        let now = crate::pane::now_ms();
+        crate::event::JobRow {
+            id: "job_1".into(),
+            owner: "ses_a".into(),
+            state: "running".into(),
+            detail: String::new(),
+            command: "ssh aibox2 'python3 kf_render.py'".into(),
+            started_at_ms: Some(now - started_ago_ms),
+            eta_ms,
+            last_output_at_ms: Some(now - 2_000),
+            subagent: false,
+        }
+    }
+
+    #[test]
+    fn a_paused_wait_names_the_job_and_counts_down_its_estimate() {
+        // The report that started this: a Session paused on a twenty-minute
+        // build showed "paused: waiting" and nothing else, so a reader could
+        // not tell a long job from a wedged one.
+        let mut app = session_app();
+        app.jobs = vec![running_job(6 * 60_000, Some(20 * 60_000))];
+        let line = app.waiting_line().expect("a running job is a live wait");
+        assert!(line.contains("waiting on 1 background job"), "{line}");
+        assert!(line.contains("6m "), "the clock it has run: {line}");
+        assert!(
+            line.contains("~14m ") && line.contains("left"),
+            "the estimate becomes a countdown: {line}"
+        );
+        assert!(
+            line.contains("ssh aibox2 'python3 kf_render.py'"),
+            "the line names what is running: {line}"
+        );
+    }
+
+    #[test]
+    fn a_job_without_an_estimate_counts_up_and_never_invents_a_deadline() {
+        let mut app = session_app();
+        app.jobs = vec![running_job(90_000, None)];
+        let line = app.waiting_line().expect("the wait is still live");
+        assert!(line.contains("1m 30s elapsed"), "{line}");
+        assert!(
+            !line.contains("left") && !line.contains("estimate"),
+            "no caller declared an estimate, so none is shown: {line}"
+        );
+        app.state.active_run = Some("run-1".into());
+        assert!(
+            app.waiting_line().is_none(),
+            "a run in flight owns the title"
+        );
+    }
+
+    #[test]
+    fn a_settled_job_stops_the_waiting_line() {
+        let mut app = session_app();
+        let mut job = running_job(6 * 60_000, Some(20 * 60_000));
+        job.state = "completed".into();
+        app.jobs = vec![job];
+        assert!(app.waiting_line().is_none());
     }
 
     /// The state is the box's own title: an idle Session names itself there, a

@@ -2450,6 +2450,23 @@ fn comparable(model: &str) -> String {
 #[cfg(test)]
 mod tests {
 
+    /// One jobs-dialog row, with the waiting line's fields left at "not
+    /// reported": these tests are about the dialog, which neither shows them
+    /// nor reads them.
+    fn job_row(id: &str, owner: &str, state: &str, detail: &str, subagent: bool) -> JobRow {
+        JobRow {
+            id: id.into(),
+            owner: owner.into(),
+            state: state.into(),
+            detail: detail.into(),
+            command: detail.into(),
+            started_at_ms: None,
+            eta_ms: None,
+            last_output_at_ms: None,
+            subagent,
+        }
+    }
+
     fn list_dialog(labels: &[&str]) -> ListDialog {
         let rows = labels
             .iter()
@@ -3396,27 +3413,15 @@ mod tests {
         assert_eq!(rows.rows[0].label, "no background jobs");
 
         let mut dialog = Dialog::jobs(&[
-            JobRow {
-                id: "job_1".into(),
-                owner: "ses_a".into(),
-                state: "running".into(),
-                detail: "bun test".into(),
-                subagent: false,
-            },
-            JobRow {
-                id: "sub_survey".into(),
-                owner: "ses_a".into(),
-                state: "running".into(),
-                detail: "survey the flaky tests".into(),
-                subagent: true,
-            },
-            JobRow {
-                id: "job_2".into(),
-                owner: "ses_c".into(),
-                state: "finished".into(),
-                detail: "bun run deploy".into(),
-                subagent: false,
-            },
+            job_row("job_1", "ses_a", "running", "bun test", false),
+            job_row(
+                "sub_survey",
+                "ses_a",
+                "running",
+                "survey the flaky tests",
+                true,
+            ),
+            job_row("job_2", "ses_c", "finished", "bun run deploy", false),
         ]);
         assert!(matches!(
             dialog.handle_key(key(KeyCode::Char('x'))),
@@ -3443,13 +3448,7 @@ mod tests {
     fn x_names_the_global_stop_and_the_confirmation_gates_it() {
         // `X` does not name a row: it opens the confirmation, whatever the
         // cursor is on.
-        let mut dialog = Dialog::jobs(&[JobRow {
-            id: "job_1".into(),
-            owner: "ses_a".into(),
-            state: "running".into(),
-            detail: "bun test".into(),
-            subagent: false,
-        }]);
+        let mut dialog = Dialog::jobs(&[job_row("job_1", "ses_a", "running", "bun test", false)]);
         assert!(matches!(
             dialog.handle_key(key(KeyCode::Char('X'))),
             Action::StopAllJobs

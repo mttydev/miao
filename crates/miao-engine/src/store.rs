@@ -1813,26 +1813,30 @@ impl Store {
         let session = session.to_owned();
         self.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id,state,input,result FROM engine_job WHERE session_id=?1 ORDER BY rowid DESC LIMIT 100",
+                // A running job's clock starts at the `job.started` event it
+                // wrote: the row has no start column, a queued job has no
+                // start yet, and a row recovered after a restart keeps the
+                // time it really began at. The estimate is only ever what the
+                // caller declared when it admitted the job, so it rides the
+                // stored input rather than becoming a column of its own.
+                "SELECT j.id,j.state,j.input,j.result,(SELECT e.recorded_at_ms FROM engine_event e WHERE e.session_id=j.session_id AND e.kind='job.started' AND json_extract(e.data,'$.job_id')=j.id ORDER BY e.seq LIMIT 1) FROM engine_job j WHERE j.session_id=?1 ORDER BY j.rowid DESC LIMIT 100",
             )?;
             let rows = stmt.query_map([session.as_str()], |r| {
                 let id: String = r.get(0)?;
                 let state: String = r.get(1)?;
-                let input: String = r.get(2)?;
+                let input = serde_json::from_str::<Value>(&r.get::<_, String>(2)?)
+                    .unwrap_or(Value::Null);
                 let result: Option<String> = r.get(3)?;
-                let command = serde_json::from_str::<Value>(&input)
-                    .ok()
-                    .and_then(|value| {
-                        value["argv"]
-                            .as_array()
-                            .map(|argv| {
-                                argv.iter()
-                                    .filter_map(Value::as_str)
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            })
-                            .or_else(|| value["command"].as_str().map(str::to_string))
+                let started_at_ms: Option<i64> = r.get(4)?;
+                let command = input["argv"]
+                    .as_array()
+                    .map(|argv| {
+                        argv.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     })
+                    .or_else(|| input["command"].as_str().map(str::to_string))
                     .unwrap_or_default();
                 // Only the tail: the point is "is it saying something", not the
                 // whole log, which is what `job` returns.
@@ -1852,6 +1856,8 @@ impl Store {
                     "state": state,
                     "command": command,
                     "output": output,
+                    "started_at_ms": started_at_ms.map(|at| at as u64),
+                    "eta_ms": input["eta_ms"].as_u64(),
                 }))
             })?;
             Ok(rows.collect::<Result<_, _>>()?)

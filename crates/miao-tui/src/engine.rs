@@ -197,6 +197,10 @@ pub enum Request {
     Subagents {
         session_id: String,
     },
+    /// The Session's running jobs, for the waiting line rather than a dialog.
+    JobStatus {
+        session_id: String,
+    },
     CancelJob {
         session_id: String,
         job_id: String,
@@ -550,6 +554,14 @@ impl Handle {
     /// List the open Session's background jobs, newest first.
     pub fn jobs(&self, session_id: &str) {
         let _ = self.tx.send(Request::Jobs {
+            session_id: session_id.into(),
+        });
+    }
+
+    /// Re-read the open Session's jobs for the waiting line. Same answer as the
+    /// dialog's list, delivered without opening it.
+    pub fn job_status(&self, session_id: &str) {
+        let _ = self.tx.send(Request::JobStatus {
             session_id: session_id.into(),
         });
     }
@@ -1711,6 +1723,9 @@ async fn run(
                     }
                 }
                 Request::Jobs { session_id } => refresh_jobs(client, &bus, &session_id).await,
+                Request::JobStatus { session_id } => {
+                    refresh_job_status(client, &bus, &session_id).await
+                }
                 Request::Subagents { session_id } => {
                     refresh_subagents(client, &bus, &session_id).await
                 }
@@ -2370,6 +2385,20 @@ async fn refresh_jobs(client: &EngineClient, bus: &Bus, session_id: &str) {
     }
 }
 
+/// Ask the engine for the Session's jobs and hand the rows to the waiting
+/// line. Nothing opens: this is the read that keeps a paused Session's state
+/// moving on screen, so it stays quiet when it fails.
+async fn refresh_job_status(client: &EngineClient, bus: &Bus, session_id: &str) {
+    if let Ok(value) = client
+        .request("jobs", json!({ "session_id": session_id }))
+        .await
+    {
+        let mut rows = parse_job_rows(&value);
+        rows.extend(parse_subagent_rows(&value));
+        bus.send(AppEvent::JobStatus(rows));
+    }
+}
+
 /// Read the Session's delegated children for the sidebar's subagent block.
 ///
 /// The jobs answer already carries them beside the jobs, so this shares that
@@ -2458,6 +2487,10 @@ fn parse_job_rows(value: &Value) -> Vec<JobRow> {
                     format!("{output} · {command}")
                 },
                 id,
+                command: command.to_string(),
+                started_at_ms: row.get("started_at_ms").and_then(Value::as_u64),
+                eta_ms: row.get("eta_ms").and_then(Value::as_u64),
+                last_output_at_ms: row.get("last_output_at_ms").and_then(Value::as_u64),
                 subagent: false,
             })
         })
@@ -2487,6 +2520,10 @@ fn parse_subagent_rows(value: &Value) -> Vec<JobRow> {
                             .unwrap_or_default()
                             .to_string(),
                         id,
+                        command: String::new(),
+                        started_at_ms: None,
+                        eta_ms: None,
+                        last_output_at_ms: None,
                         subagent: true,
                     })
                 })

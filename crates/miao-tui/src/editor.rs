@@ -953,6 +953,11 @@ pub struct Composer {
     /// What an idle composer says about the turn that just settled: "Idle",
     /// or "Worked for 2m 30s" once a run completes.
     pub idle: Option<String>,
+    /// The idle line is a live wait rather than a settled fact: a background
+    /// job is still running, so the line carries a spinner and its clock moves.
+    /// A session paused on a twenty-minute build must not look like one that
+    /// stopped working.
+    pub idle_live: bool,
     /// Which placeholder example the empty composer shows. The TS prompt picks
     /// one at random when it mounts and re-rolls on a Session change, so this
     /// is a stored index rather than a clock drift.
@@ -1010,6 +1015,7 @@ impl Composer {
             phase_alert: false,
             phase_action: None,
             idle: None,
+            idle_live: false,
             placeholder: random_pick(),
             lang: crate::lang::Lang::En,
             suggestion: None,
@@ -1918,6 +1924,7 @@ mod tests {
             phase_alert: false,
             phase_action: None,
             idle: None,
+            idle_live: false,
             placeholder: 0,
             lang: crate::lang::Lang::En,
             suggestion: None,
