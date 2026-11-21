@@ -13,6 +13,14 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-21
+
+### Added
+- **tui**: preview themes live in the /theme picker (#3273) (`3ade632baf`)
+
+### Fixed
+- **tui**: keep the approval fact pressable when auto-approve is off (#3272) (`1f4b4c02cc`)
+
 ## [0.4.6] - 2026-11-21
 
 ### Added
