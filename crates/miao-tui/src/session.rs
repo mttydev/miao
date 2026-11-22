@@ -371,6 +371,10 @@ impl PlanView {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionState {
     pub todos: Vec<TodoView>,
+    /// The engine's own `state.todos` projection, untouched. Continuation reads
+    /// this exact shape, so the composer asks the engine's readiness rule
+    /// rather than re-deriving it from the display rows above.
+    pub todos_state: Value,
     /// The durable Goal, separate from the checklist. `None` when the Session
     /// never recorded one.
     pub goal: Option<GoalView>,
@@ -413,6 +417,7 @@ impl SessionState {
             .unwrap_or_default();
         Self {
             todos,
+            todos_state: snapshot.get("state").cloned().unwrap_or(Value::Null),
             goal: snapshot
                 .get("state")
                 .and_then(|state| state.get("goal"))

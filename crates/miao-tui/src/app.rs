@@ -13,7 +13,7 @@ use crate::dialogs::{
     session_model, session_model_facts, AccountInfo, Action as DialogAction, ConfirmKind, Dialog,
     ModelInfo, ProviderEntry, Row, TextDialog,
 };
-use crate::editor::{Action, Mode};
+use crate::editor::{Action, ComposerHint, Mode};
 use crate::engine;
 use crate::event::{AppEvent, Bus};
 use crate::keybinds::{self, Keymap};
@@ -1258,9 +1258,11 @@ impl App {
                 if current
                     && idle
                     && self.shell.composer.editor.is_empty()
-                    && self.shell.composer.suggestion.is_none()
+                    && matches!(self.shell.composer.hint, ComposerHint::None)
                 {
-                    self.shell.composer.set_suggestion(text);
+                    self.shell
+                        .composer
+                        .set_hint(text.map_or(ComposerHint::None, ComposerHint::Next));
                 }
             }
             AppEvent::Clipboard(content) => {
@@ -5709,35 +5711,32 @@ impl App {
         self.shell.title.set_status(Some(status));
     }
 
-    /// Offer the Session's next runnable todo in the empty composer.
+    /// Offer what the Session's checklist says comes next, in the empty
+    /// composer.
     ///
-    /// The engine's continuation reads the same checklist, so this names the
-    /// work the next turn would pick up instead of inventing a suggestion. Only
-    /// `pending` and `in_progress` count as runnable: `waiting` and `blocked`
-    /// need an external event or a human decision, and `completed` is done.
-    /// Nothing is offered while a turn runs or prompts are queued — then the
+    /// The engine owns this answer: `state::next_work` applies the same
+    /// readiness rule continuation does, so a `pending` item whose prerequisite
+    /// is still open is not offered as the next step, and a list held by a wait
+    /// or a block says so instead of falling back to an unrelated example.
+    /// Nothing is decided while a turn runs or prompts are queued — then the
     /// composer belongs to steering the work in flight.
     fn refresh_suggestion(&mut self) {
         let idle = self.state.active_run.is_none() && self.state.pending == 0;
-        let next = match idle {
-            true => self
-                .state
-                .todos
-                .iter()
-                .find(|todo| {
-                    matches!(todo.status.as_str(), "pending" | "in_progress")
-                        && !Self::is_question(todo.content.trim())
-                })
-                .map(|todo| todo.content.trim().to_string())
-                .filter(|content| !content.is_empty()),
-            false => None,
+        let hint = match idle {
+            true => {
+                ComposerHint::from_next_work(miao_engine::state::next_work(&self.state.todos_state))
+            }
+            false => ComposerHint::None,
         };
         // The checklist names the next step when it can; a model prediction only
-        // fills the gap. It is advisory, so it is asked for once per idle
-        // stretch and never while the operator is already typing something.
+        // fills the gap a *finished* list leaves. A list held by a wait or a
+        // block already said why nothing runs, so asking a model to guess a
+        // prompt there would paint an offer the checklist contradicts.
+        // It is advisory, so it is asked for once per idle stretch and never
+        // while the operator is already typing something.
         let wants_prediction = self.predict_next
             && idle
-            && next.is_none()
+            && matches!(hint, ComposerHint::None)
             && self.prediction_pending.is_none()
             && self.shell.composer.editor.is_empty();
         if wants_prediction {
@@ -5749,16 +5748,7 @@ impl App {
                 engine.predict(&session_id, None);
             }
         }
-        self.shell.composer.set_suggestion(next);
-    }
-
-    /// A checklist entry is work this Session will do next, so a question is
-    /// not one: offering it would put the operator's answer into the composer,
-    /// which is the one thing a todo list must not ask for. The test is on the
-    /// terminator because that is what makes it a question in both of the
-    /// languages this UI renders.
-    fn is_question(content: &str) -> bool {
-        content.ends_with('?') || content.ends_with('？')
+        self.shell.composer.set_hint(hint);
     }
 
     /// `--continue` opens the Session with the newest `updated_at_ms`. The list
@@ -6817,7 +6807,7 @@ mod tests {
             text: Some("add the missing test".into()),
         });
         assert_eq!(
-            app.shell.composer.suggestion.as_deref(),
+            app.shell.composer.next_offer(),
             Some("add the missing test")
         );
 
@@ -6826,7 +6816,7 @@ mod tests {
             text: Some("something else".into()),
         });
         assert_eq!(
-            app.shell.composer.suggestion.as_deref(),
+            app.shell.composer.next_offer(),
             Some("add the missing test"),
             "another Session's suggestion must not replace this one"
         );
@@ -8538,6 +8528,7 @@ mod tests {
     fn approval_state() -> SessionState {
         SessionState {
             todos: Vec::new(),
+            todos_state: serde_json::Value::Null,
             goal: None,
             plan: None,
             active_run: None,
@@ -9403,6 +9394,17 @@ mod tests {
         );
     }
 
+    /// A Session whose checklist reads as the engine records it. Only the
+    /// projection shape matters here: the composer asks the engine's own
+    /// readiness rule, so a test must speak that shape rather than a display
+    /// copy of it.
+    fn state_with(todos: serde_json::Value) -> SessionState {
+        SessionState {
+            todos_state: serde_json::json!({"todos": {"value": {"todos": todos}}}),
+            ..SessionState::default()
+        }
+    }
+
     fn strip_hints(app: &App) -> Vec<&str> {
         app.shell
             .status
@@ -9421,22 +9423,13 @@ mod tests {
         app.handle(AppEvent::SessionOpened {
             summary: None,
             transcript: Box::new(Transcript::default()),
-            state: Box::new(SessionState {
-                todos: vec![
-                    crate::session::TodoView {
-                        content: "待你定：是否把这套后处理接成正式步骤？".into(),
-                        status: "pending".into(),
-                    },
-                    crate::session::TodoView {
-                        content: "build the map dump".into(),
-                        status: "pending".into(),
-                    },
-                ],
-                ..SessionState::default()
-            }),
+            state: Box::new(state_with(serde_json::json!([
+                {"id": "a", "content": "待你定：是否把这套后处理接成正式步骤？", "status": "pending", "priority": "high"},
+                {"id": "b", "content": "build the map dump", "status": "pending", "priority": "high"},
+            ]))),
         });
         assert_eq!(
-            app.shell.composer.suggestion.as_deref(),
+            app.shell.composer.next_offer(),
             Some("build the map dump"),
             "the question is skipped, not offered"
         );
@@ -9445,15 +9438,11 @@ mod tests {
         app.handle(AppEvent::SessionOpened {
             summary: None,
             transcript: Box::new(Transcript::default()),
-            state: Box::new(SessionState {
-                todos: vec![crate::session::TodoView {
-                    content: "confirm the port?".into(),
-                    status: "pending".into(),
-                }],
-                ..SessionState::default()
-            }),
+            state: Box::new(state_with(serde_json::json!([
+                {"id": "a", "content": "confirm the port?", "status": "pending", "priority": "high"},
+            ]))),
         });
-        assert_eq!(app.shell.composer.suggestion, None);
+        assert_eq!(app.shell.composer.hint, ComposerHint::None);
     }
 
     /// The settled Session offers its next runnable todo in the composer, and
@@ -9461,56 +9450,95 @@ mod tests {
     #[test]
     fn a_settled_turn_offers_the_next_runnable_todo() {
         let mut app = session_app();
-        let todos = vec![
-            crate::session::TodoView {
-                content: "write the parser".into(),
-                status: "completed".into(),
-            },
-            crate::session::TodoView {
-                content: "  cover it with tests  ".into(),
-                status: "pending".into(),
-            },
-        ];
+        let todos = serde_json::json!([
+            {"id": "a", "content": "write the parser", "status": "completed", "priority": "high"},
+            {"id": "b", "content": "  cover it with tests  ", "status": "pending", "priority": "high"},
+        ]);
         app.handle(AppEvent::SessionOpened {
             summary: None,
             transcript: Box::new(Transcript::default()),
-            state: Box::new(SessionState {
-                todos: todos.clone(),
-                ..SessionState::default()
-            }),
+            state: Box::new(state_with(todos.clone())),
         });
-        assert_eq!(
-            app.shell.composer.suggestion.as_deref(),
-            Some("cover it with tests")
-        );
+        assert_eq!(app.shell.composer.next_offer(), Some("cover it with tests"));
 
         // A run in flight takes the composer back: a new task offered under a
         // turn the operator is steering would invite a prompt they did not mean.
+        let mut running = state_with(todos.clone());
+        running.active_run = Some("run-1".into());
         app.handle(AppEvent::SessionOpened {
             summary: None,
             transcript: Box::new(Transcript::default()),
-            state: Box::new(SessionState {
-                todos: todos.clone(),
-                active_run: Some("run-1".into()),
-                ..SessionState::default()
-            }),
+            state: Box::new(running),
         });
-        assert_eq!(app.shell.composer.suggestion, None);
+        assert_eq!(app.shell.composer.hint, ComposerHint::None);
 
-        // `waiting` and `blocked` need an outside event or a human decision, so
-        // no runnable work is left to offer.
+        // A wait is not nothing: the composer says what the Session is waiting
+        // on instead of falling back to an example unrelated to the Session.
         app.handle(AppEvent::SessionOpened {
             summary: None,
             transcript: Box::new(Transcript::default()),
-            state: Box::new(SessionState {
-                todos: vec![crate::session::TodoView {
-                    content: "land the release".into(),
-                    status: "waiting".into(),
-                }],
-                ..SessionState::default()
-            }),
+            state: Box::new(state_with(serde_json::json!([
+                {"id": "a", "content": "land the release", "status": "waiting", "priority": "high"},
+            ]))),
         });
-        assert_eq!(app.shell.composer.suggestion, None);
+        assert_eq!(
+            app.shell.composer.hint,
+            ComposerHint::Waiting("land the release".into())
+        );
+    }
+
+    /// The hint must name the work the next turn would pick up, so an item
+    /// whose prerequisite is still open is never offered ahead of the item
+    /// holding it. This is the rule continuation uses, read from the checklist.
+    #[test]
+    fn a_dependent_todo_is_not_offered_before_its_prerequisite() {
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            summary: None,
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(state_with(serde_json::json!([
+                {"id": "a", "content": "wire the parser", "status": "in_progress", "priority": "high"},
+                {"id": "b", "content": "cover it with tests", "status": "pending", "priority": "high", "depends_on": ["a"]},
+            ]))),
+        });
+        assert_eq!(
+            app.shell.composer.next_offer(),
+            Some("wire the parser"),
+            "the dependent waits behind its prerequisite"
+        );
+
+        // Only the held item is left: that is a wait on this Session's own
+        // work, not a finished list, and not an invitation to guess a prompt.
+        app.handle(AppEvent::SessionOpened {
+            summary: None,
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(state_with(serde_json::json!([
+                {"id": "a", "content": "wire the parser", "status": "waiting", "priority": "high"},
+                {"id": "b", "content": "cover it with tests", "status": "pending", "priority": "high", "depends_on": ["a"]},
+            ]))),
+        });
+        assert_eq!(
+            app.shell.composer.hint,
+            ComposerHint::Waiting("wire the parser".into())
+        );
+    }
+
+    /// A block is a human decision, not a wait, and neither is typed by Tab.
+    #[test]
+    fn a_blocked_list_says_so_and_tab_does_not_type_it() {
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            summary: None,
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(state_with(serde_json::json!([
+                {"id": "a", "content": "decide the pricing tier", "status": "blocked", "priority": "high"},
+            ]))),
+        });
+        assert_eq!(
+            app.shell.composer.hint,
+            ComposerHint::Blocked("decide the pricing tier".into())
+        );
+        assert_eq!(app.shell.composer.next_offer(), None);
     }
 
     /// A run can be admitted and moving before any `provider.*` frame arrives.

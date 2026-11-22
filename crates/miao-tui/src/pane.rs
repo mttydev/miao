@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::dialogs::{Dialog, ListDialog, ListKind, PaletteDialog};
-use crate::editor::{CompletionKind, Composer, Editor, Mode};
+use crate::editor::{CompletionKind, Composer, ComposerHint, Editor, Mode};
 use crate::lang::Lang;
 use crate::session::{
     ApprovalView, Entry, Part, QuestionView, Reasoning, SessionSummary, Transcript,
@@ -3600,15 +3600,8 @@ fn render_composer_body(
         // and a wide glyph there is cut in half: a CJK hint read as a different
         // word. The hint starts one cell right of the caret so the whole first
         // glyph stays visible.
-        let line = match composer.suggestion.as_deref().filter(|_| !shell) {
-            Some(next) => Line::from(vec![
-                Span::styled(
-                    format!(" Next: {next}"),
-                    Style::new().fg(palette.text_muted),
-                ),
-                Span::styled(" (tab)", Style::new().fg(palette.text_muted).dim()),
-            ]),
-            None => {
+        let line = match (&composer.hint, shell) {
+            (_, true) | (ComposerHint::None, false) => {
                 // An empty composer offers the example the TS prompt cycles
                 // through: one quiet sentence, `Run a command…` on a `!` line.
                 // The pick is the stored per-mount roll, not a clock drift, so
@@ -3632,6 +3625,30 @@ fn render_composer_body(
                     Style::new().fg(palette.text_muted),
                 ))
             }
+            (ComposerHint::Next(next), false) => Line::from(vec![
+                Span::styled(
+                    format!(
+                        " {next_label}: {next}",
+                        next_label = composer.lang.t("composer.next")
+                    ),
+                    Style::new().fg(palette.text_muted),
+                ),
+                Span::styled(" (tab)", Style::new().fg(palette.text_muted).dim()),
+            ]),
+            (ComposerHint::Waiting(item), false) => Line::from(Span::styled(
+                format!(
+                    " {label}: {item}",
+                    label = composer.lang.t("composer.waiting")
+                ),
+                Style::new().fg(palette.text_muted),
+            )),
+            (ComposerHint::Blocked(item), false) => Line::from(Span::styled(
+                format!(
+                    " {label}: {item}",
+                    label = composer.lang.t("composer.blocked")
+                ),
+                Style::new().fg(palette.warning),
+            )),
         };
         frame.render_widget(Paragraph::new(line), input_area);
     } else {
@@ -6895,7 +6912,9 @@ mod tests {
     fn an_offered_task_replaces_the_example_hint() {
         let theme = home_theme();
         let mut composer = crate::editor::Composer::new(Path::new("."));
-        composer.set_suggestion(Some("cover the parser with tests".into()));
+        composer.set_hint(crate::editor::ComposerHint::Next(
+            "cover the parser with tests".into(),
+        ));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 6)).expect("terminal");
         let painted = |terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
@@ -6937,6 +6956,49 @@ mod tests {
         let text = painted(&mut terminal);
         assert!(text.contains("hello"), "{text}");
         assert!(!text.contains("Next: cover"), "{text}");
+    }
+
+    /// A list held by a wait or a block is not an invitation to ask anything:
+    /// the composer names the reason with no `(tab)`, because there is nothing
+    /// to type until the event lands or the operator decides.
+    #[test]
+    fn a_held_list_names_its_reason_instead_of_an_unrelated_example() {
+        let theme = home_theme();
+        for (hint, expected) in [
+            (
+                crate::editor::ComposerHint::Waiting("watch CI 45021791396".into()),
+                "Waiting: watch CI 45021791396",
+            ),
+            (
+                crate::editor::ComposerHint::Blocked("decide the pricing tier".into()),
+                "Blocked: decide the pricing tier",
+            ),
+        ] {
+            let mut composer = crate::editor::Composer::new(Path::new("."));
+            composer.set_hint(hint);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 6))
+                .expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = super::render_composer(
+                        frame,
+                        ratatui::layout::Rect::new(0, 0, 80, 6),
+                        &composer,
+                        &theme,
+                    );
+                })
+                .expect("draw");
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol().to_string())
+                .collect::<String>();
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains("(tab)"), "{text}");
+            assert!(!text.contains("Ask anything"), "{text}");
+        }
     }
 
     /// An empty composer hints at what it accepts, the way the agent CLIs do;
