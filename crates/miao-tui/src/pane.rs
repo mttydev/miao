@@ -7629,7 +7629,7 @@ mod tests {
         // them falls back to the page background.
         for (column, cell) in rows[header].iter().enumerate() {
             assert!(
-                cell.bg == palette.surface || cell.bg == palette.secondary,
+                cell.bg == palette.surface || cell.bg == palette.tool_badge_bg,
                 "column {column} paints {:?} outside the header's band",
                 cell.bg
             );
