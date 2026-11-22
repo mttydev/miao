@@ -289,6 +289,7 @@ pub fn load(workspace: &Path) -> Loaded {
     let mut loaded = load_at(workspace, crate::config::global_dir().as_deref());
     // Read the environment here rather than in `load_at`, so the parser stays a
     // pure function of the files a test hands it.
+    adopt_host_canvas(&mut loaded.theme.palette);
     let colorless = colorless(
         std::env::var("NO_COLOR").ok().as_deref(),
         std::env::var("TERM").ok().as_deref(),
@@ -297,6 +298,59 @@ pub fn load(workspace: &Path) -> Loaded {
         loaded.theme = loaded.theme.monochrome();
     }
     loaded
+}
+
+/// The page colour the host terminal paints behind and around the pane, when
+/// it announces one.
+///
+/// A full-screen page fills every cell it owns, but the host draws the pane as
+/// a rounded card inset by a margin and padded inside: those few pixels are the
+/// host's, and a page painted in a different colour leaves a ring of the host's
+/// colour around itself. That reads as the app carving out a smaller area than
+/// the terminal gave it. mtty announces the card fill as `MTTY_TERM_BG`.
+pub fn host_canvas() -> Option<Color> {
+    parse_host_canvas(std::env::var("MTTY_TERM_BG").ok().as_deref())
+}
+
+fn parse_host_canvas(value: Option<&str>) -> Option<Color> {
+    let digits = value?.trim().strip_prefix('#')?;
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+    Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
+}
+
+/// Paint the page in the host's colour, unless doing so would put a light
+/// canvas under a dark palette or the other way round: a pinned mode is a
+/// deliberate choice and stays legible over the theme's own canvas.
+///
+/// Only the page ground moves. Every other token keeps the theme's own hue, so
+/// choosing a theme still decides what the app looks like; this just makes the
+/// outermost cells agree with the pixels the host paints next to them.
+pub fn adopt_host_canvas(palette: &mut Palette) {
+    adopt(palette, host_canvas());
+}
+
+fn adopt(palette: &mut Palette, host: Option<Color>) {
+    let Some(host) = host else {
+        return;
+    };
+    match (luma(host), luma(palette.background)) {
+        (Some(host_luma), Some(own_luma)) if (host_luma > 140) == (own_luma > 140) => {
+            palette.background = host
+        }
+        _ => {}
+    }
+}
+
+fn luma(color: Color) -> Option<u32> {
+    match color {
+        Color::Rgb(r, g, b) => {
+            Some((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn load_at(workspace: &Path, global: Option<&Path>) -> Loaded {
@@ -1206,6 +1260,48 @@ mod tests {
         assert_eq!(palette.diff_added, rgb("4CC88E"), "diffAdded");
         assert_eq!(palette.diff_removed, rgb("E16B7A"), "diffRemoved");
         assert_eq!(palette.diff_line_number, rgb("8A94A8"), "diffLineNumber");
+    }
+
+    #[test]
+    fn a_host_canvas_is_read_from_the_announced_colour() {
+        assert_eq!(
+            parse_host_canvas(Some("#1c1c1e")),
+            Some(Color::Rgb(0x1c, 0x1c, 0x1e))
+        );
+        assert_eq!(
+            parse_host_canvas(Some(" #000000 ")),
+            Some(Color::Rgb(0, 0, 0))
+        );
+        assert_eq!(parse_host_canvas(Some("1c1c1e")), None, "no leading #");
+        assert_eq!(parse_host_canvas(Some("#12345")), None, "short value");
+        assert_eq!(parse_host_canvas(Some("#gggggg")), None, "not hex");
+        assert_eq!(parse_host_canvas(None), None, "no announcement");
+    }
+
+    #[test]
+    fn the_page_adopts_a_host_canvas_on_the_same_side() {
+        let mut dark = builtin(DEFAULT_THEME, ThemeMode::Dark).expect("builtin theme");
+        adopt(&mut dark, Some(rgb("1C1C1E")));
+        assert_eq!(
+            dark.background,
+            rgb("1C1C1E"),
+            "a dark host repaints the page"
+        );
+        // A pinned mode is a deliberate choice: a light canvas under a dark
+        // palette would put the operator's text out of reach.
+        let mut pinned = builtin(DEFAULT_THEME, ThemeMode::Dark).expect("builtin theme");
+        adopt(&mut pinned, Some(rgb("FAF9F7")));
+        assert_ne!(
+            pinned.background,
+            rgb("FAF9F7"),
+            "a light host leaves dark text"
+        );
+        adopt(&mut pinned, None);
+        assert_eq!(
+            pinned.background,
+            builtin(DEFAULT_THEME, ThemeMode::Dark).unwrap().background,
+            "no announcement leaves the theme's own canvas"
+        );
     }
 
     #[test]
