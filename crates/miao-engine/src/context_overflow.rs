@@ -54,6 +54,11 @@ fn patterns() -> &'static Vec<Regex> {
             r"(?i)request entity too large",
             r"(?i)context length is only \d+ tokens",
             r"(?i)input length.*exceeds.*context length",
+            // Volcengine Ark states the refusal without naming the window: the
+            // parenthesised figure is the request's own input size, not the
+            // limit, so this pattern must not teach a window.
+            r"(?i)input exceeds the context limit",
+            r"(?i)please shorten the input",
             r"(?i)prompt too long; exceeded (?:max )?context length",
             r"(?i)too large for model with \d+ maximum context length",
             r"(?i)prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?",
@@ -133,6 +138,7 @@ mod tests {
             "too large for model with 8192 maximum context length",
             "prompt has 131072 tokens, but the configured context size is 65536 tokens",
             "invalid request: provider HTTP 400 · {\"error\":{\"code\":\"1261\",\"message\":\"Prompt exceeds max length\"}}",
+            "invalid request: provider HTTP 400 · {\"error\":{\"code\":\"InvalidParameter\",\"message\":\"Input exceeds the context limit (1048568 tokens). Please shorten the input. Request id: 0217953278270181fa1229209a334fb8c06440209bf10301356fc\",\"param\":\"\",\"type\":\"BadRequest\"}}",
         ] {
             assert!(is_context_overflow(message), "{message}");
         }
@@ -154,5 +160,12 @@ mod tests {
     fn a_refusal_without_a_number_still_counts_but_teaches_no_window() {
         assert!(is_context_overflow("request entity too large"));
         assert_eq!(overflow_limit("request entity too large"), None);
+        let ark = "Input exceeds the context limit (1048568 tokens). Please shorten the input.";
+        assert!(is_context_overflow(ark));
+        assert_eq!(
+            overflow_limit(ark),
+            None,
+            "the figure is this request's input size, not the window"
+        );
     }
 }

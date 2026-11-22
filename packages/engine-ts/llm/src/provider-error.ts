@@ -24,6 +24,9 @@ const patterns = [
   /request entity too large/i,
   /context length is only \d+ tokens/i,
   /input length.*exceeds.*context length/i,
+  // Volcengine Ark names the request's own size in the parentheses, not the window.
+  /input exceeds the context limit/i,
+  /please shorten the input/i,
   /prompt too long; exceeded (?:max )?context length/i,
   /too large for model with \d+ maximum context length/i,
   /prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?/i,

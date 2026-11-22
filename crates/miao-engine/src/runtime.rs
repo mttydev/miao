@@ -4185,10 +4185,13 @@ async fn execute(
     // turns, which is why a busy turn never noticed its own stale list.
     let mut ledger_turns: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
-    // The bound a trimmed request imposed on this drain, as (window, tokens).
-    // See the request-assembly gate: the count a provider reports is of the
-    // trimmed request, so it cannot be the only evidence once a trim happened.
-    let mut request_cap: Option<(u64, u64)> = None;
+    // The bound a trimmed request imposed, as (window, tokens). See the
+    // request-assembly gate: the count a provider reports is of the trimmed
+    // request, so it cannot be the only evidence once a trim happened. The trim
+    // outlives the drain that made it — the next drain rebuilds the same
+    // durable history — so the proof is read back until a compaction replaces
+    // that history.
+    let mut request_cap: Option<(u64, u64)> = inner.store.latest_trim_bound(session).await?;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
@@ -4620,7 +4623,8 @@ async fn execute(
         // spends a billing allowance prints it beside the window's own figures, so
         // that tally cannot be read as context occupancy (#2870).
         let mut compaction_threshold = None;
-        let bound = match effective_limits(configured, declared, learned, output_forwarded) {
+        let turn_limits = effective_limits(configured, declared, learned, output_forwarded);
+        let bound = match turn_limits.clone() {
             Some(limits) => {
                 let counted = match inner.store.context_anchor(session).await? {
                     Some((counted, through)) => {
@@ -5267,6 +5271,17 @@ command: None,
                         .store
                         .request_compaction(session, crate::protocol::CompactScope::default())
                         .await;
+                    // The refusal proves this turn's assembly does not fit,
+                    // whether or not the endpoint named a window it can parse.
+                    // Arm the bound now: the retry below rebuilds the same
+                    // durable history, and without a bound it would send the
+                    // identical oversized request again.
+                    if let Some(limits) = turn_limits.as_ref() {
+                        request_cap = Some((
+                            limits.window,
+                            request_budget(limits.window, limits.headroom),
+                        ));
+                    }
                     // Retry the same step in this drain: the window is known now,
                     // so the next assembly bounds the request. The prompt is the
                     // operator's own and stays committed; this only tells the model
