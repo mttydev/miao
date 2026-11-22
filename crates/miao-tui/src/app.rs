@@ -1557,6 +1557,16 @@ impl App {
                 // transcript is read.
                 let switched = self.session.as_ref().map(|session| session.id.as_str())
                     != summary.as_ref().map(|session| session.id.as_str());
+                // The job rows belong to the Session that was open. Carrying
+                // them across a switch let a finished job from the last
+                // Session keep drawing its wait under the next one, and no
+                // read would ever correct it because the new Session has no
+                // pause to start one.
+                if switched {
+                    self.jobs.clear();
+                    self.job_poll = None;
+                    self.job_poll_pause = None;
+                }
                 // The TS prompt re-rolls its placeholder example when a
                 // different Session opens; the same Session refreshing must
                 // not change it.
@@ -4984,7 +4994,13 @@ impl App {
             .and_then(|transcript| transcript.paused.clone());
         let Some((seq, _)) = pause.filter(|(_, reason)| reason.starts_with("waiting")) else {
             self.job_poll_pause = None;
-            self.job_poll = None;
+            // The pause can clear before the last read does: a job settles
+            // while the turn that waited on it is over, and the cached row
+            // still says it is running. Stopping the clock here left that row
+            // in `jobs` forever, so the composer kept naming a job that had
+            // finished hours ago. Keep reading until every cached row is
+            // terminal; `schedule_job_poll` stops once they are.
+            self.schedule_job_poll();
             return;
         };
         if self.job_poll_pause == Some(seq) {
@@ -9291,6 +9307,49 @@ mod tests {
         job.state = "completed".into();
         app.jobs = vec![job];
         assert!(app.waiting_line().is_none());
+    }
+
+    #[test]
+    fn a_cached_job_keeps_reading_after_the_pause_clears() {
+        // A job can settle while the turn that waited on it is already over.
+        // The pause then disappears, and stopping the clock there left the
+        // cached `running` row on the status line for hours.
+        let mut app = session_app();
+        app.jobs = vec![running_job(6 * 60_000, None)];
+        app.job_poll = None;
+        app.tick();
+        assert!(
+            app.job_poll.is_some(),
+            "the cached row is read again until it settles"
+        );
+
+        let mut settled = running_job(6 * 60_000, None);
+        settled.state = "completed".into();
+        app.jobs = vec![settled];
+        app.tick();
+        assert!(app.job_poll.is_none(), "a terminal row stops the clock");
+    }
+
+    #[test]
+    fn switching_sessions_drops_the_previous_waiting_job() {
+        let mut app = session_app();
+        app.jobs = vec![running_job(6 * 60_000, None)];
+        app.job_poll = Some(Instant::now());
+        app.job_poll_pause = Some(7);
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_next", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        assert!(
+            app.jobs.is_empty(),
+            "the previous Session's job rows are gone"
+        );
+        assert!(app.job_poll.is_none() && app.job_poll_pause.is_none());
+        assert!(
+            app.waiting_line().is_none(),
+            "the next Session starts without a wait"
+        );
     }
 
     /// The state is the box's own title: an idle Session names itself there, a
