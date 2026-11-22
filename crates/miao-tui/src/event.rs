@@ -36,7 +36,16 @@ pub struct JobRow {
     pub subagent: bool,
 }
 
-/// One delegated child Session, as the sidebar lists it.
+/// One tool call of a running child, as the dashboard shows it: a readable
+/// argument and the state the child's run left it in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentTool {
+    pub name: String,
+    pub detail: String,
+    pub state: String,
+}
+
+/// One delegated child Session, as the sidebar and dashboard list it.
 ///
 /// A child answers on its own Session, so the parent's usage totals only say a
 /// delegation exists. These rows carry what makes it readable: whether the
@@ -53,6 +62,12 @@ pub struct SubagentRow {
     /// second read.
     pub started_at_ms: Option<u64>,
     pub messages: u64,
+    /// Whether the parent delegated this child as an exploration branch.
+    pub explore: bool,
+    /// Billed tokens of the child's current run.
+    pub tokens: u64,
+    /// The tail of the child's tool calls, oldest first.
+    pub tools: Vec<SubagentTool>,
 }
 
 #[derive(Debug)]

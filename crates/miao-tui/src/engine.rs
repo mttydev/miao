@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::dialogs::{AccountInfo, ModelInfo};
-use crate::event::{AppEvent, Bus, JobRow, SubagentRow};
+use crate::event::{AppEvent, Bus, JobRow, SubagentRow, SubagentTool};
 
 use crate::platform::attention;
 use crate::session::{
@@ -2439,6 +2439,36 @@ fn parse_subagents(value: &Value) -> Vec<SubagentRow> {
                             .get("message_count")
                             .and_then(Value::as_u64)
                             .unwrap_or(0),
+                        explore: row.get("explore").and_then(Value::as_bool).unwrap_or(false),
+                        tokens: row
+                            .get("tokens")
+                            .and_then(|tokens| tokens.get("total"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        tools: row
+                            .get("tools")
+                            .and_then(Value::as_array)
+                            .map(|tools| {
+                                tools
+                                    .iter()
+                                    .filter_map(|tool| {
+                                        Some(SubagentTool {
+                                            name: tool.get("name")?.as_str()?.to_string(),
+                                            detail: tool
+                                                .get("detail")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default()
+                                                .to_string(),
+                                            state: tool
+                                                .get("state")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default()
+                                                .to_string(),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()
