@@ -13,6 +13,17 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-11-22
+
+### Added
+- **tui**: paint running subagents as a live dashboard (#3296) (`55f14aa6dd`)
+
+### Fixed
+- **engine**: keep Anthropic turns alive past legal closes and stale signatures (#3300) (`749c644aa0`)
+- **tui**: hand the screen back once before the exit epilogue (#3298) (`15c1976551`)
+- **tui**: give the provider and version their own tone (#3294) (`2117f59f5a`)
+- **tui**: hide the host footer when miao exits (#3292) (`174fa69839`)
+
 ## [0.4.9] - 2026-11-21
 
 ### Added
