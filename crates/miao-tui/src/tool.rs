@@ -10,6 +10,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::highlight::Highlighter;
 use crate::session::{DisplayFile, ToolPart};
@@ -21,6 +22,14 @@ const TOOL_PREVIEW_LINES: usize = 2;
 const DIFF_PREVIEW_LINES: usize = 12;
 /// Characters one terminal read lays out per row.
 const PAINT_ROW_CHARS: usize = 120;
+/// Display cells one folded preview row keeps before clipping.
+///
+/// A tool result is not always many lines: a sqlite dump or a minified JSON
+/// envelope is one line of tens of kilobytes. The line budget then folds
+/// nothing, and the terminal's own wrapping spread that single row over the
+/// whole viewport. Folding clips each kept row to a couple of normal-width
+/// rows instead, and the expansion hint names what is out of view.
+const FOLDED_ROW_CELLS: usize = 160;
 
 /// How much of a tool result to paint, and the chord that changes it.
 ///
@@ -334,24 +343,68 @@ fn preview(
         return;
     }
     let lines = text.lines().collect::<Vec<_>>();
-    for line in lines.iter().take(limit) {
+    // `Fold::limit` answers `usize::MAX` when the block is open, so the budget
+    // also says whether this preview is folded. An open block keeps every row
+    // whole; a folded one clips each kept row, because a single 20 KB line is
+    // one line to the budget and a screenful to the terminal once it wraps.
+    let folded = limit != usize::MAX;
+    let kept = lines.len().min(limit);
+    let mut clipped = false;
+    for line in &lines[..kept] {
+        let (row, cut) = match folded {
+            true => clip_entry(line),
+            false => ((*line).to_string(), false),
+        };
+        clipped |= cut;
         out.push(Line::from(Span::styled(
-            format!("  │ {line}"),
+            format!("  │ {row}"),
             Style::new().fg(color),
         )));
     }
-    if lines.len() > limit {
-        // Say how to see the rest: a folded tool block that cannot be opened
-        // reads like lost output. The chord is the one the keymap actually
-        // binds, so a remap or an unbound action cannot leave the line
-        // promising a key that does nothing.
-        let hidden = lines.len() - limit;
-        let line = match toggle {
-            Some(chord) => format!("  │ … +{hidden} lines [{chord} to expand]"),
-            None => format!("  │ … +{hidden} lines"),
-        };
-        out.push(Line::from(Span::styled(line, Style::new().fg(color))));
+    let hidden = lines.len() - kept;
+    if hidden == 0 && !clipped {
+        return;
     }
+    // Say how to see the rest: a folded tool block that cannot be opened
+    // reads like lost output. The chord is the one the keymap actually
+    // binds, so a remap or an unbound action cannot leave the line
+    // promising a key that does nothing.
+    let mut notes = Vec::new();
+    if hidden > 0 {
+        notes.push(format!("+{hidden} lines"));
+    }
+    if clipped {
+        notes.push("long lines clipped".to_string());
+    }
+    let detail = notes.join(" · ");
+    let line = match toggle {
+        Some(chord) => format!("  │ … {detail} [{chord} to expand]"),
+        None => format!("  │ … {detail}"),
+    };
+    out.push(Line::from(Span::styled(line, Style::new().fg(color))));
+}
+
+/// One folded row, cut to [`FOLDED_ROW_CELLS`] display cells.
+///
+/// The cut is by display width, not characters, so a CJK or emoji blob is not
+/// clipped early by counting bytes, and it ends in `…` so the row reads as
+/// continuing rather than as a truncated value.
+fn clip_entry(line: &str) -> (String, bool) {
+    if line.width() <= FOLDED_ROW_CELLS {
+        return (line.to_string(), false);
+    }
+    let mut used = 0;
+    let mut cut = String::new();
+    for character in line.chars() {
+        let cells = character.width().unwrap_or(0);
+        if used + cells > FOLDED_ROW_CELLS.saturating_sub(1) {
+            break;
+        }
+        used += cells;
+        cut.push(character);
+    }
+    cut.push('…');
+    (cut, true)
 }
 
 /// A coordination message reads as its receipt: who it went to and whether that
@@ -2045,6 +2098,51 @@ mod tests {
         assert!(rendered
             .iter()
             .any(|line| line.contains("[ctrl+x u to expand]")));
+    }
+
+    /// A result that is one enormous line has no line to fold away: the line
+    /// budget keeps it whole and the terminal wrapped it across the viewport.
+    /// A folded preview clips it to a readable width and says so; unfolding
+    /// still hands the operator the entire value.
+    #[test]
+    fn a_single_enormous_line_is_clipped_while_folded() {
+        let blob = json!({
+            "content": (0..400)
+                .map(|n| format!("INSERT INTO context(session_id,seq) VALUES('s',{n});"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        })
+        .to_string();
+        let part = tool(
+            "run_command",
+            json!({"argv": ["sqlite3", "storage.db"]}),
+            Some(json!({"stdout": blob, "stderr": "", "exit_code": 0})),
+            false,
+        );
+        let folded = rendered(&lines(&part, None, &theme(), false, Some("ctrl+x u")));
+        let body = folded
+            .iter()
+            .find(|line| line.starts_with("  │ "))
+            .expect("the row paints its output");
+        assert!(
+            body.width() <= FOLDED_ROW_CELLS + 4,
+            "a folded row stays a couple of normal rows wide: {} cells",
+            body.width()
+        );
+        assert!(body.ends_with('…'), "the clip reads as continuing: {body}");
+        assert!(
+            folded
+                .iter()
+                .any(|line| line.contains("long lines clipped")),
+            "the row says the value was clipped: {folded:?}"
+        );
+        // Unfolding is the escape hatch, so the whole value must survive it.
+        let open = rendered(&lines(&part, None, &theme(), true, Some("ctrl+x u")));
+        assert!(
+            open.iter().any(|line| line.len() >= blob.len()),
+            "expanded output keeps the entire line"
+        );
+        assert!(!open.iter().any(|line| line.contains("clipped")));
     }
 
     #[test]
