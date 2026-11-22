@@ -296,8 +296,8 @@ fn header_with(
         Span::styled(
             label.to_ascii_uppercase(),
             Style::new()
-                .fg(palette.background)
-                .bg(badge_color(label, palette))
+                .fg(palette.tool_badge_fg)
+                .bg(palette.tool_badge_bg)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
@@ -314,19 +314,6 @@ fn header_with(
         ));
     }
     Line::from(spans).style(Style::new().bg(palette.surface))
-}
-
-fn badge_color(label: &str, palette: Palette) -> Color {
-    let label = label.to_ascii_lowercase();
-    if label == "bash" || label.starts_with("terminal") {
-        return palette.secondary;
-    }
-    match label.as_str() {
-        "read" | "glob" | "grep" | "webfetch" | "websearch" => palette.accent,
-        "write" | "edit" | "apply_patch" => palette.success,
-        "task" => palette.primary,
-        _ => palette.text_muted,
-    }
 }
 
 fn result_line(text: &str, color: Color) -> Line<'static> {
@@ -1109,7 +1096,7 @@ fn paint_diff(
         match row {
             DiffRow::Hunk => out.push(Line::from(Span::styled(
                 format!("  {:width$}  …", ""),
-                Style::new().fg(palette.text_muted),
+                Style::new().fg(palette.diff_hunk_header),
             ))),
             DiffRow::Line {
                 number,
@@ -1136,7 +1123,7 @@ fn paint_diff(
                 let mut spans = vec![
                     Span::styled(
                         gutter,
-                        Style::new().fg(palette.text_muted).patch(block_style),
+                        Style::new().fg(palette.diff_line_number).patch(block_style),
                     ),
                     Span::styled(
                         marker.to_string(),
@@ -2070,8 +2057,8 @@ mod tests {
             .iter()
             .find(|span| span.content.trim() == "BASH")
             .expect("the label wears the badge");
-        assert_eq!(badge.style.bg, Some(palette.secondary));
-        assert_eq!(badge.style.fg, Some(palette.background));
+        assert_eq!(badge.style.bg, Some(palette.tool_badge_bg));
+        assert_eq!(badge.style.fg, Some(palette.tool_badge_fg));
         assert!(badge.style.add_modifier.contains(Modifier::BOLD));
         // The row itself wears one band, so the pane can pad it to the edge
         // instead of leaving the badge as a floating box.
