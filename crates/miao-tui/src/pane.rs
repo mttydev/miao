@@ -2720,7 +2720,10 @@ fn wire_from_status(status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
             start: 0,
             end: 0,
             chord: None,
-            tone: Some("muted"),
+            // The provider is a fact about the connection that serves the
+            // model, so it reads in the positive tone instead of sharing the
+            // host's default text colour with every neutral label.
+            tone: Some("success"),
         });
     }
     (!segs.is_empty()).then_some(segs)
@@ -2863,7 +2866,6 @@ fn render_composer_status(
     theme: &Theme,
 ) {
     let palette = theme.palette;
-    let muted = Style::new().fg(palette.text_muted);
     let version = format!(" miao {} ", crate::VERSION);
     let version_width = UnicodeWidthStr::width(version.as_str()) as u16;
     let facts_width = area.width.saturating_sub(version_width + 1);
@@ -2926,7 +2928,11 @@ fn render_composer_status(
         );
     }
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(version, muted))).alignment(Alignment::Right),
+        Paragraph::new(Line::from(Span::styled(
+            version,
+            Style::new().fg(palette.accent),
+        )))
+        .alignment(Alignment::Right),
         area,
     );
 }
