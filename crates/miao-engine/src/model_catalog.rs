@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::sync::mpsc;
@@ -19,8 +19,9 @@ pub const MAX_ROUTES: usize = 1024;
 
 /// The full provider directory the install ships (`models.json`, the same
 /// file the TS catalog service reads), with the self-maintained model patches
-/// applied: an explicit path, a snapshot beside the engine binary, the
-/// installer's shipped copy, then the user cache.
+/// applied. An explicit path wins; otherwise the newest readable snapshot
+/// beside the engine binary, in the install directory, or in the user cache
+/// is used.
 pub(crate) fn models_snapshot() -> Option<serde_json::Value> {
     let mut snapshot = raw_snapshot()?;
     // MIAO_MODELS_PATH selects an exact catalog (tests, air-gapped users), so
@@ -33,30 +34,72 @@ pub(crate) fn models_snapshot() -> Option<serde_json::Value> {
 }
 
 fn raw_snapshot() -> Option<serde_json::Value> {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    // An explicit path selects an exact catalog, even when it is older than
+    // the cache; the operator or a test asked for that file.
     if let Some(path) = std::env::var_os("MIAO_MODELS_PATH") {
-        candidates.push(std::path::PathBuf::from(path));
+        return read_snapshot(Path::new(&path));
     }
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(executable) = std::env::current_exe() {
         if let Some(directory) = executable.parent() {
             candidates.push(directory.join("models.json"));
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::PathBuf::from(home);
+    if let Some(home) = home_dir() {
         candidates.push(home.join(".miao/bin/models.json"));
         candidates.push(home.join(".local/share/miao/bin/models.json"));
         let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".cache"));
-        // The newest copy the TS catalog service keeps, and the one it
-        // actually serves from once it has fetched at least once.
+        // The copy the TS catalog service keeps and serves after its first
+        // fetch. It is usually newer than the installer's shipped snapshot,
+        // and it is the only place a freshly released model appears until the
+        // next install.
         candidates.push(cache.join("miao/models.json"));
     }
-    candidates
-        .iter()
-        .find_map(|path| std::fs::read(path).ok())
+    newest_snapshot(candidates)
+}
+
+/// The home directory the product and the TS catalog service share.
+///
+/// A native Windows binary often has `USERPROFILE` but no `HOME`; a Git Bash
+/// `HOME` such as `/c/Users/name` is not a valid native path. Prefer the
+/// native variable on Windows and keep `HOME` for Unix.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(home));
+        }
+        if let (Some(drive), Some(path)) =
+            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+        {
+            return Some(PathBuf::from(drive).join(path));
+        }
+    }
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn read_snapshot(path: &Path) -> Option<serde_json::Value> {
+    std::fs::read(path)
+        .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+/// Pick the newest readable snapshot. The installer's copy and the TS cache
+/// can both exist; whichever was written last is the one that knows the
+/// current model list.
+fn newest_snapshot(candidates: Vec<PathBuf>) -> Option<serde_json::Value> {
+    candidates
+        .into_iter()
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            read_snapshot(&path).map(|snapshot| (modified, snapshot))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, snapshot)| snapshot)
 }
 
 /// The model patches miao maintains itself, mirrored from
@@ -659,5 +702,22 @@ mod window_tests {
         let mut empty = serde_json::json!({});
         apply_overlay(&mut empty);
         assert_eq!(empty, serde_json::json!({}));
+    }
+
+    #[test]
+    fn the_newest_snapshot_wins_over_the_shipped_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old.json");
+        let new = directory.path().join("new.json");
+        std::fs::write(&old, r#"{"old":{}}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        std::fs::write(&new, r#"{"new":{}}"#).unwrap();
+        let picked = newest_snapshot(vec![old, new]).expect("snapshot");
+        assert!(picked.get("new").is_some(), "{picked}");
     }
 }
