@@ -13,6 +13,17 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-11-22
+
+### Added
+- **tui**: show the queue depth as a filled chip (#3331) (`d8188b0022`)
+- **tui**: draw the context occupancy as a bar beside its figures (#3335) (`c073ae9c51`)
+
+### Fixed
+- **tui**: let the composer hint follow the engine's readiness rule (#2603) (#3334) (`be5637c846`)
+- **tui**: adopt the host canvas so the page meets its pane (#3336) (`c7ff1bb456`)
+- **tui**: lift the sidebar chord hint off the composer's bottom edge (#3333) (`cd2950656b`)
+
 ## [0.4.10] - 2026-11-22
 
 ### Added
