@@ -476,6 +476,34 @@ fn quitting_names_the_session_and_how_to_continue_it() {
     harness.shutdown();
 }
 
+/// The screen comes back exactly once, before the epilogue. A second
+/// `LeaveAlternateScreen` after the epilogue put the cursor back where it stood
+/// before the alternate screen, so the shell's next prompt was painted over the
+/// epilogue and the stale prompt line (clearest on Windows/ConPTY).
+#[test]
+fn the_exit_hands_the_screen_back_once_before_the_epilogue() {
+    let mut harness = Harness::spawn_in_session("exit-once", "ses_a");
+    harness.write(b"\x03");
+    let status = wait_exit(&mut harness.child, Duration::from_secs(8))
+        .expect("process did not exit after Ctrl+C");
+    assert!(status.success(), "Ctrl+C must exit 0, got {status:?}");
+    assert!(
+        wait_for(&harness, "Continue  miao -s ses_a", Duration::from_secs(5)),
+        "the exit epilogue never named the Session:\n{}",
+        plain(&harness.text())
+    );
+    let raw = harness.text();
+    let epilogue = raw.find("Continue  miao -s ses_a").expect("the epilogue");
+    let leaves = raw.matches("\x1b[?1049l").count();
+    assert_eq!(leaves, 1, "the screen was handed back {leaves} times");
+    let last_leave = raw.rfind("\x1b[?1049l").expect("the leave");
+    assert!(
+        last_leave < epilogue,
+        "the epilogue was written before the screen came back"
+    );
+    harness.shutdown();
+}
+
 #[test]
 fn tag_sets_the_label_from_its_argument() {
     let mut harness = Harness::spawn_in_session("tag", "ses_b");

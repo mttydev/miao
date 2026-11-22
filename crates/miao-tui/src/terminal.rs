@@ -152,11 +152,57 @@ where
 }
 
 /// Covers normal exit and every error after raw-mode initialization begins.
-pub struct RestoreGuard;
+///
+/// The screen is handed back at most once. A second `LeaveAlternateScreen`
+/// after the exit epilogue put the cursor back where it stood before the
+/// alternate screen, so the shell's next prompt was written over the epilogue
+/// and the line it replaced instead of after them.
+pub struct RestoreGuard {
+    handed_back: bool,
+}
+
+impl RestoreGuard {
+    pub fn new() -> Self {
+        Self { handed_back: false }
+    }
+
+    /// Hand the screen and input back. Calling it again — including from the
+    /// drop that covers early returns — writes nothing.
+    pub fn hand_back(&mut self) {
+        self.hand_back_to(&mut io::stdout());
+        let _ = disable_raw_mode();
+    }
+
+    /// Whether this call was the one that handed the screen back.
+    fn hand_back_to(&mut self, writer: &mut impl Write) -> bool {
+        if self.handed_back {
+            return false;
+        }
+        self.handed_back = true;
+        // Leave the screen on its own and flush it first: `execute!` stops at
+        // the first failing command, so a Windows mode restore queued after the
+        // leave could abort before the leave reached the terminal.
+        let _ = leave_alternate(writer);
+        let _ = execute!(
+            writer,
+            DisableBracketedPaste,
+            DisableFocusChange,
+            DisableMouseCapture,
+            SetCursorStyle::DefaultUserShape
+        );
+        true
+    }
+}
+
+impl Default for RestoreGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
-        restore();
+        self.hand_back();
     }
 }
 
@@ -181,19 +227,7 @@ pub fn init(preferences: Preferences) -> io::Result<Tui> {
 /// Mouse capture and the cursor shape are terminal state, so they are turned
 /// off on the way out whether or not they were on.
 pub fn restore() {
-    let mut stdout = io::stdout();
-    // Leave the screen on its own and flush it first: `execute!` stops at the
-    // first failing command, so a Windows mode restore queued after the leave
-    // could abort before the leave reached the terminal.
-    let _ = leave_alternate(&mut stdout);
-    let _ = execute!(
-        stdout,
-        DisableBracketedPaste,
-        DisableFocusChange,
-        DisableMouseCapture,
-        SetCursorStyle::DefaultUserShape
-    );
-    let _ = disable_raw_mode();
+    RestoreGuard::new().hand_back();
 }
 
 /// Hand the terminal to an external editor: leave the alternate screen and
@@ -306,6 +340,27 @@ mod tests {
             cursor_style(cursor(CursorShape::Default, true)),
             SetCursorStyle::DefaultUserShape
         ));
+    }
+
+    /// The exit path hands the screen back once and then writes the epilogue.
+    /// A second hand-back re-restores the pre-TUI cursor, which is what made the
+    /// shell paint its prompt over the epilogue after quitting.
+    #[test]
+    fn handing_the_screen_back_is_a_one_shot() {
+        let mut guard = RestoreGuard::new();
+        let mut first = Vec::new();
+        assert!(guard.hand_back_to(&mut first));
+        let mut second = Vec::new();
+        assert!(!guard.hand_back_to(&mut second));
+        assert!(second.is_empty(), "the second hand-back wrote {second:?}");
+        assert_eq!(
+            first
+                .windows(LEAVE_ALTERNATE.len())
+                .filter(|window| *window == LEAVE_ALTERNATE)
+                .count(),
+            1,
+            "{first:?}"
+        );
     }
 
     /// The alternate screen is what hides the frame from the shell. The pair

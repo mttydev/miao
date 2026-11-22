@@ -38,6 +38,7 @@ pub mod workspace_changes;
 pub mod worktrees;
 
 use std::error::Error;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -143,7 +144,7 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
         let _entered = runtime.enter();
         platform::signals::Signals::new()?
     };
-    let _restore = terminal::RestoreGuard;
+    let mut restore = terminal::RestoreGuard::new();
     let mut terminal = terminal::init(preferences)?;
     terminal::install_panic_hook();
     let (bus, mut events) = event::bus();
@@ -156,14 +157,17 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
         preferences,
         termination,
     ));
-    // Hand the screen back before writing the epilogue. The restore guard drops
-    // after this function returns, so anything printed earlier would have landed
-    // on the alternate screen that was about to be discarded, which is exactly
-    // why quitting showed no session identifier at all.
+    // Hand the screen back before writing the epilogue. The guard disarms here,
+    // so the drop that covers early returns cannot restore the cursor again:
+    // doing that after the epilogue made the shell paint its prompt over the
+    // epilogue and the old prompt line.
     drop(terminal);
-    terminal::restore();
+    restore.hand_back();
     if let Some(session) = app.session.as_ref() {
-        print!("{}", session::epilogue(session));
+        // The restored screen cursor sits on the shell's old prompt line, so
+        // the epilogue opens a line of its own instead of appending to it.
+        print!("\n{}", session::epilogue(session));
+        let _ = io::stdout().flush();
     }
     result
 }
