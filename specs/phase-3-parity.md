@@ -143,7 +143,7 @@
 | 引擎输入字段投影（`path`→`filePath`、`text`→`content`、argv→command、task 描述） | 已对齐 | `tool::product_input` |
 | shell 结果投影：stdout+stderr+`[exit code N]`/超时/信号/未执行，拒绝原因只显示错误文本 | 已对齐 | `tool::shell_text`；ANSI 序列先剥离 |
 | bash 行：命令首行 + 输出前 6 行折叠 | 已对齐 | TS 折叠态同 6 行 |
-| read 行：路径 + `Read N lines`/`Read image`/`Read N entries`（truncated 注明） | 已对齐 | 读引擎结果里的 `text`/`entries` |
+| read 行：路径 + 行内 `N lines`/`image`/`N entries`（truncated 注明） | 已对齐 | 读引擎结果里的 `text`/`entries` |
 | glob/grep 行：pattern（含 path）+ 匹配数 | 已对齐 | 匹配数来自结果 `matches` |
 | write/edit/apply_patch：文件摘要 + 每个文件的 `◆ action +N −M` 与 12 行 diff | 已对齐 | diff 来自已提交的 `tool.completed.display`；跳过 `Index:`/`---`/`+++` 头 |
 | todowrite：`[✓] id: content ← deps`，in_progress warning、其余 muted | 已对齐 | todo 取自输入的 `todos`；结果 `{value:{todos}}` 兜底 |

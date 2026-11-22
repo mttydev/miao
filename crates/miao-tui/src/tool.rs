@@ -7,16 +7,16 @@
 //! half of that projection lives here; without it every tool row would show raw
 //! JSON.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::highlight::Highlighter;
 use crate::session::{DisplayFile, ToolPart};
-use crate::theme::Theme;
+use crate::theme::{Palette, Theme};
 
 /// Output lines one command row shows before collapsing.
-const TOOL_PREVIEW_LINES: usize = 1;
+const TOOL_PREVIEW_LINES: usize = 2;
 /// Diff lines one changed file shows before collapsing.
 const DIFF_PREVIEW_LINES: usize = 12;
 /// Characters one terminal read lays out per row.
@@ -262,6 +262,16 @@ fn parse_json(text: &str) -> Option<Value> {
 }
 
 fn header(tool: &ToolPart, label: &str, detail: &str, theme: &Theme) -> Line<'static> {
+    header_with(tool, label, detail, None, theme)
+}
+
+fn header_with(
+    tool: &ToolPart,
+    label: &str,
+    detail: &str,
+    summary: Option<&str>,
+    theme: &Theme,
+) -> Line<'static> {
     let palette = theme.palette;
     // Each state gets its own glyph as well as its own colour: a finished call
     // reads as a tick and a failed one as a cross even in a monochrome theme,
@@ -277,17 +287,46 @@ fn header(tool: &ToolPart, label: &str, detail: &str, theme: &Theme) -> Line<'st
     } else {
         ("·", Style::new().fg(palette.warning))
     };
+    // The label sits in a filled badge so a call reads as a stamped block
+    // rather than another line of prose, and its argument stays in brackets.
+    // The whole row rides on one panel band: the badge is the only ink that
+    // differs, so the call reads as a block instead of a floating chip.
     let mut spans = vec![
         Span::styled(format!("{glyph} "), glyph_style),
-        Span::styled(label.to_string(), Style::new().fg(palette.secondary)),
+        Span::styled(
+            label.to_ascii_uppercase(),
+            Style::new()
+                .fg(palette.background)
+                .bg(badge_color(label, palette))
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
     if !detail.is_empty() {
         spans.push(Span::styled(
-            format!("  {detail}"),
+            format!(" [{detail}]"),
+            Style::new().fg(palette.text),
+        ));
+    }
+    if let Some(summary) = summary.filter(|summary| !summary.is_empty()) {
+        spans.push(Span::styled(
+            format!(" {summary}"),
             Style::new().fg(palette.text_muted),
         ));
     }
-    Line::from(spans)
+    Line::from(spans).style(Style::new().bg(palette.surface))
+}
+
+fn badge_color(label: &str, palette: Palette) -> Color {
+    let label = label.to_ascii_lowercase();
+    if label == "bash" || label.starts_with("terminal") {
+        return palette.secondary;
+    }
+    match label.as_str() {
+        "read" | "glob" | "grep" | "webfetch" | "websearch" => palette.accent,
+        "write" | "edit" | "apply_patch" => palette.success,
+        "task" => palette.primary,
+        _ => palette.text_muted,
+    }
 }
 
 fn result_line(text: &str, color: Color) -> Line<'static> {
@@ -320,8 +359,8 @@ fn preview(
         // promising a key that does nothing.
         let hidden = lines.len() - limit;
         let line = match toggle {
-            Some(chord) => format!("  │ … {hidden} more lines · {chord} expand"),
-            None => format!("  │ … {hidden} more lines"),
+            Some(chord) => format!("  │ … +{hidden} lines [{chord} to expand]"),
+            None => format!("  │ … +{hidden} lines"),
         };
         out.push(Line::from(Span::styled(line, Style::new().fg(color))));
     }
@@ -757,15 +796,19 @@ fn read(
     let limit = fold.limit(TOOL_PREVIEW_LINES);
     let palette = theme.palette;
     let path = text(input, "filePath");
-    out.push(header(tool, "read", &compact(&path), theme));
-    if tool.failed {
-        if let Some(output) = tool.output.as_deref() {
-            preview(out, output, palette.error, limit, fold.toggle);
-        }
+    let summary = read_summary(&tool.name, result).filter(|_| !tool.failed);
+    out.push(header_with(
+        tool,
+        "read",
+        &compact(&path),
+        summary.as_deref(),
+        theme,
+    ));
+    if !tool.failed {
         return;
     }
-    if let Some(summary) = read_summary(&tool.name, result) {
-        out.push(result_line(&summary, palette.text_muted));
+    if let Some(output) = tool.output.as_deref() {
+        preview(out, output, palette.error, limit, fold.toggle);
     }
 }
 
@@ -774,7 +817,7 @@ fn read_summary(engine: &str, result: Option<&Value>) -> Option<String> {
         return None;
     };
     if engine == "read_image" {
-        return Some("Read image".to_string());
+        return Some("image".to_string());
     }
     if engine == "list_files" {
         let count = record
@@ -786,7 +829,7 @@ fn read_summary(engine: &str, result: Option<&Value>) -> Option<String> {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         return Some(format!(
-            "Read {count} {}{}",
+            "{count} {}{}",
             if count == 1 { "entry" } else { "entries" },
             if truncated { " (truncated)" } else { "" }
         ));
@@ -802,7 +845,7 @@ fn read_summary(engine: &str, result: Option<&Value>) -> Option<String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     Some(format!(
-        "Read {count} {}{}",
+        "{count} {}{}",
         if count == 1 { "line" } else { "lines" },
         if truncated { " (truncated)" } else { "" }
     ))
@@ -826,11 +869,9 @@ fn search(
     } else {
         compact(&format!("{pattern} in {path}"))
     };
-    out.push(header(tool, label, &detail, theme));
+    let summary = search_summary(result).filter(|_| !tool.failed);
+    out.push(header_with(tool, label, &detail, summary.as_deref(), theme));
     if !tool.failed {
-        if let Some(summary) = search_summary(result) {
-            out.push(result_line(&summary, palette.text_muted));
-        }
         return;
     }
     if let Some(output) = tool.output.as_deref() {
@@ -1805,14 +1846,10 @@ mod tests {
         }
     }
 
-    /// A completed `read_file` puts its result on its own indented row, and
-    /// that row has to survive a narrow pane: `wrap_rows` folds a plain row at
-    /// the pane width, so a 44-column transcript used to break `  ⎿ Read 2
-    /// lines` in half with no hanging indent. The row is short by design — it
-    /// is a one-line summary — so it hangs under its own `⎿` column instead of
-    /// folding mid-phrase.
+    /// A completed `read_file` reports its line count on the header row, so a
+    /// summary never costs a second row of transcript.
     #[test]
-    fn a_short_read_summary_does_not_fold_mid_phrase() {
+    fn a_read_summary_rides_on_the_header() {
         let lines = lines(
             &tool(
                 "read_file",
@@ -1826,10 +1863,8 @@ mod tests {
             None,
         );
         let rendered = rendered(&lines);
-        assert!(
-            rendered.iter().any(|line| line.contains("⎿ Read 2 lines")),
-            "{rendered:?}"
-        );
+        assert!(rendered[0].contains(" 2 lines"), "{rendered:?}");
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
     }
 
     fn rendered(lines: &[Line<'_>]) -> Vec<String> {
@@ -2007,21 +2042,40 @@ mod tests {
         let part = tool(
             "run_command",
             json!({"argv": ["echo", "hi"]}),
-            Some(json!({"stdout": "hi\n", "stderr": "", "exit_code": 0})),
+            Some(json!({"stdout": "hi\nthere", "stderr": "", "exit_code": 0})),
             false,
         );
         let lines = lines(&part, None, &theme(), false, Some("ctrl+x u"));
         let rendered = rendered(&lines);
-        assert_eq!(rendered[0], "✓ bash  echo hi");
+        assert_eq!(rendered[0], "✓ BASH [echo hi]");
         assert!(rendered.contains(&"  │ hi".to_string()));
-        // Folded output keeps one line; the tail and the hint stay reachable
+        // Folded output keeps two lines; the tail and the hint stay reachable
         // through the elision marker instead of crowding the transcript.
-        assert!(rendered.iter().any(|line| line.contains("more lines")));
+        assert!(rendered.iter().any(|line| line.contains("  │ … +")));
         // The hint names the key the operator presses, not the config's
         // `<leader>` placeholder.
         assert!(rendered
             .iter()
-            .any(|line| line.contains("· ctrl+x u expand")));
+            .any(|line| line.contains("[ctrl+x u to expand]")));
+    }
+
+    #[test]
+    fn a_tool_label_rides_in_a_filled_badge() {
+        let theme = theme();
+        let palette = theme.palette;
+        let part = tool("run_command", json!({"argv": ["echo", "hi"]}), None, false);
+        let rows = lines(&part, None, &theme, false, None);
+        let badge = rows[0]
+            .spans
+            .iter()
+            .find(|span| span.content.trim() == "BASH")
+            .expect("the label wears the badge");
+        assert_eq!(badge.style.bg, Some(palette.secondary));
+        assert_eq!(badge.style.fg, Some(palette.background));
+        assert!(badge.style.add_modifier.contains(Modifier::BOLD));
+        // The row itself wears one band, so the pane can pad it to the edge
+        // instead of leaving the badge as a floating box.
+        assert_eq!(rows[0].style.bg, Some(palette.surface));
     }
 
     #[test]
@@ -2038,10 +2092,10 @@ mod tests {
         );
         let folded = rendered(&lines(&part, None, &theme(), false, None));
         assert!(folded.len() < 12);
-        assert!(folded.iter().any(|line| line.contains("more lines")));
+        assert!(folded.iter().any(|line| line.contains("  │ … +")));
         let expanded = rendered(&lines(&part, None, &theme(), true, None));
         assert!(expanded.iter().any(|line| line.contains("line 12")));
-        assert!(!expanded.iter().any(|line| line.contains("more lines")));
+        assert!(!expanded.iter().any(|line| line.contains("  │ … +")));
     }
 
     /// The receipt is the engine's own answer, so the row repeats it rather
@@ -2059,7 +2113,7 @@ mod tests {
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
         assert!(
-            rendered[0].contains("message") && rendered[0].contains("→ ses_b"),
+            rendered[0].contains("MESSAGE") && rendered[0].contains("→ ses_b"),
             "{rendered:?}"
         );
         assert!(rendered[0].contains("wake requested"), "{rendered:?}");
@@ -2083,7 +2137,7 @@ mod tests {
         );
         let lines = lines(&part, None, &theme(), false, None);
         let rendered = rendered(&lines);
-        assert_eq!(rendered[0], "✗ bash  ls");
+        assert_eq!(rendered[0], "✗ BASH [ls]");
         assert!(rendered.contains(&"  │ permission denied".to_string()));
     }
 
@@ -2101,8 +2155,7 @@ mod tests {
         );
         // An unbound toggle keeps the count and promises no key at all.
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert!(rendered.iter().any(|line| line.contains("  │ … ")));
-        assert!(rendered.iter().any(|line| line.contains("more lines")));
+        assert!(rendered.iter().any(|line| line.contains("  │ … +")));
         assert!(!rendered.iter().any(|line| line.contains("expand")));
     }
 
@@ -2155,13 +2208,13 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, Some("ctrl+x r")));
-        assert!(rendered.iter().any(|line| line.contains("terminal read")));
+        assert!(rendered.iter().any(|line| line.contains("TERMINAL READ")));
         assert!(rendered.iter().any(|line| line.contains("term_1")));
         assert!(rendered
             .iter()
             .any(|line| line.contains("65 B · more retained · running")));
         assert!(rendered.iter().any(|line| line.contains("hello world")));
-        assert!(rendered.iter().any(|line| line.contains("more lines")));
+        assert!(rendered.iter().any(|line| line.contains("  │ … +")));
         assert!(!rendered.iter().any(|line| line.contains("retained_from")));
         assert!(!rendered.iter().any(|line| line.contains('\u{1b}')));
     }
@@ -2183,7 +2236,7 @@ mod tests {
         let rendered = rendered(&lines(&part, None, &theme(), true, Some("ctrl+x r")));
         assert!(rendered.iter().any(|line| line.contains("2 red")));
         assert!(rendered.iter().any(|line| line.contains("three")));
-        assert!(!rendered.iter().any(|line| line.contains("more lines")));
+        assert!(!rendered.iter().any(|line| line.contains("  │ … +")));
     }
 
     /// A full-screen program repaints cells with escapes and never emits a
@@ -2214,7 +2267,7 @@ mod tests {
             "{rendered:?}"
         );
         assert!(
-            rendered.iter().any(|line| line.contains("more lines")),
+            rendered.iter().any(|line| line.contains("  │ … +")),
             "{rendered:?}"
         );
         assert!(
@@ -2286,8 +2339,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ read  a.rs");
-        assert!(rendered.contains(&"  ⎿ Read 2 lines".to_string()));
+        assert_eq!(rendered[0], "✓ READ [a.rs] 2 lines");
     }
 
     #[test]
@@ -2299,8 +2351,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ grep  fn main in src");
-        assert!(rendered.contains(&"  ⎿ 1 match (truncated)".to_string()));
+        assert_eq!(rendered[0], "✓ GREP [fn main in src] 1 match (truncated)");
     }
 
     #[test]
@@ -2313,7 +2364,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, Some(&files), &theme(), false, None));
-        assert_eq!(rendered[0], "✓ edit  src/lib.rs");
+        assert_eq!(rendered[0], "✓ EDIT [src/lib.rs]");
         assert!(rendered.contains(&"  ⎿ Added 1 line, removed 1 line".to_string()));
         assert!(rendered.contains(&"  ◆ update src/lib.rs +1 −1".to_string()));
         assert!(rendered.contains(&"  1  -a".to_string()), "{rendered:?}");
@@ -2338,7 +2389,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ edit  docs/guide.zh.md");
+        assert_eq!(rendered[0], "✓ EDIT [docs/guide.zh.md]");
         assert!(
             rendered.contains(&"    -旧的一行".to_string()),
             "{rendered:?}"
@@ -2358,7 +2409,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ write  notes.md");
+        assert_eq!(rendered[0], "✓ WRITE [notes.md]");
         // A changed row is padded to the block's width, so the tint ends on one
         // column; the padding carries no text.
         assert!(
@@ -2505,7 +2556,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ todowrite");
+        assert_eq!(rendered[0], "✓ TODOWRITE");
         assert!(rendered.contains(&"  [✓] 1: write code".to_string()));
         assert!(rendered.contains(&"  [•] 2: test it ← 1".to_string()));
         // The input said both were pending; the painted row is the applied list.
@@ -2524,7 +2575,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered, vec!["· todowrite".to_string()]);
+        assert_eq!(rendered, vec!["· TODOWRITE".to_string()]);
     }
 
     #[test]
@@ -2536,7 +2587,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered, ["✓ WebFetch  https://example.com/docs"]);
+        assert_eq!(rendered, ["✓ WEBFETCH [https://example.com/docs]"]);
     }
 
     #[test]
@@ -2565,7 +2616,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ mcp_server_tool  hello");
+        assert_eq!(rendered[0], "✓ MCP_SERVER_TOOL [hello]");
         assert!(rendered.contains(&"  │ {\"result\":\"world\"}".to_string()));
     }
     /// A task list reads as one row per child — description and state — never
@@ -2647,15 +2698,11 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), true, None));
-        assert_eq!(rendered[0], "✓ read  assets/logo.png");
-        assert!(
-            rendered.contains(&"  ⎿ Read image".to_string()),
-            "{rendered:?}"
-        );
+        assert_eq!(rendered[0], "✓ READ [assets/logo.png] image");
         assert!(
             !rendered.iter().any(|line| line.contains("iVBOR")),
             "the image bytes stay out of the row: {rendered:?}"
         );
-        assert_eq!(rendered.len(), 2, "nothing further to expand: {rendered:?}");
+        assert_eq!(rendered.len(), 1, "nothing further to expand: {rendered:?}");
     }
 }

@@ -10876,7 +10876,7 @@ mod tests {
         ));
         let painted = drafted(&mut app);
         assert!(
-            painted.contains("bash"),
+            painted.contains("BASH"),
             "the draft names the tool the engine opened (run_command renders as bash): {painted:?}"
         );
         assert!(

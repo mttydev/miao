@@ -612,7 +612,7 @@ fn the_transcript_renders_markdown_and_tool_rows() {
         plain(&harness.text())
     );
     assert!(
-        wait_for_screen(&harness, "Read 2 lines", Duration::from_secs(2)),
+        wait_for_screen(&harness, "2 lines", Duration::from_secs(2)),
         "the tool summary did not render:\n{}",
         harness.screen()
     );
@@ -620,8 +620,7 @@ fn the_transcript_renders_markdown_and_tool_rows() {
     for expected in [
         "• bold and code",
         "name │ value",
-        "✓ read  src/lib.rs",
-        "⎿ Read 2 lines",
+        "✓ READ [src/lib.rs] 2 lines",
     ] {
         assert!(
             rendered.contains(expected),
