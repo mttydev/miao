@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::highlight::Highlighter;
 use crate::session::{DisplayFile, ToolPart};
-use crate::theme::{Palette, Theme};
+use crate::theme::Theme;
 
 /// Output lines one command row shows before collapsing.
 const TOOL_PREVIEW_LINES: usize = 2;
