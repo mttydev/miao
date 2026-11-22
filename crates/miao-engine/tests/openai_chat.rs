@@ -223,8 +223,11 @@ async fn tool_call_text_for_another_function_is_not_borrowed() {
         .stream(request(), progress, CancellationToken::new())
         .await
         .unwrap();
-    assert!(reply.content[1]["input"].is_null());
-    assert_eq!(reply.content[1]["input_error"], "invalid_json");
+    // The arguments were not borrowed from the write_file block: the call
+    // keeps the empty input it was actually given, and the tool's own schema
+    // decides whether that input is usable.
+    assert_eq!(reply.content[1]["input"], json!({}));
+    assert!(reply.content[1].get("input_error").is_none());
     server.await.unwrap();
 }
 
