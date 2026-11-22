@@ -255,13 +255,19 @@ impl Reporter {
         }
     }
 
-    /// The TUI is leaving: an idle report stops the tab claiming a run that
-    /// ended with this process, and a cleared context stops the next client
-    /// from attesting a Runtime this one no longer hosts.
+    /// The TUI is leaving: one final report stops the tab claiming a run that
+    /// ended with this process, clears the Runtime this client no longer hosts,
+    /// and hides the merged footer the host would otherwise keep showing.
     pub fn clear(&mut self) {
         self.context = None;
-        self.last = None;
-        self.update(State::Idle);
+        // The host replaces the pane's whole entry on each write, so the final
+        // idle report must carry the hidden footer itself: riding the last
+        // visible footer would leave this process's facts in the host's bar
+        // after exit.
+        let footer = footer_update(&self.last_footer, None);
+        self.last_footer = None;
+        self.last = Some(State::Idle);
+        self.send(State::Idle, footer.as_deref());
     }
 
     fn send(&self, state: State, footer: Option<&str>) {
@@ -405,17 +411,23 @@ mod tests {
     }
 
     #[test]
-    fn stopping_the_host_forces_one_final_report_without_a_context() {
+    fn stopping_the_host_forces_one_final_report_without_a_context_or_footer() {
         let mut reporter = Reporter {
             context: Some(RuntimeContext {
                 runtime_id: "runtime-1".into(),
                 storage: "/tmp/miao.db".into(),
             }),
+            last_footer: Some(r#"{"v":1,"visible":true,"version":"0.4.9","segs":[]}"#.into()),
+            host_footer: true,
             ..Reporter::default()
         };
         reporter.clear();
         assert_eq!(reporter.context, None);
         assert_eq!(reporter.last, Some(State::Idle));
+        // The host keeps whatever the last write carried, so exiting must not
+        // leave the old facts riding the idle report.
+        assert_eq!(reporter.last_footer, None);
+        assert_eq!(reporter.footer_rider(), None);
     }
 
     #[test]
