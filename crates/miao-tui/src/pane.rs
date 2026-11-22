@@ -137,6 +137,7 @@ impl Shell {
                 todos: Vec::new(),
                 chord: None,
                 lang: Lang::En,
+                hint_offset: 0,
             }),
             last: None,
             pending_transcript: None,
@@ -205,6 +206,19 @@ impl Shell {
             sidebar.chord = chord.clone();
         }
         self.sidebar_chord = chord;
+    }
+
+    /// Keep the column's chord hint off the row the composer's box ends on.
+    ///
+    /// A plain terminal paints the facts row under the box, so the hint's own
+    /// last row is free and `false` is right. An embedded host hands the
+    /// terminal the facts row instead, so the box's bottom edge lands on the
+    /// column's last row and the edge cut through the hint's glyphs.
+    fn place_sidebar_hint(&mut self) {
+        let offset = u16::from(self.embedded_footer);
+        if let Some(sidebar) = self.sidebar.as_mut() {
+            sidebar.hint_offset = offset;
+        }
     }
 
     /// The chord the strip names while the column is hidden: `None` when the
@@ -717,6 +731,7 @@ impl Shell {
         // the queue and the box are laid out inside it. The state keeps the
         // box's own title; the facts row below it carries the model, so the
         // conversation still ends where the sidebar's rule does.
+        self.place_sidebar_hint();
         let (conversation_area, sidebar_area) = match self.sidebar_hidden {
             true => (frame.area(), None),
             false => body_columns(frame.area()),
@@ -4304,6 +4319,15 @@ pub struct SidebarPane {
     /// The chrome language this column paints its headers and row labels in.
     /// `/lang` swaps it live.
     lang: Lang,
+    /// How many rows above its own last one the chord hint sits.
+    ///
+    /// Zero puts it on the last row, which is where a plain terminal wants it:
+    /// the facts row is painted there, so nothing collides. An embedded host
+    /// takes that row for itself and hands this column the window's whole
+    /// height, so the composer's box also ends on the last row — a hint on that
+    /// row had the box's bottom edge drawn through the middle of its glyphs.
+    /// One row up keeps the chord legible with its own rule below it.
+    hint_offset: u16,
 }
 
 impl Pane for SidebarPane {
@@ -4953,7 +4977,7 @@ impl Pane for SidebarPane {
         let hint = self
             .chord
             .as_ref()
-            .filter(|_| inner.height > 3)
+            .filter(|_| inner.height > 3 + self.hint_offset)
             .map(|chord| {
                 Line::from(vec![
                     Span::styled(chord.clone(), Style::new().fg(palette.text)),
@@ -4964,9 +4988,10 @@ impl Pane for SidebarPane {
                 ])
             });
         let content = match hint {
-            // One blank row keeps the data above the hint from touching it.
+            // One blank row keeps the data above the hint from touching it,
+            // plus whatever the hint was lifted by.
             Some(_) => Rect {
-                height: inner.height - 2,
+                height: inner.height - 2 - self.hint_offset,
                 ..inner
             },
             None => inner,
@@ -4981,7 +5006,7 @@ impl Pane for SidebarPane {
             frame.render_widget(
                 Paragraph::new(hint).style(Style::new().bg(palette.background)),
                 Rect {
-                    y: inner.y + inner.height - 1,
+                    y: inner.y + inner.height - 1 - self.hint_offset,
                     height: 1,
                     ..inner
                 },
@@ -9604,6 +9629,7 @@ mod tests {
             }],
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).expect("terminal");
@@ -9685,6 +9711,7 @@ mod tests {
             todos: Vec::new(),
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).expect("terminal");
@@ -9815,6 +9842,7 @@ mod tests {
             todos: Vec::new(),
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).expect("terminal");
@@ -9898,6 +9926,7 @@ mod tests {
                 .collect(),
             chord: Some("ctrl+x b".to_string()),
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).expect("terminal");
@@ -9924,6 +9953,61 @@ mod tests {
                 .iter()
                 .any(|row| row.contains("hide sidebar")),
             "an unbound action promises no chord"
+        );
+    }
+
+    /// An embedded host hands the terminal the facts row, so the composer's box
+    /// ends on this column's last row. The chord hint has to step up one row or
+    /// the box's bottom edge is drawn through the middle of its glyphs.
+    #[test]
+    fn an_embedded_host_lifts_the_chord_hint_off_the_box_edge() {
+        let mut sidebar = SidebarPane {
+            hover_rows: Vec::new(),
+            subagents: Vec::new(),
+            changes: None,
+            mode: None,
+            theme: home_theme(),
+            session: Some(home_row("ses_k", "keys", None)),
+            usage: None,
+            usage_hourly: None,
+            quota: None,
+            goal: None,
+            plan: None,
+            todos: (0..40)
+                .map(|index| crate::session::TodoView {
+                    content: format!("todo {index}"),
+                    status: "pending".to_string(),
+                })
+                .collect(),
+            chord: Some("ctrl+x b".to_string()),
+            lang: Lang::En,
+            hint_offset: 1,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 12)).expect("terminal");
+        terminal
+            .draw(|frame| sidebar.render(frame, frame.area()))
+            .expect("draw");
+        let painted: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(60)
+            .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect();
+        let last = painted.last().expect("a last row");
+        assert!(
+            !last.contains("hide sidebar"),
+            "the lifted hint leaves the row the box edge occupies: {last:?}"
+        );
+        let lifted = painted
+            .iter()
+            .position(|row| row.contains("hide sidebar"))
+            .expect("the chord is still painted");
+        assert_eq!(
+            lifted,
+            painted.len() - 2,
+            "the hint sits one row above the column's last row: {painted:?}"
         );
     }
 
@@ -10227,6 +10311,7 @@ mod tests {
                 todos: Vec::new(),
                 chord: None,
                 lang: Lang::En,
+                hint_offset: 0,
             }
         }
         let summary = |window: Option<u64>, tokens: Option<u64>| {
@@ -10334,6 +10419,7 @@ mod tests {
             todos: Vec::new(),
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -10390,6 +10476,7 @@ mod tests {
             todos: Vec::new(),
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -10462,6 +10549,7 @@ mod tests {
             todos: Vec::new(),
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -10530,6 +10618,7 @@ mod tests {
             todos: Vec::new(),
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
@@ -10574,6 +10663,7 @@ mod tests {
             todos: Vec::new(),
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut summary = home_row("ses_s", &"很长的会话标题".repeat(8), None);
         summary.directory = Some("/very/long/path\n".repeat(4));
@@ -10659,6 +10749,7 @@ mod tests {
             }],
             chord: None,
             lang: Lang::En,
+            hint_offset: 0,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
