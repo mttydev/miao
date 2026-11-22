@@ -10332,12 +10332,6 @@ mod tests {
         assert!(joined.contains("… 2 more"), "{joined:?}");
     }
 
-    /// How full the live context is reads differently from what was billed, so
-    /// the usage section carries it beside the billed rows: window and
-    /// occupancy at the last turn's granularity, warning-coloured once
-    /// automatic compaction arms, and absent when the engine never reported a
-    /// window.
-    #[test]
     /// The bar answers "how close is compaction" at a glance, so its filled
     /// share has to track the figure beside it and it must not invent a bar
     /// when the ceiling is unknown.
@@ -10346,7 +10340,7 @@ mod tests {
         let bar = context_bar(500, 1000, 10);
         assert_eq!(
             bar.chars().count(),
-            CONTEXT_BAR_MIN.max(10).min(CONTEXT_BAR_MAX)
+            CONTEXT_BAR_MIN.clamp(10, CONTEXT_BAR_MAX)
         );
         assert_eq!(bar.matches(CONTEXT_BAR_GLYPH).count(), 5, "{bar:?}");
         assert_eq!(bar.matches(CONTEXT_BAR_EMPTY).count(), 5, "{bar:?}");
@@ -10454,6 +10448,12 @@ mod tests {
         assert!(calm, "twenty percent is not the compaction rung");
     }
 
+    /// How full the live context is reads differently from what was billed, so
+    /// the usage section carries it beside the billed rows: window and
+    /// occupancy at the last turn's granularity, warning-coloured once
+    /// automatic compaction arms, and absent when the engine never reported a
+    /// window.
+    #[test]
     fn the_context_section_shows_window_occupancy_and_warns_when_it_is_high() {
         fn rows(terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
             terminal
