@@ -178,6 +178,11 @@ enum CredentialSource {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RouteLimits {
     limits: std::collections::BTreeMap<String, Limit>,
+    /// Models whose declared output capacity the serving provider never takes.
+    /// The declaration is the model's maximum, not a per-turn reservation, so
+    /// subtracting it from the window made a 1M route compact at 59% while the
+    /// endpoint kept accepting 941K-token requests.
+    uncapped: std::collections::BTreeSet<String>,
 }
 
 impl RouteLimits {
@@ -187,6 +192,13 @@ impl RouteLimits {
     /// window while another planned against the input ceiling.
     pub fn limit_for(&self, model: &str) -> Option<Limit> {
         self.limits.get(model).copied()
+    }
+
+    /// Whether the provider for this model receives the declared output cap.
+    /// An unknown model is treated as forwarded: only a route that was actually
+    /// capped can be observed not to take it.
+    pub fn output_forwarded_for(&self, model: &str) -> bool {
+        !self.uncapped.contains(model)
     }
 }
 
@@ -343,6 +355,7 @@ async fn derive(
         return Err("model route catalog exceeds 1024 entries".into());
     }
     let mut limits = std::collections::BTreeMap::new();
+    let mut uncapped = std::collections::BTreeSet::new();
     let mut routes = Vec::new();
     let mut variants = Vec::new();
     let mut primary_variants = Vec::new();
@@ -350,9 +363,7 @@ async fn derive(
     let mut accounts = Vec::new();
     let mut primary_account_route = None;
     for entry in entries {
-        if let Some(limit) = entry.limit {
-            limits.insert(entry.model.clone(), limit);
-        }
+        let model = entry.model.clone();
         if let Some(account) = entry.account {
             if entry.primary {
                 primary_account_route = Some(entry.id.clone());
@@ -424,13 +435,20 @@ async fn derive(
         )?;
         // A provider that forwards the declared per-turn output cap takes it
         // here; one that ignores it keeps its own default.
-        let provider = match entry.limit.as_ref().and_then(|limit| limit.output) {
+        let declared_output = entry.limit.as_ref().and_then(|limit| limit.output);
+        let (provider, output_forwarded) = match declared_output {
             Some(output) => match provider.with_output_cap(output) {
-                Ok(capped) => capped,
-                Err(_) => provider,
+                Ok(capped) => (capped, true),
+                Err(_) => (provider, false),
             },
-            None => provider,
+            None => (provider, false),
         };
+        if let Some(limit) = entry.limit {
+            limits.insert(model.clone(), limit);
+            if declared_output.is_some() && !output_forwarded {
+                uncapped.insert(model);
+            }
+        }
         if entry.provider == "amazon-bedrock" {
             crate::bedrock::validate_credential_paths(provider.protected_resources(), workspace)
                 .await?;
@@ -519,7 +537,7 @@ async fn derive(
             .with_variants(variants, primary_variants)?
             .with_accounts(accounts, primary_account_route)?,
     );
-    Ok((provider, RouteLimits { limits }))
+    Ok((provider, RouteLimits { limits, uncapped }))
 }
 
 #[cfg(test)]

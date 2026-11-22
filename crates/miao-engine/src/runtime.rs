@@ -409,15 +409,27 @@ enum Command {
 /// The old zero meant "no reserve", which armed compaction too late to matter.
 const DEFAULT_OUTPUT_RESERVE_RATIO: f64 = 0.25;
 
+/// Output reserve for a route that declares a capacity its provider never
+/// receives. The declaration is then the model's maximum, not what a turn asks
+/// for: OpenAIChat sends no `max_tokens` at all, so subtracting a 393K
+/// declaration armed compaction at 59% of a 1M window while the endpoint kept
+/// accepting 941K-token requests. A sixteenth leaves the server's own completion
+/// default room without pretending the whole declaration is spent every turn.
+const UNFORWARDED_OUTPUT_RESERVE_RATIO: f64 = 1.0 / 16.0;
+
 /// The input a turn may actually send: the window minus the output it must
 /// keep free. A route that declares no capacity is not unlimited — it is
 /// unknown, and unknown gets a conservative quarter — and no declaration may
-/// reserve more than half the window.
-fn input_ceiling(window: u64, declared: Option<u64>) -> u64 {
-    let reserve = declared
-        .filter(|at| *at > 0)
-        .unwrap_or((window as f64 * DEFAULT_OUTPUT_RESERVE_RATIO) as u64)
-        .min(window / 2);
+/// reserve more than half the window. `forwarded` says whether the provider
+/// actually receives the declared cap; a declaration it never receives cannot
+/// reserve itself whole.
+fn input_ceiling(window: u64, declared: Option<u64>, forwarded: bool) -> u64 {
+    let reserve = match declared.filter(|at| *at > 0) {
+        Some(declared) if forwarded => declared,
+        Some(declared) => declared.min((window as f64 * UNFORWARDED_OUTPUT_RESERVE_RATIO) as u64),
+        None => (window as f64 * DEFAULT_OUTPUT_RESERVE_RATIO) as u64,
+    }
+    .min(window / 2);
     window.saturating_sub(reserve)
 }
 
@@ -426,19 +438,23 @@ fn input_ceiling(window: u64, declared: Option<u64>) -> u64 {
 /// and the compaction trigger — has to plan against this window, or a Session
 /// sits above what the endpoint will accept while the trigger still says
 /// `under_threshold`.
-fn ceiling_limits(limits: ContextLimits, declared_output: Option<u64>) -> ContextLimits {
+fn ceiling_limits(
+    limits: ContextLimits,
+    declared_output: Option<u64>,
+    forwarded: bool,
+) -> ContextLimits {
     let mut limits = limits;
-    limits.window = input_ceiling(limits.window, declared_output);
+    limits.window = input_ceiling(limits.window, declared_output, forwarded);
     limits
 }
 
 /// The input ceiling a route declares for one model, or `None` when the route
 /// states no usable window. Zero means "not stated", never a window: a zero
 /// threshold makes every settled turn look like it crossed the line.
-fn declared_ceiling(limit: Option<Limit>) -> Option<u64> {
+fn declared_ceiling(limit: Option<Limit>, forwarded: bool) -> Option<u64> {
     let limit = limit?;
     let window = limit.context.filter(|window| *window > 0)?;
-    Some(input_ceiling(window, limit.output))
+    Some(input_ceiling(window, limit.output, forwarded))
 }
 
 /// The one place a Session's effective window is decided.
@@ -454,13 +470,14 @@ fn effective_limits(
     configured: Option<ContextLimits>,
     declared: Option<Limit>,
     learned: Option<ContextLimits>,
+    forwarded: bool,
 ) -> Option<ContextLimits> {
     resolve_limits(
         configured,
         declared.and_then(|limit| limit.context),
         learned,
     )
-    .map(|limits| ceiling_limits(limits, declared.and_then(|limit| limit.output)))
+    .map(|limits| ceiling_limits(limits, declared.and_then(|limit| limit.output), forwarded))
 }
 
 #[cfg(test)]
@@ -479,7 +496,8 @@ mod ceiling_tests {
     /// at `under_threshold` until the endpoint refused it.
     #[test]
     fn the_trigger_plans_against_the_input_ceiling() {
-        let limits = effective_limits(None, route(Some(1_048_576), Some(393_216)), None).unwrap();
+        let limits =
+            effective_limits(None, route(Some(1_048_576), Some(393_216)), None, true).unwrap();
         assert_eq!(limits.window, 655_360);
         assert_eq!(limits.budget().threshold(), 622_592);
     }
@@ -488,7 +506,7 @@ mod ceiling_tests {
     /// reserve still applies, so the trigger cannot arm past the ceiling.
     #[test]
     fn an_undeclared_capacity_still_leaves_the_trigger_below_the_window() {
-        let limits = effective_limits(None, route(Some(1_000_000), None), None).unwrap();
+        let limits = effective_limits(None, route(Some(1_000_000), None), None, true).unwrap();
         assert_eq!(limits.window, 750_000);
         assert_eq!(limits.budget().threshold(), 712_500);
     }
@@ -497,7 +515,8 @@ mod ceiling_tests {
     /// including the one where output is a large fraction of the window.
     #[test]
     fn a_large_output_reserve_keeps_the_trigger_reachable() {
-        let limits = effective_limits(None, route(Some(200_000), Some(64_000)), None).unwrap();
+        let limits =
+            effective_limits(None, route(Some(200_000), Some(64_000)), None, true).unwrap();
         assert_eq!(limits.window, 136_000);
         assert_eq!(limits.budget().threshold(), 129_200);
         assert!(limits.budget().threshold() < limits.window);
@@ -508,17 +527,18 @@ mod ceiling_tests {
     /// window has to win instead.
     #[test]
     fn a_declared_zero_window_is_not_a_window() {
-        assert_eq!(declared_ceiling(route(Some(0), None)), None);
+        assert_eq!(declared_ceiling(route(Some(0), None), true), None);
         let limits = effective_limits(
             None,
             route(Some(0), Some(8_192)),
             Some(window_limits(90_000)),
+            true,
         )
         .unwrap();
         // The zero context states no window, but the route's output capacity
         // is still real for this model, so the learned window keeps that
         // reserve.
-        assert_eq!(limits.window, input_ceiling(90_000, Some(8_192)));
+        assert_eq!(limits.window, input_ceiling(90_000, Some(8_192), true));
         assert!(limits.budget().threshold() > 0);
     }
 
@@ -530,6 +550,7 @@ mod ceiling_tests {
             Some(window_limits(200_000)),
             route(Some(1_048_576), Some(393_216)),
             None,
+            true,
         )
         .unwrap();
         assert_eq!(limits.window, 100_000);
@@ -4558,18 +4579,19 @@ async fn execute(
         // on the engine's default model lands in the per-model rollups
         // instead of a null bucket.
         let model = served_model(binding.as_ref(), provider.identity());
-        let declared = inner
-            .route_limits
-            .lock()
-            .await
-            .limit_for(model.as_deref().unwrap_or_default());
-        // The endpoint counts input + requested output against the window: the
-        // input budget is the window minus the route's declared output
-        // capacity, or a request that fits the window alone still overflows
-        // once the model's own output reservation is added (#2926 family).
-        // `effective_limits` owns that reduction, so bounding and compaction
-        // cannot disagree about what fits. A window of zero states nothing and
-        // falls through to the next source.
+        let (declared, output_forwarded) = {
+            let limits = inner.route_limits.lock().await;
+            let model = model.as_deref().unwrap_or_default();
+            (limits.limit_for(model), limits.output_forwarded_for(model))
+        };
+        // An endpoint that receives a per-turn output cap counts input + that
+        // cap against the window, so the input budget is the window minus the
+        // declared output capacity (#2926 family). A provider that never
+        // receives the cap only reserves its own completion default. The flag
+        // below carries which of the two this route is, and `effective_limits`
+        // owns the reduction so bounding and compaction cannot disagree about
+        // what fits. A window of zero states nothing and falls through to the
+        // next source.
         let configured = inner
             .context
             .lock()
@@ -4598,7 +4620,7 @@ async fn execute(
         // spends a billing allowance prints it beside the window's own figures, so
         // that tally cannot be read as context occupancy (#2870).
         let mut compaction_threshold = None;
-        let bound = match effective_limits(configured, declared, learned) {
+        let bound = match effective_limits(configured, declared, learned, output_forwarded) {
             Some(limits) => {
                 let counted = match inner.store.context_anchor(session).await? {
                     Some((counted, through)) => {
@@ -6160,17 +6182,17 @@ command: None,
         // sent with: a primary/secondary route reports which of the two answered,
         // and the window must be that model's.
         let model = served_model(binding.as_ref(), provider.reply_identity(&reply));
-        let declared = inner
-            .route_limits
-            .lock()
-            .await
-            .limit_for(model.as_deref().unwrap_or_default());
+        let (declared, output_forwarded) = {
+            let limits = inner.route_limits.lock().await;
+            let model = model.as_deref().unwrap_or_default();
+            (limits.limit_for(model), limits.output_forwarded_for(model))
+        };
         let learned = inner.learned_limits(model.as_deref()).await;
         // The trigger plans against the input a turn can actually send, the
         // same window the request bound and the painted percentage use.
         // `effective_limits` owns the reduction, so a route's raw window cannot
         // arm the trigger above what a request can send.
-        let limits = effective_limits(configured, declared, learned);
+        let limits = effective_limits(configured, declared, learned, output_forwarded);
         if limits.is_none() && closed_answer && requested.is_none() {
             // Nothing states this Session's window, so there is nothing to plan
             // against and automatic compaction cannot run for it. Name the model:
@@ -6230,7 +6252,8 @@ command: None,
             // same window, so a slice sized to the raw window still overflows.
             let role_capacity = match &resolution {
                 crate::roles::Resolution::Bound { model } => {
-                    declared_ceiling(inner.route_limits.lock().await.limit_for(model))
+                    let limits = inner.route_limits.lock().await;
+                    declared_ceiling(limits.limit_for(model), limits.output_forwarded_for(model))
                 }
                 _ => None,
             };
@@ -11234,7 +11257,7 @@ mod input_ceiling_tests {
     #[test]
     fn an_undeclared_reserve_is_not_unlimited() {
         let window = 1_048_576;
-        let ceiling = input_ceiling(window, None);
+        let ceiling = input_ceiling(window, None, true);
         assert_eq!(
             ceiling,
             window - (window as f64 * DEFAULT_OUTPUT_RESERVE_RATIO) as u64
@@ -11244,13 +11267,42 @@ mod input_ceiling_tests {
 
     #[test]
     fn a_declared_reserve_is_honoured() {
-        assert_eq!(input_ceiling(1_048_576, Some(393_216)), 655_360);
+        assert_eq!(input_ceiling(1_048_576, Some(393_216), true), 655_360);
+    }
+
+    /// The declaration is the model's maximum, not a per-turn reservation.
+    /// OpenAIChat sends no `max_tokens`, so a route that declares 393K on a 1M
+    /// window must not arm compaction at 59% of it: the endpoint accepted 941K
+    /// input for this model, and the trigger belongs under that, not at 622K.
+    #[test]
+    fn an_unforwarded_declaration_does_not_reserve_the_model_maximum() {
+        let ceiling = input_ceiling(1_048_576, Some(393_216), false);
+        assert_eq!(ceiling, 983_040);
+        let budget = crate::context_trigger::Budget {
+            window: Some(ceiling),
+            ratio: 0.95,
+            headroom: 62_048,
+        };
+        assert_eq!(budget.threshold(), 933_888);
+        assert!(
+            budget.threshold() > 900_000,
+            "an unforwarded declaration must not compact near 60% of a 1M window"
+        );
+    }
+
+    /// A small declaration still governs when it is smaller than the default
+    /// share: the provider's own completion default is what the reserve covers.
+    #[test]
+    fn an_unforwarded_small_declaration_keeps_its_own_reserve() {
+        assert_eq!(input_ceiling(1_000_000, Some(8_192), false), 991_808);
+        assert_eq!(input_ceiling(100_000, Some(8_192), false), 93_750);
     }
 
     #[test]
     fn an_absurd_declaration_cannot_erase_the_budget() {
-        assert_eq!(input_ceiling(1_000, Some(900)), 500);
-        assert_eq!(input_ceiling(0, Some(10)), 0);
+        assert_eq!(input_ceiling(1_000, Some(900), true), 500);
+        assert_eq!(input_ceiling(1_000, Some(900), false), 938);
+        assert_eq!(input_ceiling(0, Some(10), true), 0);
     }
 }
 
