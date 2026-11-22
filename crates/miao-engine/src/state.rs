@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     Pending,
@@ -284,6 +284,76 @@ pub fn blocked_on_external_work(evidence: &str) -> bool {
         return false;
     }
     EXTERNAL.iter().any(|needle| lower.contains(needle))
+}
+
+/// What the checklist says the Session should do next, in the same vocabulary
+/// the composer paints. The engine owns this answer because the engine owns
+/// continuation: [`runnable`] is the rule that decides what a turn may pick up,
+/// so a hint derived from anything else drifts from what the turn will do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum NextWork {
+    /// A `pending` or `in_progress` item whose every `depends_on` completed.
+    Runnable(String),
+    /// Nothing runnable, and items remain that wait on an outside event — a
+    /// background job, CI, a device that has to come back.
+    Waiting(String),
+    /// Nothing runnable, and items remain that need a human decision.
+    Blocked(String),
+    /// Nothing left: an empty list, or every item completed or cancelled.
+    #[default]
+    Nothing,
+}
+
+/// The next move this checklist implies, read with the engine's own readiness
+/// rules.
+///
+/// `runnable()` answers first, so the hint can never name work the next turn
+/// would skip because a prerequisite is still open. `waiting` items are asked
+/// before `blocked` ones: a wait is what the Session is still moving on, while
+/// a block is what it cannot move at all.
+pub fn next_work(state: &Value) -> NextWork {
+    if state["todos"].is_null() {
+        return NextWork::Nothing;
+    }
+    let Ok(todos) = serde_json::from_value::<Vec<Todo>>(state["todos"]["value"]["todos"].clone())
+    else {
+        return NextWork::Nothing;
+    };
+    if let Some(todo) = runnable(&todos)
+        .into_iter()
+        .find(|todo| !is_question(&todo.content))
+    {
+        return NextWork::Runnable(todo.content.trim().to_string());
+    }
+    for status in [TodoStatus::Waiting, TodoStatus::Blocked] {
+        let found = todos
+            .iter()
+            .find(|todo| todo.status == status && !is_question(&todo.content));
+        if let Some(todo) = found {
+            return match status {
+                TodoStatus::Waiting => NextWork::Waiting(todo.content.trim().to_string()),
+                _ => NextWork::Blocked(todo.content.trim().to_string()),
+            };
+        }
+    }
+    // A `pending` item held by an unfinished prerequisite is waiting on that
+    // work, not blocked on the operator: label it the way it reads.
+    if let Some(todo) = todos.iter().find(|todo| {
+        matches!(&todo.status, TodoStatus::Pending | TodoStatus::InProgress)
+            && !is_question(&todo.content)
+    }) {
+        return NextWork::Waiting(todo.content.trim().to_string());
+    }
+    NextWork::Nothing
+}
+
+/// A checklist entry phrased as a question is not work the Session will do
+/// next: offering it would put the operator's answer where the next task
+/// belongs. The test is on the terminator because that is what marks a
+/// question in both languages this UI renders.
+fn is_question(content: &str) -> bool {
+    let content = content.trim();
+    content.ends_with('?') || content.ends_with('？')
 }
 
 pub fn blocked_work(state: &Value) -> Vec<(String, Vec<String>)> {
@@ -613,6 +683,83 @@ pub fn todo_stale_note(turns: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The hint a composer paints must name the work the next turn may pick
+    /// up, so it reads the same readiness rule continuation does: a `pending`
+    /// item whose prerequisite is still open is not next, and the item holding
+    /// it is.
+    #[test]
+    fn the_next_move_respects_dependencies_the_way_continuation_does() {
+        let state = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "  wire the parser  ", "status": "pending", "priority": "high"},
+            {"id": "b", "content": "cover it with tests", "status": "pending", "priority": "high", "depends_on": ["a"]},
+        ]}}});
+        assert_eq!(
+            super::next_work(&state),
+            super::NextWork::Runnable("wire the parser".into())
+        );
+
+        let held = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "wire the parser", "status": "in_progress", "priority": "high"},
+            {"id": "b", "content": "cover it with tests", "status": "pending", "priority": "high", "depends_on": ["a"]},
+        ]}}});
+        assert_eq!(
+            super::next_work(&held),
+            super::NextWork::Runnable("wire the parser".into()),
+            "an in_progress item is still the next move, just not the dependent one"
+        );
+
+        let only_held = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "wire the parser", "status": "waiting", "priority": "high"},
+            {"id": "b", "content": "cover it with tests", "status": "pending", "priority": "high", "depends_on": ["a"]},
+        ]}}});
+        assert_eq!(
+            super::next_work(&only_held),
+            super::NextWork::Waiting("wire the parser".into()),
+            "the dependency that would release the rest comes first"
+        );
+    }
+
+    /// A wait is not a block and a block is not an empty list: the composer
+    /// says which one it is, so a stalled Session never reads as askable.
+    #[test]
+    fn nothing_runnable_still_names_what_holds_the_list() {
+        let waiting = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "Watch CI 45021791396", "status": "waiting", "priority": "high"},
+        ]}}});
+        assert_eq!(
+            super::next_work(&waiting),
+            super::NextWork::Waiting("Watch CI 45021791396".into())
+        );
+
+        let blocked = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "decide the pricing tier", "status": "blocked", "priority": "high"},
+        ]}}});
+        assert_eq!(
+            super::next_work(&blocked),
+            super::NextWork::Blocked("decide the pricing tier".into())
+        );
+
+        let done = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "done", "status": "completed", "priority": "low"},
+            {"id": "b", "content": "dropped", "status": "cancelled", "priority": "low"},
+        ]}}});
+        assert_eq!(super::next_work(&done), super::NextWork::Nothing);
+        assert_eq!(
+            super::next_work(&json!({"todos": null})),
+            super::NextWork::Nothing
+        );
+    }
+
+    /// A question is not work: whatever the list holds, the composer must not
+    /// offer the operator's answer as the next task.
+    #[test]
+    fn a_question_is_never_the_next_move() {
+        let state = json!({"todos": {"value": {"todos": [
+            {"id": "a", "content": "confirm the port?", "status": "pending", "priority": "high"},
+        ]}}});
+        assert_eq!(super::next_work(&state), super::NextWork::Nothing);
+    }
+
     /// "Too large" is not a block. Only an external dependency is.
     #[test]
     fn a_block_is_external_only_when_it_names_something_the_model_cannot_change() {

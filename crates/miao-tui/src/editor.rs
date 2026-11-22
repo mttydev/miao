@@ -928,6 +928,40 @@ impl Completion {
     }
 }
 
+/// What the empty composer says about the work the Session has left.
+///
+/// The engine decides this: it owns continuation, and its readiness rule is
+/// what a turn actually picks up. Painting anything else — a rotating example
+/// unrelated to the Session, or a "next" whose prerequisite is still open —
+/// told the operator to do something the engine would not do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerHint {
+    /// Nothing to offer.
+    None,
+    /// The turn the engine would pick up next. `Tab` promotes it into the
+    /// draft because it is real work, not a guess.
+    Next(String),
+    /// Nothing is runnable because the list waits on an outside event: a
+    /// background job, CI, a device that has to come back. Shown, not typed.
+    Waiting(String),
+    /// Nothing is runnable because the list needs a human decision. Shown,
+    /// not typed.
+    Blocked(String),
+}
+
+impl ComposerHint {
+    /// The engine's answer for this checklist, in the composer's vocabulary.
+    pub fn from_next_work(work: miao_engine::state::NextWork) -> Self {
+        use miao_engine::state::NextWork;
+        match work {
+            NextWork::Runnable(text) => ComposerHint::Next(text),
+            NextWork::Waiting(text) => ComposerHint::Waiting(text),
+            NextWork::Blocked(text) => ComposerHint::Blocked(text),
+            NextWork::Nothing => ComposerHint::None,
+        }
+    }
+}
+
 pub struct Composer {
     pub editor: Editor,
     mode: Mode,
@@ -965,11 +999,11 @@ pub struct Composer {
     /// The chrome language the placeholder paints in. `Shell` keeps it
     /// current so `/lang` re-labels without a restart.
     pub lang: crate::lang::Lang,
-    /// The work the Session's own checklist still has left, offered in the
-    /// empty composer once nothing is running. It is the todo list the engine
-    /// continues from, not a guess at what to do next, so accepting it asks for
-    /// the turn the engine would have picked up anyway.
-    pub suggestion: Option<String>,
+    /// What the Session's own checklist says comes next, offered in the empty
+    /// composer once nothing is running. It comes from the engine's readiness
+    /// rule, so it names the turn the engine would pick up anyway; only the
+    /// `Next` arm is ever accepted into the draft.
+    pub hint: ComposerHint,
     /// Inline media sent with the prompt. The composer only shows their
     /// `[Image N]` markers; the bytes travel beside the text.
     attachments: Vec<Value>,
@@ -1018,7 +1052,7 @@ impl Composer {
             idle_live: false,
             placeholder: random_pick(),
             lang: crate::lang::Lang::En,
-            suggestion: None,
+            hint: ComposerHint::None,
             attachments: Vec::new(),
             attachment_markers: Vec::new(),
             next_image: 0,
@@ -1045,8 +1079,18 @@ impl Composer {
     /// Storing it beside the draft rather than in it keeps the offer out of the
     /// history, the stash and the paste bookkeeping until Tab spends a
     /// keystroke on it.
-    pub fn set_suggestion(&mut self, text: Option<String>) {
-        self.suggestion = text;
+    pub fn set_hint(&mut self, hint: ComposerHint) {
+        self.hint = hint;
+    }
+
+    /// The one offer `Tab` can promote into the draft. A wait or a block is
+    /// shown but never typed: the operator has nothing to run until the thing
+    /// it names happens.
+    pub fn next_offer(&self) -> Option<&str> {
+        match &self.hint {
+            ComposerHint::Next(text) => Some(text.as_str()),
+            _ => None,
+        }
     }
 
     /// Promote the offer into the draft. Only an empty composer takes it: a
@@ -1055,7 +1099,7 @@ impl Composer {
         if !self.editor.is_empty() || self.mode != Mode::Normal {
             return false;
         }
-        let Some(text) = self.suggestion.clone() else {
+        let Some(text) = self.next_offer().map(str::to_string) else {
             return false;
         };
         self.editor.set_text(&text);
@@ -1316,7 +1360,7 @@ impl Composer {
         // The offer was about the work this prompt now asks for. It comes back
         // only if the checklist still has something runnable once the turn
         // settles, so a submitted prompt never leaves stale work on screen.
-        self.suggestion = None;
+        self.hint = ComposerHint::None;
     }
 
     /// Replace every paste placeholder with the text it stands for.
@@ -1927,7 +1971,7 @@ mod tests {
             idle_live: false,
             placeholder: 0,
             lang: crate::lang::Lang::En,
-            suggestion: None,
+            hint: ComposerHint::None,
             attachments: Vec::new(),
             attachment_markers: Vec::new(),
             next_image: 0,
@@ -2840,7 +2884,7 @@ mod tests {
         assert_eq!(composer.editor.text(), "  ");
 
         composer.editor.clear();
-        composer.set_suggestion(Some("fix the login redirect".into()));
+        composer.set_hint(ComposerHint::Next("fix the login redirect".into()));
         composer.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &keys);
         assert_eq!(composer.editor.text(), "fix the login redirect");
         // The caret waits after the accepted text, ready to append.
@@ -2851,6 +2895,18 @@ mod tests {
         composer.editor.set_text("half a thought");
         composer.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &keys);
         assert_eq!(composer.editor.text(), "half a thought  ");
+
+        // A wait or a block is not work, so Tab must not type one into the
+        // draft: the operator has nothing to run until the event lands.
+        for hint in [
+            ComposerHint::Waiting("watch CI".into()),
+            ComposerHint::Blocked("decide the tier".into()),
+        ] {
+            composer.editor.clear();
+            composer.set_hint(hint);
+            composer.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &keys);
+            assert_eq!(composer.editor.text(), "  ", "only Next is typed");
+        }
     }
 
     /// Enter with a highlighted command runs it in one stroke — the TypeScript
