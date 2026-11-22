@@ -20,7 +20,6 @@
     "@miao/app": "workspace:*",
     "@miao/session-ui": "workspace:*",
     "@miao/ui": "workspace:*",
-    "@solidjs/router": "0.15.4",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "~2",
     "@tauri-apps/plugin-notification": "~2",
