@@ -23,8 +23,13 @@ struct Harness {
 }
 
 impl Harness {
-    fn spawn(phase: &str) -> Self {
-        let dir: PathBuf = std::env::temp_dir().join("miao-jobs-dialog");
+    /// Each case owns its workspace directory: the cases share one test binary
+    /// and run in parallel, and a shared directory let one case delete another
+    /// case's `engine.db` mid-run. The restart case passes the same name to both
+    /// spawns so the state it reopens is the state it left.
+    fn spawn(case: &str, phase: &str) -> Self {
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("miao-jobs-dialog-{}-{case}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("workspace dir");
         let pair = native_pty_system()
@@ -145,7 +150,7 @@ impl Harness {
 /// it, and the Session's subagent runs sit under the jobs as read-only rows.
 #[test]
 fn the_jobs_dialog_names_each_owner_and_the_session_subagents() {
-    let mut harness = Harness::spawn("before");
+    let mut harness = Harness::spawn("owners", "before");
     assert!(
         harness.wait_for("hello from the fixture", Duration::from_secs(30)),
         "the session did not open:\n{}",
@@ -174,7 +179,7 @@ fn the_jobs_dialog_names_each_owner_and_the_session_subagents() {
 /// dialog shows the jobs as they are after the restart, not as they were.
 #[test]
 fn a_reopened_jobs_dialog_shows_the_state_after_the_restart() {
-    let mut harness = Harness::spawn("before");
+    let mut harness = Harness::spawn("restart", "before");
     assert!(
         harness.wait_for("hello from the fixture", Duration::from_secs(30)),
         "the session did not open:\n{}",
@@ -188,7 +193,7 @@ fn a_reopened_jobs_dialog_shows_the_state_after_the_restart() {
     );
     harness.shutdown();
 
-    let mut harness = Harness::spawn("after");
+    let mut harness = Harness::spawn("restart", "after");
     assert!(
         harness.wait_for("hello from the fixture", Duration::from_secs(30)),
         "the restarted session did not open:\n{}",
@@ -214,7 +219,7 @@ fn a_reopened_jobs_dialog_shows_the_state_after_the_restart() {
 /// rows are read-only, so a global stop of jobs leaves them alone.
 #[test]
 fn stopping_every_job_asks_first_and_shows_the_true_state_after() {
-    let mut harness = Harness::spawn("before");
+    let mut harness = Harness::spawn("stop-all", "before");
     assert!(
         harness.wait_for("hello from the fixture", Duration::from_secs(30)),
         "the session did not open:\n{}",
