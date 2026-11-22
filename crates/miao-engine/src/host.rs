@@ -835,10 +835,16 @@ fn subagent_rows(children: &Value) -> Vec<Value> {
                         "id": id,
                         "session_id": children.get("session_id"),
                         "status": row.get("status"),
-                        "description": row.get("title"),
+                        "description": row
+                            .get("description")
+                            .filter(|description| !description.is_null())
+                            .or_else(|| row.get("title")),
                         "run": row.get("run"),
                         "updated_at_ms": row.get("updated_at_ms"),
                         "message_count": row.get("message_count"),
+                        "explore": row.get("explore"),
+                        "tokens": row.get("tokens"),
+                        "tools": row.get("tools"),
                     }))
                 })
                 .collect()

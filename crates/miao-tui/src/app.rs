@@ -6559,6 +6559,9 @@ mod tests {
             busy: true,
             started_at_ms: Some(crate::pane::now_ms()),
             messages: 1,
+            explore: false,
+            tokens: 0,
+            tools: Vec::new(),
         }]));
         assert!(
             app.next_repaint().is_some(),

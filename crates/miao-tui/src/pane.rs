@@ -642,6 +642,7 @@ impl Shell {
         if let Some(sidebar) = self.sidebar.as_mut() {
             sidebar.subagents = rows.to_vec();
         }
+        self.transcript.subagents = rows.to_vec();
     }
 
     pub fn set_quota(&mut self, quota: Option<&crate::status::PlanQuota>) {
@@ -964,6 +965,9 @@ pub struct TranscriptPane {
     /// A tool the run has started but not finished. It streams into the tail
     /// as the spinner row the TS transcript keeps under the running step.
     running_tool: Option<String>,
+    /// Delegated Sessions still working, one block each. They ride the tail
+    /// while the operator follows it, above the single running-tool row.
+    subagents: Vec<crate::event::SubagentRow>,
     /// A compaction pass the run is inside, as `(segment, total)`. It has no
     /// tool call to name, and a pass visible only in the status strip left a
     /// reader watching a transcript that never moved.
@@ -1012,6 +1016,7 @@ impl TranscriptPane {
             follow: true,
             user_anchors: Vec::new(),
             running_tool: None,
+            subagents: Vec::new(),
             running_compaction: None,
             expanded: false,
             area: Rect::default(),
@@ -1035,6 +1040,109 @@ impl TranscriptPane {
         self.body
             .truncate(self.body_ends.last().copied().unwrap_or(0));
         self.rows = rows;
+    }
+
+    /// The active children, one block each: a title, the live run clock and
+    /// token count, then the tail of that child's tool calls. More than three
+    /// children fold into a count so the dashboard cannot own the whole screen.
+    fn subagent_lines(&self, width: u16, now: u64) -> Vec<Line<'static>> {
+        let palette = self.theme.palette;
+        let running = self
+            .subagents
+            .iter()
+            .filter(|row| row.busy)
+            .collect::<Vec<_>>();
+        if running.is_empty() {
+            return Vec::new();
+        }
+        let frame = SPINNER_FRAMES[(now / 160) as usize % SPINNER_FRAMES.len()];
+        let mut lines = Vec::new();
+        for (index, row) in running.iter().take(3).enumerate() {
+            if index > 0 {
+                lines.push(Line::from(""));
+            }
+            let kind = match row.explore {
+                true => "EXPLORE",
+                false => "TASK",
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{frame} "), Style::new().fg(palette.text_muted)),
+                Span::styled(
+                    format!("{kind} "),
+                    Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    fit(&row.title, width.saturating_sub(10) as usize),
+                    Style::new().fg(palette.text),
+                ),
+            ]));
+            let age = row
+                .started_at_ms
+                .map(|started| Self::subagent_age(now.saturating_sub(started)))
+                .unwrap_or_else(|| "running".into());
+            let live = self
+                .lang
+                .tf("subagents.live", &[&age, &Self::token_count(row.tokens)]);
+            lines.push(Line::from(Span::styled(
+                format!("  {live}"),
+                Style::new().fg(palette.text_muted),
+            )));
+            let start = row.tools.len().saturating_sub(3);
+            for tool in &row.tools[start..] {
+                let current = matches!(tool.state.as_str(), "planned" | "dispatched");
+                let detail = match tool.detail.is_empty() {
+                    true => tool.name.clone(),
+                    false => format!("{} {}", Self::tool_verb(&tool.name), tool.detail),
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", fit(&detail, width.saturating_sub(4) as usize)),
+                    match current {
+                        true => Style::new().fg(palette.accent),
+                        false => Style::new().fg(palette.text_muted),
+                    },
+                )));
+            }
+        }
+        if running.len() > 3 {
+            let more = self
+                .lang
+                .tf("subagents.more", &[&(running.len() - 3).to_string()]);
+            lines.push(Line::from(Span::styled(
+                format!("  {more}"),
+                Style::new().fg(palette.text_muted),
+            )));
+        }
+        lines
+    }
+
+    fn subagent_age(ms: u64) -> String {
+        let seconds = ms / 1000;
+        match seconds {
+            0..=59 => format!("{seconds}s"),
+            60..=3599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+            _ => format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60),
+        }
+    }
+
+    fn token_count(tokens: u64) -> String {
+        match tokens {
+            1_000_000.. => format!("{:.1}M", tokens as f64 / 1_000_000.0),
+            1_000.. => format!("{:.1}k", tokens as f64 / 1_000.0),
+            _ => tokens.to_string(),
+        }
+    }
+
+    fn tool_verb(name: &str) -> &'static str {
+        match name {
+            "read_file" | "read_image" => "READ",
+            "grep" => "SEARCH",
+            "glob" => "GLOB",
+            "list_files" => "LIST",
+            "bash" | "run_command" => "BASH",
+            "task" => "TASK",
+            "codegraph_explore" => "EXPLORE",
+            _ => "TOOL",
+        }
     }
 
     /// Record what the model is streaming. The lines are rendered on the next
@@ -1160,6 +1268,18 @@ impl Pane for TranscriptPane {
                 false => self.draft_rows[row - self.body.len()].clone(),
             })
             .collect::<Vec<_>>();
+        // Active delegated Sessions ride the tail as one block each. They sit
+        // above the single running-tool row, so the host row still answers
+        // "what is this Session doing" while the blocks answer "what are its
+        // children doing".
+        if self.follow {
+            for line in self.subagent_lines(content.width, now_ms()) {
+                if visible.len() == viewport {
+                    visible.remove(0);
+                }
+                visible.push(line);
+            }
+        }
         // The call in flight rides the tail as one spinner row. It takes the
         // bottom slot from the oldest visible row, so the newest output stays
         // on screen with the step that is still working.
@@ -8337,6 +8457,110 @@ mod tests {
             .collect()
     }
 
+    /// Active children paint as one block each: title, live clock and tokens,
+    /// then the tail of their tool calls. The blocks sit above the single
+    /// running-tool row, so the host row still names what this Session does.
+    #[test]
+    fn active_children_paint_as_dashboard_blocks_above_the_running_tool() {
+        let mut shell = Shell::new(Path::new("."), home_theme());
+        shell.set_transcript(&Transcript::default());
+        shell.set_subagents(&[
+            crate::event::SubagentRow {
+                id: "child-1".into(),
+                title: "Explore fusion/mapping/nav".into(),
+                busy: true,
+                started_at_ms: Some(now_ms().saturating_sub(73_000)),
+                messages: 2,
+                explore: true,
+                tokens: 69_600,
+                tools: vec![
+                    crate::event::SubagentTool {
+                        name: "read_file".into(),
+                        detail: "robot/local_vlm/README.md".into(),
+                        state: "completed".into(),
+                    },
+                    crate::event::SubagentTool {
+                        name: "grep".into(),
+                        detail: "semantic in server/internal/http".into(),
+                        state: "dispatched".into(),
+                    },
+                ],
+            },
+            crate::event::SubagentRow {
+                id: "child-2".into(),
+                title: "Explore glasses/AI interaction".into(),
+                busy: true,
+                started_at_ms: Some(now_ms().saturating_sub(55_000)),
+                messages: 1,
+                explore: true,
+                tokens: 34_200,
+                tools: vec![crate::event::SubagentTool {
+                    name: "list_files".into(),
+                    detail: "server/internal/agent".into(),
+                    state: "planned".into(),
+                }],
+            },
+        ]);
+        shell.set_running_tool(Some("bash".into()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).expect("terminal");
+        terminal
+            .draw(|frame| shell.transcript.render(frame, frame.area()))
+            .expect("draw");
+        let rows = (0..16)
+            .map(|y| {
+                (0..80)
+                    .map(|x| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell(ratatui::prelude::Position::new(x, y))
+                            .map(|cell| cell.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("EXPLORE") && row.contains("Explore fusion/mapping/nav")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(
+                |row| row.contains("EXPLORE") && row.contains("Explore glasses/AI interaction")
+            ),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("running ") && row.contains("69.6k tokens")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("READ robot/local_vlm/README.md")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("SEARCH semantic in server/internal/http")),
+            "{rows:?}"
+        );
+        let block = rows
+            .iter()
+            .position(|row| row.contains("EXPLORE"))
+            .expect("block");
+        let running = rows
+            .iter()
+            .position(|row| row.contains("running bash"))
+            .expect("running tool");
+        assert!(
+            block < running,
+            "dashboard sits above the running row: {rows:?}"
+        );
+    }
+
     /// The in-flight call's row never passes the wrapper that clips completed
     /// rows, so a long label used to ride the tail across the divider into the
     /// sidebar column. The painted row ends inside the transcript column, at
@@ -10051,6 +10275,9 @@ mod tests {
                     busy: true,
                     started_at_ms: Some(crate::pane::now_ms().saturating_sub(252_000)),
                     messages: 12,
+                    explore: false,
+                    tokens: 0,
+                    tools: Vec::new(),
                 },
                 crate::event::SubagentRow {
                     id: "ses_f4e7c475".into(),
@@ -10058,6 +10285,9 @@ mod tests {
                     busy: false,
                     started_at_ms: None,
                     messages: 3,
+                    explore: false,
+                    tokens: 0,
+                    tools: Vec::new(),
                 },
             ],
             changes: None,

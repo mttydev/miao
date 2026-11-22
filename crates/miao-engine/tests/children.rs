@@ -122,3 +122,81 @@ async fn a_bounded_answer_says_how_many_children_it_left_out() {
     assert_eq!(exact["children"].as_array().unwrap().len(), 3);
     assert_eq!(exact["truncated"], false);
 }
+
+/// The dashboard reads one snapshot per child: the parent's description, the
+/// live run clock, billed tokens and the tools that run has touched so far.
+#[tokio::test]
+async fn a_child_reports_its_delegation_run_tokens_and_recent_tools() {
+    let (_dir, store) = store().await;
+    store.fork("parent", "explorer", None).await.unwrap();
+    say(&store, "explorer", "look around").await;
+    store.start_run("explorer", "run-1").await.unwrap();
+    store
+        .record(
+            "parent",
+            "subagent_start",
+            serde_json::json!({
+                "run_id": "parent-run",
+                "subagent_id": "explorer",
+                "description": "Explore fusion/mapping/nav",
+                "background": false,
+                "explore": true,
+                "agent": "explore",
+            }),
+        )
+        .await
+        .unwrap();
+    store
+        .record(
+            "explorer",
+            "usage",
+            serde_json::json!({
+                "run_id": "run-1",
+                "usage": {
+                    "inputTokens": 1000,
+                    "outputTokens": 200,
+                    "totalTokens": 1200,
+                    "cacheReadInputTokens": 50,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    store
+        .tool_dispatch(
+            "explorer",
+            "run-1",
+            "call-1",
+            "read_file",
+            serde_json::json!({"path": "robot/local_vlm/README.md"}),
+        )
+        .await
+        .unwrap();
+    store
+        .tool_dispatch(
+            "explorer",
+            "run-1",
+            "call-2",
+            "grep",
+            serde_json::json!({"pattern": "semantic", "path": "server/internal/http"}),
+        )
+        .await
+        .unwrap();
+
+    let answer = store.children("parent", 10).await.unwrap();
+    let child = &answer["children"][0];
+    assert_eq!(child["description"], "Explore fusion/mapping/nav");
+    assert_eq!(child["explore"], true, "{answer}");
+    assert_eq!(child["agent"], "explore");
+    assert_eq!(child["tokens"]["input"], 1000);
+    assert_eq!(child["tokens"]["output"], 200);
+    assert_eq!(child["tokens"]["total"], 1200);
+    assert_eq!(child["tools"][0]["name"], "read_file");
+    assert_eq!(child["tools"][0]["detail"], "robot/local_vlm/README.md");
+    assert_eq!(child["tools"][1]["name"], "grep");
+    assert_eq!(
+        child["tools"][1]["detail"], "semantic in server/internal/http",
+        "{answer}"
+    );
+    assert!(child["age_ms"].is_u64(), "{answer}");
+}
