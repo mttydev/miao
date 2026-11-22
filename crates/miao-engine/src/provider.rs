@@ -1,6 +1,6 @@
 use crate::{
     credential::{Credential, Kind, Source},
-    protocol::ModelRequest,
+    protocol::{Message, ModelRequest},
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -196,6 +196,12 @@ pub(crate) fn decode_tool_call(
     name: &str,
     arguments: &str,
 ) -> Result<Value, ProviderError> {
+    // "No arguments" is how a model calls a parameterless tool; the empty
+    // string decodes as the empty input rather than a correctable mistake,
+    // so it never spends the correction budget that pauses the drain.
+    if arguments.trim().is_empty() {
+        return Ok(json!({"type":"tool_use","id":id,"name":name,"input":{}}));
+    }
     match serde_json::from_str::<Value>(arguments) {
         Ok(input) if input.is_object() => {
             Ok(json!({"type":"tool_use","id":id,"name":name,"input":input}))
@@ -207,6 +213,56 @@ pub(crate) fn decode_tool_call(
             json!({"type":"tool_use","id":id,"name":name,"input":null,"input_error":"invalid_json"}),
         ),
     }
+}
+
+/// One request the endpoint rejected as a mis-signed `thinking` block. The
+/// signature binds the block to the exact conversation prefix it was minted
+/// on, so any rewrite of an earlier message — pruning, bounding, an injected
+/// note, a switched model — voids every signature behind it. The endpoint's
+/// own remedy is "remove the block": replay the turn without reasoning rather
+/// than dead-ending the Session on a prefix the durable history can never
+/// reproduce again.
+fn is_thinking_binding_failure(detail: &str) -> bool {
+    let normalized = detail.to_lowercase().replace('`', "");
+    normalized.contains("invalid")
+        && normalized.contains("signature")
+        && normalized.contains("thinking")
+}
+
+/// Remove every reasoning part from the outgoing history. A signed thinking
+/// block whose prefix no longer matches is worse than no thinking at all, so
+/// the recovery replay drops the parts entirely: an assistant message reduced
+/// to nothing disappears, and neighbours of the same role merge so the
+/// request still alternates. The durable transcript keeps the reasoning.
+pub(crate) fn drop_reasoning(messages: &mut Vec<Message>) {
+    for message in messages.iter_mut() {
+        if message.role != "assistant" {
+            continue;
+        }
+        if let Some(blocks) = message.content.as_array_mut() {
+            blocks.retain(|block| block["type"] != "reasoning");
+        }
+    }
+    let mut kept: Vec<Message> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        let empty = message
+            .content
+            .as_array()
+            .is_none_or(|blocks| blocks.is_empty());
+        if !empty {
+            match kept.last_mut() {
+                Some(last) if last.role == message.role => {
+                    if let (Some(last_blocks), Some(blocks)) =
+                        (last.content.as_array_mut(), message.content.as_array())
+                    {
+                        last_blocks.extend(blocks.iter().cloned());
+                    }
+                }
+                _ => kept.push(message),
+            }
+        }
+    }
+    *messages = kept;
 }
 
 pub(crate) fn valid_model(model: &str) -> bool {
@@ -605,6 +661,16 @@ pub trait Provider: Send + Sync {
             "provider does not support host input modalities".into(),
         ))
     }
+    /// The per-turn output capacity the route declares for its model, when the
+    /// manifest names one. Providers that forward an explicit cap — Anthropic
+    /// requires `max_tokens`, and extended thinking is billed inside it — take
+    /// the declaration instead of their built-in default, which would truncate
+    /// long thinking at the cap and end the turn with no reply at all.
+    fn with_output_cap(&self, _output: u64) -> Result<Arc<dyn Provider>, ProviderError> {
+        Err(ProviderError::Stream(
+            "provider does not take a declared output cap".into(),
+        ))
+    }
     fn with_request_options(
         &self,
         _options: crate::request_options::Options,
@@ -910,13 +976,49 @@ impl Anthropic {
         cancel: CancellationToken,
         without_tools: bool,
     ) -> Result<Reply, ProviderError> {
-        let request = crate::media::normalize(request, "anthropic", &self.input_modalities)?;
+        let outcome = self
+            .attempt(&request, &progress, &cancel, without_tools, false)
+            .await;
+        match outcome {
+            Err(ProviderError::Http(400, detail)) if is_thinking_binding_failure(&detail) => {
+                // A replayed turn is a retry the product can see, like the
+                // request-level ones, so the recovery is announced before the
+                // stripped request goes out. A closed receiver means the turn
+                // is gone, exactly as for the request-level pauses.
+                let notice = json!({
+                    "kind":"provider.retry","attempt":2,"reason":detail,"status":400,
+                    "cause":"thinking-binding","source":"strip-reasoning","delay_ms":0,
+                    "extended_ms":null,
+                });
+                if progress.send(notice).await.is_err() {
+                    return Err(ProviderError::Interrupted);
+                }
+                self.attempt(&request, &progress, &cancel, without_tools, true)
+                    .await
+            }
+            outcome => outcome,
+        }
+    }
+
+    async fn attempt(
+        &self,
+        request: &ModelRequest,
+        progress: &mpsc::Sender<Value>,
+        cancel: &CancellationToken,
+        without_tools: bool,
+        without_reasoning: bool,
+    ) -> Result<Reply, ProviderError> {
+        let request =
+            crate::media::normalize(request.clone(), "anthropic", &self.input_modalities)?;
         let copilot = self.copilot.then(|| crate::copilot::turn(&request));
         let credential = self.source.load().await?;
         if credential.kind() != Kind::Key && !self.copilot {
             return Err(ProviderError::AuthProfile);
         }
         let mut messages = request.messages;
+        if without_reasoning {
+            drop_reasoning(&mut messages);
+        }
         for message in &mut messages {
             let blocks = message
                 .content
@@ -1015,8 +1117,14 @@ impl Anthropic {
             crate::copilot::apply(&mut request, &headers, true)?;
         }
         let response =
-            request_with_retry("anthropic", &self.client, request, &progress, &cancel).await?;
-        read_stream(response, progress, cancel, StreamState::default()).await
+            request_with_retry("anthropic", &self.client, request, progress, cancel).await?;
+        read_stream(
+            response,
+            progress.clone(),
+            cancel.clone(),
+            StreamState::default(),
+        )
+        .await
     }
 }
 
@@ -1063,6 +1171,11 @@ impl Provider for Anthropic {
         crate::media::validate_modalities(&input)?;
         let mut selected = self.clone();
         selected.input_modalities = input;
+        Ok(Arc::new(selected))
+    }
+    fn with_output_cap(&self, output: u64) -> Result<Arc<dyn Provider>, ProviderError> {
+        let mut selected = self.clone();
+        selected.max_tokens = output.min(u32::MAX as u64) as u32;
         Ok(Arc::new(selected))
     }
     fn with_request_options(
@@ -1408,13 +1521,24 @@ pub(crate) async fn request_with_retry(
         let overflow = last_failure_detail
             .as_deref()
             .is_some_and(crate::context_overflow::is_context_overflow);
+        // A mis-signed thinking block is deterministic too, and its remedy is
+        // not a replay but a different body: the codec strips the reasoning
+        // and retries above this loop, so an identical replay only spends
+        // another request on the same refusal.
+        let binding_failure = last_failure_detail
+            .as_deref()
+            .is_some_and(is_thinking_binding_failure);
         if !retryable {
             // A request the endpoint rejected (HTTP 400) is normally
             // deterministic, but a gateway also wraps a transient upstream
             // hiccup in one. Grant exactly one immediate replay so that class
             // recovers on its own; a real defect still fails, one request
             // later. Mirrors the TS runner's `selfHealable`.
-            if matches!(error, ProviderError::Http(400, _)) && !self_healed && !overflow {
+            if matches!(error, ProviderError::Http(400, _))
+                && !self_healed
+                && !overflow
+                && !binding_failure
+            {
                 self_healed = true;
                 announce_retry(
                     progress,
@@ -1700,7 +1824,10 @@ mod tool_call_decode_tests {
     /// Every provider adapter funnels arguments through this decode, so the
     /// matrix pins what each malformed shape settles as: an object keeps its
     /// input, and anything else — garbled JSON included — becomes a correctable
-    /// input error instead of an error that ends the stream.
+    /// input error instead of an error that ends the stream. The empty string
+    /// is the exception: "no arguments" is how a model calls a parameterless
+    /// tool, so it decodes as the empty input rather than spending the
+    /// correction budget that pauses the drain.
     #[test]
     fn malformed_tool_arguments_settle_as_input_errors() {
         let decode = |arguments: &str| decode_tool_call("call_1", "read_file", arguments).unwrap();
@@ -1708,9 +1835,12 @@ mod tool_call_decode_tests {
             decode(r#"{"path":"src/main.rs"}"#),
             json!({"type":"tool_use","id":"call_1","name":"read_file","input":{"path":"src/main.rs"}}),
         );
+        assert_eq!(
+            decode("   "),
+            json!({"type":"tool_use","id":"call_1","name":"read_file","input":{}}),
+        );
         for arguments in [
             r#"{"path":"src/ma"#,
-            "",
             "null",
             "42",
             "[1,2]",
@@ -2563,15 +2693,33 @@ impl StreamState {
             ));
         }
         let needs_tools = self.blocks.values().any(|b| b["type"] == "tool_use");
-        if needs_tools != (self.stop_reason.as_deref() == Some("tool_use"))
-            || !matches!(
-                self.stop_reason.as_deref(),
-                Some("tool_use" | "end_turn" | "stop_sequence")
-            )
-        {
-            return Err(ProviderError::Stream(
-                "incomplete or unsupported stop reason".into(),
-            ));
+        let reason = self.stop_reason.as_deref();
+        let calls = self
+            .blocks
+            .values()
+            .filter(|block| block["type"] == "tool_use")
+            .count();
+        // `max_tokens` means the reply ran out of output room and `pause_turn`
+        // means the endpoint paused a long-running turn: the visible content is
+        // still valid while any streamed call is incomplete, so the turn
+        // continues from durable history instead of ending on a legal close.
+        if matches!(reason, Some("max_tokens" | "pause_turn")) {
+            return Err(self.interrupted());
+        }
+        if !matches!(
+            reason,
+            Some("tool_use" | "end_turn" | "stop_sequence" | "refusal")
+        ) {
+            return Err(ProviderError::Stream(format!(
+                "unsupported stop reason {} with {calls} streamed tool call(s)",
+                reason.unwrap_or("missing")
+            )));
+        }
+        if needs_tools != (reason == Some("tool_use")) {
+            return Err(ProviderError::Stream(format!(
+                "stop reason {} does not match {calls} streamed tool call(s)",
+                reason.unwrap_or("missing")
+            )));
         }
         let visible = |key: &str| {
             self.blocks

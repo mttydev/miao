@@ -29,6 +29,15 @@ fn text_stream() -> String {
 async fn endpoint(
     responses: Vec<(u16, String)>,
 ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    endpoint_with_bodies(responses, None).await
+}
+
+/// The same fixture with every request body captured, for tests that must
+/// assert on what the second attempt actually sent.
+async fn endpoint_with_bodies(
+    responses: Vec<(u16, String)>,
+    captured: Option<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
+) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
     let count = Arc::new(AtomicUsize::new(0));
@@ -55,6 +64,9 @@ async fn endpoint(
             let mut request = vec![0; length];
             stream.read_exact(&mut request).await.unwrap();
             let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+            if let Some(captured) = &captured {
+                captured.lock().unwrap().push(request.clone());
+            }
             assert_eq!(request["stream"], true);
             assert_eq!(request["tools"][0]["name"], "read_file");
             for message in request["messages"].as_array().unwrap() {
@@ -392,4 +404,197 @@ async fn openai_chat_tolerates_explicit_null_delta_fields() {
     assert_eq!(content[1]["type"], "tool_use");
     assert_eq!(content[1]["name"], "get_time");
     server.abort();
+}
+
+fn stop_reason_stream(reason: &str, with_tool_call: bool) -> String {
+    let mut frames = vec![
+        json!({"type":"message_start","message":{"usage":{"input_tokens":7}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"look first"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}),
+        json!({"type":"content_block_stop","index":0}),
+    ];
+    if with_tool_call {
+        frames.extend([
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call","name":"read_file","input":{}}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"src\"}"}}),
+            json!({"type":"content_block_stop","index":1}),
+        ]);
+    }
+    frames.extend([
+        json!({"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"partial answer"}}),
+        json!({"type":"content_block_stop","index":2}),
+        json!({"type":"message_delta","delta":{"stop_reason":reason},"usage":{"output_tokens":4096}}),
+        json!({"type":"message_stop"}),
+    ]);
+    frames
+        .iter()
+        .map(|v| format!("data: {v}\r\n\r\n"))
+        .collect()
+}
+
+#[tokio::test]
+async fn max_tokens_truncation_continues_the_turn_instead_of_failing_it() {
+    let (url, _requests, server) =
+        endpoint(vec![(200, stop_reason_stream("max_tokens", true))]).await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    let outcome = provider
+        .stream(history(), progress, CancellationToken::new())
+        .await;
+    let Err(ProviderError::ContinuableTransport {
+        partial,
+        unexecuted_calls,
+    }) = outcome
+    else {
+        panic!("a max_tokens close must continue the turn instead of failing it");
+    };
+    assert_eq!(unexecuted_calls, 1);
+    let content = partial.content.as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "reasoning");
+    assert_eq!(content[0]["signature"], "sig");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "partial answer");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn pause_turn_continues_the_turn() {
+    let (url, _requests, server) =
+        endpoint(vec![(200, stop_reason_stream("pause_turn", false))]).await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    let outcome = provider
+        .stream(history(), progress, CancellationToken::new())
+        .await;
+    let Err(ProviderError::ContinuableTransport {
+        partial,
+        unexecuted_calls,
+    }) = outcome
+    else {
+        panic!("a pause_turn close must continue the turn instead of failing it");
+    };
+    assert_eq!(unexecuted_calls, 0);
+    assert_eq!(partial.content.as_array().unwrap().len(), 2);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unsupported_stop_reason_names_its_value() {
+    let (url, _requests, server) = endpoint(vec![(200, stop_reason_stream("seance", false))]).await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    let outcome = provider
+        .stream(history(), progress, CancellationToken::new())
+        .await;
+    let Err(ProviderError::Stream(message)) = outcome else {
+        panic!("an unknown stop reason must fail the stream");
+    };
+    assert!(
+        message.contains("seance"),
+        "the error must name the reason it saw: {message}"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_thinking_binding_rejection_retries_without_reasoning() {
+    let rejection = json!({
+        "type":"error",
+        "error":{"type":"invalid_request_error","message":"messages.19.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set thinking.block_binding.prefix_mismatch_behavior to drop_block."}
+    })
+    .to_string();
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, count, server) = endpoint_with_bodies(
+        vec![(400, rejection), (200, text_stream())],
+        Some(bodies.clone()),
+    )
+    .await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let request = ModelRequest {
+        system: String::new(),
+        messages: vec![
+            Message {
+                role: "user".into(),
+                content: json!([{"type":"text","text":"hi"}]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            Message {
+                role: "assistant".into(),
+                content: json!([{"type":"reasoning","text":"thinking","signature":"sig"}]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            Message {
+                role: "user".into(),
+                content: json!([{"type":"text","text":"please"}]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+        ],
+        tools: vec![miao_engine::protocol::ToolDefinition {
+            name: "read_file".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }],
+    };
+    let (progress, _receive) = mpsc::channel(64);
+    let reply = provider
+        .stream(request, progress, CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    // A deterministic rejection must not burn the generic 400 self-heal on an
+    // identical replay: the recovery attempt is the only second request.
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let replayed = &bodies.lock().unwrap()[1];
+    let wire = replayed.to_string();
+    assert!(
+        !wire.contains("thinking"),
+        "reasoning must be stripped: {wire}"
+    );
+    assert!(
+        !wire.contains("signature"),
+        "signatures must be stripped: {wire}"
+    );
+    let messages = replayed["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        1,
+        "the emptied assistant turn disappears and its same-role neighbours merge"
+    );
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
+    assert_eq!(reply.content[0]["text"], "你好");
+}
+
+#[tokio::test]
+async fn the_declared_output_cap_replaces_the_anthropic_default() {
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, _requests, server) =
+        endpoint_with_bodies(vec![(200, text_stream())], Some(bodies.clone())).await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    provider
+        .stream(history(), progress, CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(bodies.lock().unwrap()[0]["max_tokens"], 4096);
+
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (url, _requests, server) =
+        endpoint_with_bodies(vec![(200, text_stream())], Some(bodies.clone())).await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let capped = provider.with_output_cap(64_000).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    capped
+        .stream(history(), progress, CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(bodies.lock().unwrap()[0]["max_tokens"], 64_000);
 }
