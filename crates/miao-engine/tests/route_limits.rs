@@ -44,6 +44,10 @@ async fn declared_capacity_is_exposed_for_capacity_checks() {
     assert_eq!(declared.context, Some(128_000));
     assert_eq!(declared.output, Some(8_192));
     assert_eq!(limits.limit_for("unknown-model"), None);
+    // OpenAIChat sends no `max_tokens`, so a declared output capacity cannot
+    // reserve itself whole against the input ceiling.
+    assert!(!limits.output_forwarded_for("fixture-model"));
+    assert!(limits.output_forwarded_for("unknown-model"));
 }
 
 #[tokio::test]
