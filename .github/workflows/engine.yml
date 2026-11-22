@@ -159,6 +159,47 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: python3 tests/accuracy/sensitivity.py
 
+  engine-macos-x64-check:
+    name: engine (macOS x64 compile)
+    # The Intel iMac is the only x86_64-darwin host with a self-hosted runner,
+    # and hosted Intel minutes are the scarcest queue in this workflow.
+    # Compile-only, mirroring engine-windows-check: it proves every target still
+    # builds for x86_64-darwin without paying for a sharded test run on Intel
+    # hardware.
+    runs-on: [self-hosted, macOS, X64]
+    # Reports but does not gate, for the same reason the arm64 leg carries
+    # `experimental`: a self-hosted host that drops a job must not block every
+    # merge. Once this host has a clean run history, drop this line.
+    continue-on-error: true
+    timeout-minutes: 40
+    env:
+      # Debug info is most of a test binary, and this host keeps
+      # crates/miao-engine/target between jobs.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/miao-engine
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 10
+
+      # Same PATH repair as the engine job: the launchd service PATH omits the
+      # toolchain, and ~/.cargo/bin holds rustup shims rather than binaries.
+      - name: Ensure cargo is on PATH (self-hosted runner)
+        run: |
+          cargo_bin="$(dirname "$(rustup which --toolchain stable cargo)")"
+          echo "$cargo_bin" >> "$GITHUB_PATH"
+          "$cargo_bin/cargo" --version
+
+      - name: Compile every target
+        run: cargo check --locked --all-targets
+
   engine-windows-check:
     name: engine (windows compile)
     # Compile-only, on the pull-request path. The full Windows suite below takes

@@ -20,7 +20,8 @@ permissions:
 jobs:
   darwin-x64-intel:
     name: darwin-x64 on native Intel macOS
-    runs-on: macos-15-intel
+    # Self-hosted Intel Mac: native x86_64-darwin without the hosted queue.
+    runs-on: [self-hosted, macOS, X64]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
