@@ -164,6 +164,19 @@ pub struct Loaded {
     pub mode: ThemeMode,
 }
 
+impl Loaded {
+    /// Adopt the host's page colour in the visible theme *and* in every entry
+    /// of the catalog.
+    ///
+    /// The visible theme alone is not enough: the picker previews rows by
+    /// swapping in a catalog palette, so a catalog still holding the theme's own
+    /// ground would reopen the ring on every preview and every `/theme` switch.
+    fn adopt_canvas(&mut self, canvas: Option<Color>) {
+        adopt(&mut self.theme.palette, canvas);
+        self.catalog.adopt(canvas);
+    }
+}
+
 /// The TypeScript theme assets every binary carries, in menu order: a name
 /// plus the verbatim `assets/*.json` text. Both halves of every `{dark,
 /// light}` pair travel with the file, so a pinned mode recolours built-in
@@ -260,6 +273,14 @@ impl Catalog {
             .find(|(entry, _)| entry == name)
             .map(|(_, palette)| *palette)
     }
+
+    /// Hand every entry the host's page colour, so switching themes or
+    /// previewing a row never repaints the page in the theme's own ground.
+    fn adopt(&mut self, canvas: Option<Color>) {
+        for (_, palette) in &mut self.entries {
+            adopt(palette, canvas);
+        }
+    }
 }
 
 /// Parse one built-in asset under `mode`. The assets ship complete, so a
@@ -289,6 +310,7 @@ pub fn load(workspace: &Path) -> Loaded {
     let mut loaded = load_at(workspace, crate::config::global_dir().as_deref());
     // Read the environment here rather than in `load_at`, so the parser stays a
     // pure function of the files a test hands it.
+    loaded.adopt_canvas(host_canvas());
     let colorless = colorless(
         std::env::var("NO_COLOR").ok().as_deref(),
         std::env::var("TERM").ok().as_deref(),
@@ -297,6 +319,59 @@ pub fn load(workspace: &Path) -> Loaded {
         loaded.theme = loaded.theme.monochrome();
     }
     loaded
+}
+
+/// The page colour the host terminal paints behind and around the pane, when it
+/// announces one.
+///
+/// A full-screen page fills every cell it owns, but the host draws the pane as a
+/// card inset by a margin and padded inside: those pixels belong to the host, so
+/// a page painted in a different colour leaves a ring of the host's colour
+/// around itself and the app looks like it carved out a smaller area than the
+/// terminal gave it. mtty announces the card fill as `MTTY_TERM_BG`.
+pub fn host_canvas() -> Option<Color> {
+    parse_host_canvas(std::env::var("MTTY_TERM_BG").ok().as_deref())
+}
+
+fn parse_host_canvas(value: Option<&str>) -> Option<Color> {
+    let digits = value?.trim().strip_prefix('#')?;
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+    Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
+}
+
+/// Paint the page in the host's colour, unless doing so would put a light
+/// canvas under a dark palette or the other way round: a pinned mode is a
+/// deliberate choice and stays legible over the theme's own canvas.
+///
+/// Only the page ground moves. Every other token keeps the theme's own hue, so
+/// choosing a theme still decides what the app looks like; this just makes the
+/// outermost cells agree with the pixels the host paints next to them.
+pub fn adopt_host_canvas(palette: &mut Palette) {
+    adopt(palette, host_canvas());
+}
+
+fn adopt(palette: &mut Palette, host: Option<Color>) {
+    let Some(host) = host else {
+        return;
+    };
+    match (luma(host), luma(palette.background)) {
+        (Some(host_luma), Some(own_luma)) if (host_luma > 140) == (own_luma > 140) => {
+            palette.background = host
+        }
+        _ => {}
+    }
+}
+
+fn luma(color: Color) -> Option<u32> {
+    match color {
+        Color::Rgb(r, g, b) => {
+            Some((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn load_at(workspace: &Path, global: Option<&Path>) -> Loaded {
@@ -790,6 +865,71 @@ mod tests {
         );
         assert!(!colorless(None, None), "no request, no change");
         assert!(!colorless(None, Some("xterm-256color")));
+    }
+
+    #[test]
+    fn a_host_canvas_is_read_from_the_announced_colour() {
+        assert_eq!(
+            parse_host_canvas(Some("#1c1c1e")),
+            Some(Color::Rgb(0x1c, 0x1c, 0x1e))
+        );
+        assert_eq!(
+            parse_host_canvas(Some(" #000000 ")),
+            Some(Color::Rgb(0, 0, 0))
+        );
+        assert_eq!(parse_host_canvas(Some("1c1c1e")), None, "no leading #");
+        assert_eq!(parse_host_canvas(Some("#12345")), None, "short value");
+        assert_eq!(parse_host_canvas(Some("#gggggg")), None, "not hex");
+        assert_eq!(parse_host_canvas(None), None, "no announcement");
+    }
+
+    #[test]
+    fn the_page_adopts_a_host_canvas_on_the_same_side() {
+        let mut dark = builtin(DEFAULT_THEME, ThemeMode::Dark).expect("builtin theme");
+        adopt(&mut dark, Some(rgb("1C1C1E")));
+        assert_eq!(
+            dark.background,
+            rgb("1C1C1E"),
+            "a dark host repaints the page"
+        );
+        // A pinned mode is a deliberate choice: a light canvas under a dark
+        // palette would put the operator's text out of reach.
+        let mut pinned = builtin(DEFAULT_THEME, ThemeMode::Dark).expect("builtin theme");
+        adopt(&mut pinned, Some(rgb("FAF9F7")));
+        assert_ne!(
+            pinned.background,
+            rgb("FAF9F7"),
+            "a light host leaves dark text"
+        );
+        adopt(&mut pinned, None);
+        assert_eq!(
+            pinned.background,
+            builtin(DEFAULT_THEME, ThemeMode::Dark).unwrap().background,
+            "no announcement leaves the theme's own canvas"
+        );
+    }
+
+    #[test]
+    fn every_theme_in_the_catalog_carries_the_host_canvas() {
+        // The picker previews by swapping a catalog palette in, so a catalog
+        // still holding each theme's own ground reopens the ring on every row
+        // the cursor crosses.
+        let mut catalog = Catalog::builtin();
+        catalog.adopt(Some(rgb("1C1C1E")));
+        for name in catalog.names() {
+            let palette = catalog.palette(name).expect("palette in catalog");
+            // A palette with no ground of its own (`Reset`, e.g. the
+            // translucent themes) already shows the host's colour through it,
+            // so there is nothing to adopt and nothing to check.
+            if palette.background == Color::Reset {
+                continue;
+            }
+            assert_eq!(
+                palette.background,
+                rgb("1C1C1E"),
+                "{name} kept its own ground"
+            );
+        }
     }
 
     #[test]
