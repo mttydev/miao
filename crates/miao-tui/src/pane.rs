@@ -3100,10 +3100,19 @@ pub fn composer_height(composer: &Composer, width: u16, height: u16) -> u16 {
 /// read from its count.
 const QUEUED_ROWS: usize = 3;
 
-/// Rows the queue band above the input needs: one per waiting prompt, and one
-/// more when older prompts do not fit.
+/// Rows the queue band above the input needs: the count chip, one row per
+/// waiting prompt, and one more when older prompts do not fit. An empty queue
+/// reserves nothing, so the band never paints an unpainted row.
 fn queued_rows(prompts: &[String]) -> usize {
-    prompts.len().min(QUEUED_ROWS) + usize::from(prompts.len() > QUEUED_ROWS)
+    if prompts.is_empty() {
+        return 0;
+    }
+    1 + prompts.len().min(QUEUED_ROWS) + usize::from(prompts.len() > QUEUED_ROWS)
+}
+
+/// The queue depth as a chip: `Queued (2)`.
+fn queued_chip(depth: usize) -> String {
+    format!(" Queued ({depth}) ")
 }
 
 /// What the operator sent that the engine still holds un-promoted, drawn
@@ -3115,24 +3124,27 @@ fn render_queued(frame: &mut Frame, area: Rect, prompts: &[String], theme: &Them
     }
     let palette = theme.palette;
     let hidden = prompts.len().saturating_sub(QUEUED_ROWS);
-    let mut lines = (hidden > 0)
-        .then(|| {
-            Line::from(Span::styled(
-                match hidden {
-                    1 => "1 older prompt still queued".to_string(),
-                    hidden => format!("{hidden} older prompts still queued"),
-                },
-                Style::new().fg(palette.text_muted),
-            ))
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
+    // The count rides a filled chip so a queue is visible at a glance instead of
+    // reading as one more muted line: a bright ground with the page colour on
+    // top is the same treatment a waiting badge gets elsewhere in the product.
+    let mut lines = vec![Line::from(Span::styled(
+        queued_chip(prompts.len()),
+        Style::new().fg(palette.background).bg(palette.warning),
+    ))];
+    if hidden > 0 {
+        lines.push(Line::from(Span::styled(
+            match hidden {
+                1 => "1 older prompt still queued".to_string(),
+                hidden => format!("{hidden} older prompts still queued"),
+            },
+            Style::new().fg(palette.text_muted),
+        )));
+    }
     let room = (area.width as usize).saturating_sub(4);
     lines.extend(prompts.iter().skip(hidden).map(|prompt| {
         Line::from(vec![
             Span::styled("❯ ", Style::new().fg(palette.primary)),
             Span::styled(fit(prompt, room), Style::new().fg(palette.text)),
-            Span::styled(" · queued", Style::new().fg(palette.text_muted)),
         ])
     }));
     frame.render_widget(
@@ -7929,8 +7941,8 @@ mod tests {
         }
     }
 
-    /// A queued prompt names itself above the input: the title only carried a
-    /// count, which read as a lost message.
+    /// A queued prompt names itself above the input, under a filled count chip:
+    /// the title only carried a count, which read as a lost message.
     #[test]
     fn a_queued_prompt_is_named_above_the_input() {
         let palette =
@@ -7956,7 +7968,23 @@ mod tests {
             .iter()
             .position(|row| row.contains("finish every issue"))
             .expect("the queued prompt is painted");
-        assert!(rows[queued].contains("· queued"), "{}", rows[queued]);
+        let chip = rows
+            .iter()
+            .position(|row| row.contains("Queued (1)"))
+            .expect("the queue depth is painted");
+        // The count rides a filled chip: the page colour on the warning hue, so
+        // a queue reads at a glance instead of as one more muted line.
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((2, chip as u16))
+            .expect("the chip's first cell");
+        assert_eq!(
+            cell.fg, palette.background,
+            "the chip's text is the page colour"
+        );
+        assert_eq!(cell.bg, palette.warning, "the chip is filled");
+        assert!(chip < queued, "the count sits above the prompts");
         // The idle box carries no label, so the box's own rule is what locates
         // it now.
         let input = rows
@@ -9435,15 +9463,18 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).expect("terminal");
         terminal.draw(|frame| shell.render(frame)).expect("draw");
         let area = shell.queued.area;
-        assert!(area.height > 0, "the queue band painted: {area:?}");
+        assert!(area.height > 1, "the queue band painted: {area:?}");
+        // The band opens with the count chip, so the prompt sits on the row
+        // below it; the drag copies the row it covers.
+        let row = area.y + 1;
         assert!(
-            shell.begin_selection(Position::new(area.x, area.y)),
+            shell.begin_selection(Position::new(area.x, row)),
             "the press belongs to the queued rows"
         );
         // The loop draws between the press and the drag; a repaint must keep
         // the anchor instead of starting a fresh band each frame.
         terminal.draw(|frame| shell.render(frame)).expect("draw");
-        shell.update_selection(Position::new(area.right().saturating_sub(1), area.y));
+        shell.update_selection(Position::new(area.right().saturating_sub(1), row));
         let copied = shell.take_selection().expect("the drag copies the row");
         assert!(
             copied.contains("queued prompt"),
