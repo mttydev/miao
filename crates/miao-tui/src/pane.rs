@@ -7579,11 +7579,11 @@ mod tests {
         assert!(rendered[note + 2].contains("http://b"));
     }
 
-    /// A tool header carries the panel band in its line style, so the pane pads
-    /// it to its own edge the way it pads a diff row. Without that the badge
-    /// reads as a floating chip that stops mid-row.
+    /// A tool header keeps the page ground: only its badge is filled. Stacked
+    /// calls used to ride a tinted band each, which read as grey slabs down the
+    /// transcript; the blank row between calls is what separates them now.
     #[test]
-    fn a_tool_header_band_reaches_the_pane_edge() {
+    fn a_tool_header_keeps_the_page_ground() {
         let palette =
             crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
                 .expect("theme");
@@ -7625,19 +7625,19 @@ mod tests {
                     .contains("BASH")
             })
             .expect("the tool header is painted");
-        // The row is one band with the badge set into it: no column between
-        // them falls back to the page background.
+        // Only the badge carries a fill: every other cell, up to the pane's
+        // right edge, sits on the page background.
         for (column, cell) in rows[header].iter().enumerate() {
             assert!(
-                cell.bg == palette.surface || cell.bg == palette.tool_badge_bg,
-                "column {column} paints {:?} outside the header's band",
+                cell.bg == palette.background || cell.bg == palette.tool_badge_bg,
+                "column {column} paints {:?} outside the badge",
                 cell.bg
             );
         }
         assert_eq!(
             rows[header][width as usize - 1].bg,
-            palette.surface,
-            "the band is padded to the pane's right edge"
+            palette.background,
+            "the row does not paint a band to the edge"
         );
     }
 

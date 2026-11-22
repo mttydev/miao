@@ -289,8 +289,9 @@ fn header_with(
     };
     // The label sits in a filled badge so a call reads as a stamped block
     // rather than another line of prose, and its argument stays in brackets.
-    // The whole row rides on one panel band: the badge is the only ink that
-    // differs, so the call reads as a block instead of a floating chip.
+    // The row keeps the page background: a tint behind every call stacked up
+    // into grey slabs down the transcript, so the badge is the only ink that
+    // differs and the blank row above each call keeps neighbours apart.
     let mut spans = vec![
         Span::styled(format!("{glyph} "), glyph_style),
         Span::styled(
@@ -313,7 +314,7 @@ fn header_with(
             Style::new().fg(palette.text_muted),
         ));
     }
-    Line::from(spans).style(Style::new().bg(palette.surface))
+    Line::from(spans)
 }
 
 fn result_line(text: &str, color: Color) -> Line<'static> {
@@ -2060,9 +2061,9 @@ mod tests {
         assert_eq!(badge.style.bg, Some(palette.tool_badge_bg));
         assert_eq!(badge.style.fg, Some(palette.tool_badge_fg));
         assert!(badge.style.add_modifier.contains(Modifier::BOLD));
-        // The row itself wears one band, so the pane can pad it to the edge
-        // instead of leaving the badge as a floating box.
-        assert_eq!(rows[0].style.bg, Some(palette.surface));
+        // The row keeps the page ground: the badge is the only filled ink, so
+        // a column of calls does not stack into grey slabs.
+        assert_eq!(rows[0].style.bg, None);
     }
 
     #[test]
