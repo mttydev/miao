@@ -2448,10 +2448,6 @@ fn transcript_lines(
     let mut anchors: Vec<(usize, String)> = Vec::new();
     // The TS scrollbox opens with one blank row above the oldest message.
     rows.push(Row::plain(Line::default()));
-    // Whether the previous assistant part rendered as a single inline row. TS
-    // butts consecutive single-row tools together and separates everything
-    // else with one blank row.
-    let mut inline_run = false;
     // The pair the previous step closed with. The footer names the agent and
     // the model only when this step's pair differs from it, so a session that
     // never switches does not print the same label under every turn.
@@ -2459,7 +2455,6 @@ fn transcript_lines(
     for entry in &transcript.entries {
         match entry {
             Entry::User { text, .. } => {
-                inline_run = false;
                 // The operator's own words as one quiet line per row: an accent
                 // `❯` and the text. No panel, no background band, no rules above
                 // and below — the prompt is a line the person typed, not a box
@@ -2485,7 +2480,6 @@ fn transcript_lines(
                 // said. Painting it behind `❯` claimed it as input and put words
                 // in their mouth; a quiet labelled block keeps the facts
                 // readable without changing who said what.
-                inline_run = false;
                 rows.push(Row::plain(Line::default()));
                 rows.push(Row::plain(Line::from(vec![
                     Span::styled("⋯ ", Style::new().fg(palette.border)),
@@ -2507,7 +2501,6 @@ fn transcript_lines(
                 // is painted in the warning color and says so in plain words:
                 // the old muted gray read as decoration, and operators
                 // reported never noticing automatic compaction had run.
-                inline_run = false;
                 rows.push(Row::plain(Line::default()));
                 rows.push(Row::plain(Line::from(vec![
                     Span::styled("── ", Style::new().fg(palette.warning)),
@@ -2533,7 +2526,6 @@ fn transcript_lines(
                         Part::Text(text) => {
                             // TS TextPart: one blank row above the bullet and
                             // its markdown block.
-                            inline_run = false;
                             rows.push(Row::plain(Line::default()));
                             rows.extend(prose_lines(text, theme));
                         }
@@ -2544,7 +2536,6 @@ fn transcript_lines(
                             // step has no text, so a model that narrates
                             // between tool calls does not look like it never
                             // reasoned.
-                            inline_run = false;
                             let has_prose = parts.iter().any(
                                 |part| matches!(part, Part::Text(text) if !text.trim().is_empty()),
                             );
@@ -2561,10 +2552,10 @@ fn transcript_lines(
                                 expanded,
                                 toggle,
                             );
-                            if tool_rows.len() > 1 || !inline_run {
-                                rows.push(Row::plain(Line::default()));
-                            }
-                            inline_run = tool_rows.len() == 1;
+                            // Each call is a panel band, not a line of prose:
+                            // butting two bands together read as one crammed
+                            // block. One blank row keeps the calls distinct.
+                            rows.push(Row::plain(Line::default()));
                             // A tool row carries its own indentation: the
                             // header's glyph and the result's `  │ ` gutter.
                             // Folding such a row as plain text broke
@@ -2607,7 +2598,6 @@ fn transcript_lines(
                 previous_identity = Some(identity);
             }
             Entry::Error { message } => {
-                inline_run = false;
                 rows.push(Row::plain(Line::default()));
                 for (index, line) in message.lines().enumerate() {
                     rows.push(Row::plain(Line::from(vec![
@@ -2620,7 +2610,6 @@ fn transcript_lines(
                 }
             }
             Entry::Interrupted { by } => {
-                inline_run = false;
                 rows.push(Row::plain(Line::default()));
                 rows.push(Row::plain(Line::from(vec![
                     Span::styled("⏹ ", Style::new().fg(palette.warning)),
@@ -7520,9 +7509,9 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_inline_tools_butt_together_like_the_typescript_rows() {
-        // Two single-row tools read as one list; prose reopens the gap the way
-        // the TS sibling margin does.
+    fn consecutive_tools_open_with_a_blank_row() {
+        // Each call is its own panel band, so two calls in a row are separated
+        // by one blank row instead of reading as a single crammed block.
         let palette =
             crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
                 .expect("theme");
@@ -7567,9 +7556,10 @@ mod tests {
             .expect("first fetch");
         assert_eq!(
             rendered[fetch_a + 1],
-            "· WEBSEARCH [q]",
-            "the second inline row follows with no blank row"
+            "",
+            "the second call opens with a blank row"
         );
+        assert_eq!(rendered[fetch_a + 2], "· WEBSEARCH [q]");
         let note = rendered
             .iter()
             .position(|line| line.contains("note"))
