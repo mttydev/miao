@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -820,7 +821,9 @@ impl Shell {
 /// divider and the rule cell then goes one column into the sidebar: the broken,
 /// intermittently gapped rule Windows terminals showed. Replacing a wide glyph
 /// in the last two conversation columns keeps every row of the divider on its
-/// own column.
+/// own column. The rule is also marked [`CellDiffOption::AlwaysUpdate`]: a
+/// terminal that dropped a row (a wide glyph, a host renderer, a resize) must
+/// get the cell back even when the buffer's rule cell itself did not change.
 fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
     if area.x == 0 {
         return;
@@ -831,7 +834,10 @@ fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style)
                 buffer[(x, y)].set_symbol(" ");
             }
         }
-        buffer[(area.x, y)].set_symbol("│").set_style(style);
+        buffer[(area.x, y)]
+            .set_symbol("│")
+            .set_style(style)
+            .set_diff_option(CellDiffOption::AlwaysUpdate);
     }
 }
 
@@ -11298,6 +11304,45 @@ mod final_layout_check {
             let cell = &buffer[(rule, y)];
             assert_eq!(cell.symbol(), "│", "row {y} lost the rule");
             assert_eq!(cell.bg, palette.background, "row {y} tinted the rule");
+            assert_eq!(
+                cell.diff_option,
+                CellDiffOption::AlwaysUpdate,
+                "row {y} let the terminal keep a dropped rule"
+            );
+        }
+    }
+
+    /// A frame whose rule cell did not change still has to send it: the
+    /// terminal may have dropped that row, and ratatui otherwise skips equal
+    /// cells. `AlwaysUpdate` keeps the divider in every diff.
+    #[test]
+    fn the_sidebar_rule_is_emitted_even_when_unchanged() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let width = 160u16;
+        let height = 24u16;
+        let rule = body_columns(Rect::new(0, 0, width, 1)).0.width;
+        let mut shell = Shell::new(std::path::Path::new("."), theme);
+        let mut first =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        first.draw(|frame| shell.render(frame)).unwrap();
+        let previous = first.backend().buffer().clone();
+        let mut second =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        second.draw(|frame| shell.render(frame)).unwrap();
+        let updates = previous.diff(second.backend().buffer());
+        for y in 0..height {
+            assert!(
+                updates
+                    .iter()
+                    .any(|(x, row, cell)| { *x == rule && *row == y && cell.symbol() == "│" }),
+                "row {y} kept the stale terminal instead of the rule"
+            );
         }
     }
 
