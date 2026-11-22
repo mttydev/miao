@@ -1158,12 +1158,12 @@ mod tests {
         // moves between the TUI and the rest of miao.
         let palette = builtin(DEFAULT_THEME, ThemeMode::Dark).expect("builtin theme");
         let syntax = palette.syntax;
-        assert_eq!(syntax.string, rgb("e6db74"), "theme.syntaxString");
-        assert_eq!(syntax.number, rgb("ae81ff"), "theme.syntaxNumber");
-        assert_eq!(syntax.comment, rgb("888c94"), "theme.syntaxComment");
-        assert_eq!(syntax.keyword, rgb("f92572"), "theme.syntaxKeyword");
-        assert_eq!(syntax.function, rgb("a7e22e"), "theme.syntaxFunction");
-        assert_eq!(syntax.kind, rgb("65d9ef"), "theme.syntaxType");
+        assert_eq!(syntax.string, rgb("ffd166"), "theme.syntaxString");
+        assert_eq!(syntax.number, rgb("c6b3ff"), "theme.syntaxNumber");
+        assert_eq!(syntax.comment, rgb("949494"), "theme.syntaxComment");
+        assert_eq!(syntax.keyword, rgb("fb7185"), "theme.syntaxKeyword");
+        assert_eq!(syntax.function, rgb("8fd4c4"), "theme.syntaxFunction");
+        assert_eq!(syntax.kind, rgb("9de2d0"), "theme.syntaxType");
     }
 
     #[test]
