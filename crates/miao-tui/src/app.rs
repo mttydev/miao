@@ -4128,12 +4128,9 @@ impl App {
     /// Paint one theme without saving it. The picker previews every row it
     /// moves over; only Enter writes the choice to preferences.
     fn show_theme(&mut self, name: &str) -> bool {
-        let Some(mut palette) = self.themes.palette(name) else {
+        let Some(palette) = self.themes.palette(name) else {
             return false;
         };
-        // Every switch keeps the page flush with the host's card, so changing
-        // the theme never reopens the ring the host colour closed.
-        theme::adopt_host_canvas(&mut palette);
         let theme = Theme {
             name: name.to_string(),
             palette,
