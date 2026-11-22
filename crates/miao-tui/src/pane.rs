@@ -6205,10 +6205,7 @@ mod tests {
         assert!(!painted.contains("example.com"), "{painted}");
         // The image result names the media on the read header; its bytes never
         // reach the buffer.
-        assert!(
-            painted.contains("READ [assets/logo.png] image"),
-            "{painted}"
-        );
+        assert!(painted.contains("read  assets/logo.png image"), "{painted}");
         assert!(!painted.contains("iVBOR"), "{painted}");
         // Long output folds to its budget and names the chord that reopens it.
         assert!(painted.contains("line 1"), "{painted}");
@@ -7565,7 +7562,7 @@ mod tests {
             "",
             "the second call opens with a blank row"
         );
-        assert_eq!(rendered[fetch_a + 2], "· WEBSEARCH [q]");
+        assert_eq!(rendered[fetch_a + 2], "· WebSearch  q");
         let note = rendered
             .iter()
             .position(|line| line.contains("note"))
@@ -7579,9 +7576,9 @@ mod tests {
         assert!(rendered[note + 2].contains("http://b"));
     }
 
-    /// A tool header keeps the page ground: only its badge is filled. Stacked
-    /// calls used to ride a tinted band each, which read as grey slabs down the
-    /// transcript; the blank row between calls is what separates them now.
+    /// A tool header keeps the page ground: no cell is filled, so a column of
+    /// calls reads as prose rather than a stack of coloured blocks. The blank
+    /// row between calls is what separates them now.
     #[test]
     fn a_tool_header_keeps_the_page_ground() {
         let palette =
@@ -7622,15 +7619,14 @@ mod tests {
                 row.iter()
                     .map(|cell| cell.symbol())
                     .collect::<String>()
-                    .contains("BASH")
+                    .contains("bash")
             })
             .expect("the tool header is painted");
-        // Only the badge carries a fill: every other cell, up to the pane's
-        // right edge, sits on the page background.
+        // Every cell, up to the pane's right edge, sits on the page ground.
         for (column, cell) in rows[header].iter().enumerate() {
             assert!(
-                cell.bg == palette.background || cell.bg == palette.tool_badge_bg,
-                "column {column} paints {:?} outside the badge",
+                cell.bg == palette.background,
+                "column {column} paints {:?} outside the page ground",
                 cell.bg
             );
         }
@@ -11152,7 +11148,7 @@ mod draft_tool_tests {
     use super::*;
 
     /// A tool call that runs mid-stream is work the turn did, so the draft
-    /// paints it as a `✓ BASH […]` row instead of waiting for the commit. Without
+    /// paints it as a `✓ bash  …` row instead of waiting for the commit. Without
     /// this the operator saw the answer's paragraphs with no sign of the calls
     /// between them.
     #[test]
@@ -11186,7 +11182,7 @@ mod draft_tool_tests {
             .collect();
         let joined = text.join("\n");
         assert!(
-            joined.contains("BASH"),
+            joined.contains("bash"),
             "the tool row names the tool: {joined}"
         );
         assert!(

@@ -78,11 +78,11 @@ schedule_wakeup/cancel_wakeup/cron_* → schedule   lsp_* → lsp
 
 | 工具 | 行 |
 |---|---|
-| 所有工具 | 头部整行铺一块 `palette.surface` 底色并在面板内补齐到右边缘；工具名是嵌在这块底色上的实心徽标（大写、粗体、前景取 `palette.background`，底色按类别：bash 取 secondary、读/搜取 accent、写类取 success） |
-| bash | `✓ BASH [<command 首行>]`；输出前 2 行（剥 ANSI），超出 `… +N lines [<chord> to expand]`；失败输出 error 色 |
-| read | `✓ READ [<filePath>]` + 行内 `N lines` / `image` / `N entries`（truncated 注明） |
-| glob/grep | `✓ GLOB/GREP [<pattern>]` + 行内 `N matches`（truncated 注明） |
-| write/edit/apply_patch | `✓ EDIT/WRITE/APPLY_PATCH [<path>]` + `⎿ Added N lines, removed M lines`；每个 display 文件 `◆ action path +N −M` 与 12 行 diff（`+` success、`-` error、`@@` accent） |
+| 所有工具 | 头部保持页面底色，不铺色带、不加徽标：工具名是工具自己的小写名（取 `palette.secondary`），参数跟两个空格之后取 `palette.text_muted`；行间靠空行分隔 |
+| bash | `✓ bash  <command 首行>`；输出前 3 行（剥 ANSI），超出 `… +N lines [<chord> to expand]`；折叠态单行按显示宽度裁剪并注明 `long lines clipped`；失败输出 error 色 |
+| read | `✓ read  <filePath>` + 行内 `N lines` / `image` / `N entries`（truncated 注明） |
+| glob/grep | `✓ glob  <pattern>` / `✓ grep  <pattern>` + 行内 `N matches`（truncated 注明） |
+| write/edit/apply_patch | `✓ edit  <path>`（write/apply_patch 同理）+ `⎿ Added N lines, removed M lines`；每个 display 文件 `◆ action path +N −M` 与 12 行 diff（`+` success、`-` error、`@@` accent），折叠态超宽行同样裁剪 |
 | todowrite | todo 块：`[✓] id: content ← deps`；in_progress warning、completed/cancelled muted |
 | question | 每个问题一行提示（muted）+ 一行答案（逗号分隔；无答案 `(no answer)`） |
 | webfetch/websearch/skill | 单行，不显示正文 |

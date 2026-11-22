@@ -155,14 +155,6 @@
       "dark": "#5C0112",
       "light": "#FEE2E2"
     },
-    "toolBadgeBg": {
-      "dark": "#5945B1",
-      "light": "#5945B1"
-    },
-    "toolBadgeFg": {
-      "dark": "#f4f4f4",
-      "light": "#f4f4f4"
-    },
     "markdownText": {
       "dark": "darkStep12",
       "light": "lightStep12"
