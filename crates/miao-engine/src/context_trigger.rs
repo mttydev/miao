@@ -504,6 +504,17 @@ where
     if cancel.is_cancelled() {
         return Ok(false);
     }
+    // A trim is the engine's own proof that the assembled history does not fit:
+    // the request it shortened was sent, and the durable history it hid is
+    // rebuilt for the next turn. The anchor cannot see that — it is the
+    // provider's count of that shortened request — so waiting for the anchor to
+    // cross the threshold left a trimmed Session trimming every turn and never
+    // compacting. The proof stands until a compaction replaces the history, and
+    // it outranks the "nothing pending" return below: a trim is not a delta
+    // since the anchor, it is the history the anchor cannot measure.
+    let trimmed = store
+        .trimmed_since_compaction(session, budget.window.unwrap_or(0))
+        .await?;
     // Gate ①: the anchor is the newest usage report's normalized context plus
     // the message it counted. Only the messages appended after that report are
     // still uncounted, and for those gate ② prefers the provider's own count
@@ -513,7 +524,7 @@ where
     let (context, pending_tokens) = match store.context_anchor(session).await? {
         Some((context, counted_through)) => {
             let (pending, pending_chars) = store.pending_context(session, counted_through).await?;
-            if pending.is_empty() && !forced {
+            if pending.is_empty() && !forced && !trimmed {
                 idle_gate(
                     notify,
                     json!({
@@ -570,7 +581,7 @@ where
     // refused, and the optional low watermark that keeps passes small instead of
     // making every pass pay for the whole history.
     let folding = fold_at.is_some_and(|fold| total >= fold);
-    if !forced && !folding && !budget.should_compact(Some(measured), pending_tokens) {
+    if !forced && !folding && !trimmed && !budget.should_compact(Some(measured), pending_tokens) {
         // Below half the threshold nothing is near the wall, and one line per
         // settled turn would bury the case somebody is investigating; the
         // progress notice still goes out every time.
@@ -1712,6 +1723,62 @@ impl Store {
         .await
     }
 
+    /// The request bound a previous drain imposed, while that trim is still
+    /// newer than the newest compaction.
+    ///
+    /// The provider's count describes the request it answered — the trimmed one
+    /// — so after a trim it no longer proves the next assembly fits. The bound
+    /// is durable proof from the same step, and a settled compaction clears it
+    /// because then the history itself shrank. Without carrying it across a
+    /// drain, the first step of the next drain could send the whole history.
+    pub async fn latest_trim_bound(&self, session: &str) -> Result<Option<(u64, u64)>, Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            let row: Option<(Option<i64>, Option<i64>)> = conn
+                .query_row(
+                    "SELECT json_extract(data,'$.window'),json_extract(data,'$.budget') \
+                     FROM engine_event WHERE session_id=?1 AND kind='context.trimmed' \
+                       AND json_extract(data,'$.reason')='request_window' \
+                       AND seq>(SELECT COALESCE(MAX(created_seq),0) FROM engine_compaction WHERE session_id=?1) \
+                     ORDER BY seq DESC LIMIT 1",
+                    [&session],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            Ok(row.and_then(|(window, budget)| match (window, budget) {
+                (Some(window), Some(budget)) if window > 0 && budget > 0 => {
+                    Some((window as u64, budget as u64))
+                }
+                _ => None,
+            }))
+        })
+        .await
+    }
+
+    /// Whether this Session's request had to be trimmed since the newest
+    /// compaction, against the window this turn plans against. A trim is proof
+    /// that the assembled history does not fit, and the compaction trigger
+    /// cannot see that through the anchor: the anchor is the provider's count of
+    /// the shortened request. A trim made for another window (a model this
+    /// Session no longer runs) says nothing about this one.
+    pub async fn trimmed_since_compaction(
+        &self,
+        session: &str,
+        window: u64,
+    ) -> Result<bool, Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_event WHERE session_id=?1 AND kind='context.trimmed' \
+                   AND json_extract(data,'$.window')=?2 \
+                   AND seq>(SELECT COALESCE(MAX(created_seq),0) FROM engine_compaction WHERE session_id=?1))",
+                rusqlite::params![session, window as i64],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await
+    }
+
     /// The messages committed after the anchor's count, plus their serialized
     /// chars: exactly the delta the provider still has to count.
     pub async fn pending_context(
@@ -2730,5 +2797,61 @@ mod tests {
             store.context_anchor("s").await.unwrap(),
             Some((21_000, boundary))
         );
+    }
+
+    /// A trim is the trigger's own proof that the assembled history does not
+    /// fit. The anchor afterwards is the provider's count of the shortened
+    /// request, so a Session that trimmed would otherwise be told
+    /// `under_threshold` forever and never compact. The proof has to end at the
+    /// compaction that actually replaces the history.
+    #[tokio::test]
+    async fn a_trim_is_compaction_evidence_until_the_newest_compaction() {
+        use crate::protocol::{Delivery, Input};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+        store
+            .admit(Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "s".into(),
+                input_id: "one".into(),
+                prompt: "task".into(),
+                delivery: Delivery::Steer,
+            })
+            .await
+            .unwrap();
+        store.promote("s", true).await.unwrap();
+        let boundary = store
+            .message(
+                "s",
+                "assistant",
+                json!([{"type":"text","text":"completed task"}]),
+            )
+            .await
+            .unwrap()
+            .seq;
+        store
+            .record(
+                "s",
+                "context.trimmed",
+                json!({"reason":"request_window","window":655_360,"budget":593_312,"messages":1473}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.latest_trim_bound("s").await.unwrap(),
+            Some((655_360, 593_312))
+        );
+        assert!(store.trimmed_since_compaction("s", 655_360).await.unwrap());
+        store
+            .compact("s", "cut", boundary, "summary".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.latest_trim_bound("s").await.unwrap(),
+            None,
+            "a compaction replaced the history the trim was hiding"
+        );
+        assert!(!store.trimmed_since_compaction("s", 655_360).await.unwrap());
     }
 }
