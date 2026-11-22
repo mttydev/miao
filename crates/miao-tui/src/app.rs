@@ -4848,10 +4848,26 @@ impl App {
                 }
                 LivePhase::Waiting
             }
-            // The summary landed or was refused, and the turn continues: the
-            // next provider frame names what it is doing now.
-            "compaction.finished" | "compaction.failed" => {
+            // The summary landed, and the turn continues: the next provider
+            // frame names what it is doing now.
+            "compaction.finished" => {
                 self.shell.set_running_compaction(None);
+                LivePhase::Waiting
+            }
+            // A failed pass used to clear the phase in silence. The operator
+            // then saw the conversation stop mid-history with nothing saying
+            // why automatic compaction did not run, which reads exactly like a
+            // compaction that never started.
+            "compaction.failed" => {
+                self.shell.set_running_compaction(None);
+                let reason = frame
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                    .unwrap_or("the summarizer refused the pass");
+                let reason: String = reason.chars().take(120).collect();
+                self.notice(&format!("Compaction failed · {reason}"));
                 LivePhase::Waiting
             }
             _ => return,
@@ -10139,6 +10155,32 @@ mod tests {
             Some("compacting context"),
             "{labels:?}"
         );
+    }
+
+    /// A refused pass used to clear the phase in silence: the conversation
+    /// stopped mid-history with nothing saying why automatic compaction did not
+    /// run, which reads exactly like a compaction that never started.
+    #[test]
+    fn a_failed_compaction_names_its_reason() {
+        let mut app = running_app("run-1");
+        app.handle(AppEvent::Provider(serde_json::json!({
+            "kind": "compaction.started",
+            "session_id": "ses_1",
+            "run_id": "run-1",
+            "segments": 1,
+        })));
+        assert_eq!(app.shell.transcript_compaction(), Some((1, 1)));
+        app.handle(AppEvent::Provider(serde_json::json!({
+            "kind": "compaction.failed",
+            "session_id": "ses_1",
+            "run_id": "run-1",
+            "reason": "summary timeout",
+        })));
+        assert_eq!(
+            app.shell.composer.notice.as_deref(),
+            Some("Compaction failed · summary timeout")
+        );
+        assert_eq!(app.shell.transcript_compaction(), None);
     }
 
     #[test]
