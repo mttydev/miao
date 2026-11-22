@@ -11281,16 +11281,16 @@ mod tests {
             }],
         };
         let wire = app.footer_wire().expect("the facts are on screen");
-        let pairs: Vec<(&str, Option<&str>)> = wire
+        let pairs: Vec<(&str, Option<&str>, Option<&str>)> = wire
             .iter()
-            .map(|seg| (seg.id, seg.chord.as_deref()))
+            .map(|seg| (seg.id, seg.chord.as_deref(), seg.tone))
             .collect();
         assert_eq!(
             pairs,
             vec![
-                ("approval", Some("ctrl+x f")),
-                ("model", Some("ctrl+x m")),
-                ("provider", Some("ctrl+x m")),
+                ("approval", Some("ctrl+x f"), Some("warning")),
+                ("model", Some("ctrl+x m"), Some("accent")),
+                ("provider", Some("ctrl+x m"), Some("success")),
             ],
             "{wire:?}"
         );
