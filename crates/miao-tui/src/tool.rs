@@ -7,7 +7,7 @@
 //! half of that projection lives here; without it every tool row would show raw
 //! JSON.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -300,25 +300,18 @@ fn header_with(
     } else {
         ("·", Style::new().fg(palette.warning))
     };
-    // The label sits in a filled badge so a call reads as a stamped block
-    // rather than another line of prose, and its argument stays in brackets.
-    // The row keeps the page background: a tint behind every call stacked up
-    // into grey slabs down the transcript, so the badge is the only ink that
-    // differs and the blank row above each call keeps neighbours apart.
+    // The label stays plain lowercase text on the page ground. A filled badge
+    // turned every call into a coloured block that competed with the answer
+    // around it, so the call is one line again: the name in the secondary
+    // colour, its argument muted after two spaces.
     let mut spans = vec![
         Span::styled(format!("{glyph} "), glyph_style),
-        Span::styled(
-            label.to_ascii_uppercase(),
-            Style::new()
-                .fg(palette.tool_badge_fg)
-                .bg(palette.tool_badge_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(label.to_string(), Style::new().fg(palette.secondary)),
     ];
     if !detail.is_empty() {
         spans.push(Span::styled(
-            format!(" [{detail}]"),
-            Style::new().fg(palette.text),
+            format!("  {detail}"),
+            Style::new().fg(palette.text_muted),
         ));
     }
     if let Some(summary) = summary.filter(|summary| !summary.is_empty()) {
@@ -2116,7 +2109,7 @@ mod tests {
         );
         let lines = lines(&part, None, &theme(), false, Some("ctrl+x u"));
         let rendered = rendered(&lines);
-        assert_eq!(rendered[0], "✓ BASH [echo hi]");
+        assert_eq!(rendered[0], "✓ bash  echo hi");
         assert!(rendered.contains(&"  │ hi".to_string()));
         // Folded output keeps the row budget; the tail and the hint stay
         // reachable through the elision marker instead of crowding the
@@ -2252,21 +2245,20 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_label_rides_in_a_filled_badge() {
+    fn a_tool_label_stays_plain_text_on_the_page_ground() {
         let theme = theme();
         let palette = theme.palette;
         let part = tool("run_command", json!({"argv": ["echo", "hi"]}), None, false);
         let rows = lines(&part, None, &theme, false, None);
-        let badge = rows[0]
+        let label = rows[0]
             .spans
             .iter()
-            .find(|span| span.content.trim() == "BASH")
-            .expect("the label wears the badge");
-        assert_eq!(badge.style.bg, Some(palette.tool_badge_bg));
-        assert_eq!(badge.style.fg, Some(palette.tool_badge_fg));
-        assert!(badge.style.add_modifier.contains(Modifier::BOLD));
-        // The row keeps the page ground: the badge is the only filled ink, so
-        // a column of calls does not stack into grey slabs.
+            .find(|span| span.content == "bash")
+            .expect("the label is painted as its lowercase name");
+        assert_eq!(label.style.fg, Some(palette.secondary));
+        assert_eq!(label.style.bg, None);
+        // The row keeps the page ground, so a column of calls cannot stack into
+        // grey slabs down the transcript.
         assert_eq!(rows[0].style.bg, None);
     }
 
@@ -2305,7 +2297,7 @@ mod tests {
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
         assert!(
-            rendered[0].contains("MESSAGE") && rendered[0].contains("→ ses_b"),
+            rendered[0].contains("message") && rendered[0].contains("→ ses_b"),
             "{rendered:?}"
         );
         assert!(rendered[0].contains("wake requested"), "{rendered:?}");
@@ -2329,7 +2321,7 @@ mod tests {
         );
         let lines = lines(&part, None, &theme(), false, None);
         let rendered = rendered(&lines);
-        assert_eq!(rendered[0], "✗ BASH [ls]");
+        assert_eq!(rendered[0], "✗ bash  ls");
         assert!(rendered.contains(&"  │ permission denied".to_string()));
     }
 
@@ -2400,7 +2392,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, Some("ctrl+x r")));
-        assert!(rendered.iter().any(|line| line.contains("TERMINAL READ")));
+        assert!(rendered.iter().any(|line| line.contains("terminal read")));
         assert!(rendered.iter().any(|line| line.contains("term_1")));
         assert!(rendered
             .iter()
@@ -2531,7 +2523,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ READ [a.rs] 2 lines");
+        assert_eq!(rendered[0], "✓ read  a.rs 2 lines");
     }
 
     #[test]
@@ -2543,7 +2535,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ GREP [fn main in src] 1 match (truncated)");
+        assert_eq!(rendered[0], "✓ grep  fn main in src 1 match (truncated)");
     }
 
     #[test]
@@ -2556,7 +2548,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, Some(&files), &theme(), false, None));
-        assert_eq!(rendered[0], "✓ EDIT [src/lib.rs]");
+        assert_eq!(rendered[0], "✓ edit  src/lib.rs");
         assert!(rendered.contains(&"  ⎿ Added 1 line, removed 1 line".to_string()));
         assert!(rendered.contains(&"  ◆ update src/lib.rs +1 −1".to_string()));
         assert!(rendered.contains(&"  1  -a".to_string()), "{rendered:?}");
@@ -2581,7 +2573,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ EDIT [docs/guide.zh.md]");
+        assert_eq!(rendered[0], "✓ edit  docs/guide.zh.md");
         assert!(
             rendered.contains(&"    -旧的一行".to_string()),
             "{rendered:?}"
@@ -2601,7 +2593,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ WRITE [notes.md]");
+        assert_eq!(rendered[0], "✓ write  notes.md");
         // A changed row is padded to the block's width, so the tint ends on one
         // column; the padding carries no text.
         assert!(
@@ -2748,7 +2740,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ TODOWRITE");
+        assert_eq!(rendered[0], "✓ todowrite");
         assert!(rendered.contains(&"  [✓] 1: write code".to_string()));
         assert!(rendered.contains(&"  [•] 2: test it ← 1".to_string()));
         // The input said both were pending; the painted row is the applied list.
@@ -2767,7 +2759,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered, vec!["· TODOWRITE".to_string()]);
+        assert_eq!(rendered, vec!["· todowrite".to_string()]);
     }
 
     #[test]
@@ -2779,7 +2771,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered, ["✓ WEBFETCH [https://example.com/docs]"]);
+        assert_eq!(rendered, ["✓ WebFetch  https://example.com/docs"]);
     }
 
     #[test]
@@ -2808,7 +2800,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), false, None));
-        assert_eq!(rendered[0], "✓ MCP_SERVER_TOOL [hello]");
+        assert_eq!(rendered[0], "✓ mcp_server_tool  hello");
         assert!(rendered.contains(&"  │ {\"result\":\"world\"}".to_string()));
     }
     /// A task list reads as one row per child — description and state — never
@@ -2890,7 +2882,7 @@ mod tests {
             false,
         );
         let rendered = rendered(&lines(&part, None, &theme(), true, None));
-        assert_eq!(rendered[0], "✓ READ [assets/logo.png] image");
+        assert_eq!(rendered[0], "✓ read  assets/logo.png image");
         assert!(
             !rendered.iter().any(|line| line.contains("iVBOR")),
             "the image bytes stay out of the row: {rendered:?}"

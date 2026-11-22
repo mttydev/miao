@@ -648,7 +648,7 @@ fn the_transcript_renders_markdown_and_tool_rows() {
     for expected in [
         "• bold and code",
         "name │ value",
-        "✓ READ [src/lib.rs] 2 lines",
+        "✓ read  src/lib.rs 2 lines",
     ] {
         assert!(
             rendered.contains(expected),
