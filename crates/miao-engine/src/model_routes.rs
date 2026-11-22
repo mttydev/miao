@@ -422,6 +422,15 @@ async fn derive(
             entry.prompt_cache,
             entry.auth.as_ref(),
         )?;
+        // A provider that forwards the declared per-turn output cap takes it
+        // here; one that ignores it keeps its own default.
+        let provider = match entry.limit.as_ref().and_then(|limit| limit.output) {
+            Some(output) => match provider.with_output_cap(output) {
+                Ok(capped) => capped,
+                Err(_) => provider,
+            },
+            None => provider,
+        };
         if entry.provider == "amazon-bedrock" {
             crate::bedrock::validate_credential_paths(provider.protected_resources(), workspace)
                 .await?;
