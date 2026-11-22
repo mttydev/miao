@@ -3802,6 +3802,40 @@ fn hoverable_line(
 /// stack in one column instead of starting wherever the label ended.
 const GRID_LABEL_WIDTH: usize = 8;
 
+/// The bar that sits under the context row: the filled share of the window,
+/// then the empty rest.
+///
+/// The percentage alone asks the reader to picture a fraction; the bar answers
+/// "how close am I" at a glance, which is the question the row exists for. It
+/// fills to the widest run the column can hold after the row's own indent, so
+/// the same figure reads the same length at every window size.
+const CONTEXT_BAR_GLYPH: char = '█';
+const CONTEXT_BAR_EMPTY: char = '░';
+
+/// How many cells the context bar may claim: wide enough to read as a bar,
+/// narrow enough to leave the figures their own column.
+const CONTEXT_BAR_MAX: usize = 24;
+const CONTEXT_BAR_MIN: usize = 6;
+
+/// The `filled` share of `total` as a bar of at most `width` cells. Zero total
+/// paints nothing rather than a full bar: an unknown ceiling is not a full one.
+fn context_bar(filled: u64, total: u64, width: usize) -> String {
+    let cells = width.clamp(CONTEXT_BAR_MIN, CONTEXT_BAR_MAX);
+    if total == 0 {
+        return String::new();
+    }
+    let share = (filled.min(total) as u128 * cells as u128 / total as u128) as usize;
+    let mut bar = String::with_capacity(cells);
+    for cell in 0..cells {
+        bar.push(if cell < share {
+            CONTEXT_BAR_GLYPH
+        } else {
+            CONTEXT_BAR_EMPTY
+        });
+    }
+    bar
+}
+
 /// A section header: upper case, bold, tinted with a syntax hue so stacked
 /// headers read as structure instead of decoration — each section gets its
 /// own vivid hue from the theme's code palette, while `NO_COLOR` and dumb
@@ -4478,6 +4512,25 @@ impl Pane for SidebarPane {
                             }),
                             &palette,
                         );
+                        // The figures state the fraction; the bar beside them
+                        // answers "how close is compaction" without arithmetic.
+                        // It rides the same row so the column keeps its height,
+                        // and it takes only the room the figures left.
+                        if let Some(line) = lines.last_mut() {
+                            let used = line.width();
+                            let room = text_width.saturating_sub(used + 2);
+                            if room >= CONTEXT_BAR_MIN {
+                                line.spans.push(Span::styled("  ", Style::new()));
+                                line.spans.push(Span::styled(
+                                    context_bar(tokens, window, room),
+                                    Style::new().fg(if percent >= 80 {
+                                        palette.warning
+                                    } else {
+                                        palette.accent
+                                    }),
+                                ));
+                            }
+                        }
                         if let Some(row) = self.hover_rows.last_mut() {
                             row.text = self.lang.tf(
                                 "context.detail",
@@ -10339,6 +10392,122 @@ mod tests {
             "rows past six fold away: {joined:?}"
         );
         assert!(joined.contains("… 2 more"), "{joined:?}");
+    }
+
+    /// The bar answers "how close is compaction" at a glance, so its filled
+    /// share has to track the figure beside it and it must not invent a bar
+    /// when the ceiling is unknown.
+    #[test]
+    fn the_context_bar_fills_by_the_share_of_the_window() {
+        let bar = context_bar(500, 1000, 10);
+        assert_eq!(
+            bar.chars().count(),
+            CONTEXT_BAR_MIN.clamp(10, CONTEXT_BAR_MAX)
+        );
+        assert_eq!(bar.matches(CONTEXT_BAR_GLYPH).count(), 5, "{bar:?}");
+        assert_eq!(bar.matches(CONTEXT_BAR_EMPTY).count(), 5, "{bar:?}");
+
+        let full = context_bar(1_000, 1_000, 10);
+        assert_eq!(full.matches(CONTEXT_BAR_GLYPH).count(), 10, "{full:?}");
+        let overflow = context_bar(2_000, 1_000, 10);
+        assert_eq!(
+            overflow.matches(CONTEXT_BAR_GLYPH).count(),
+            10,
+            "an overflowed ceiling is full, never a bar past its width"
+        );
+        let empty = context_bar(0, 1_000, 10);
+        assert_eq!(empty.matches(CONTEXT_BAR_GLYPH).count(), 0, "{empty:?}");
+        assert!(
+            context_bar(10, 0, 10).is_empty(),
+            "an unknown ceiling is not a full bar"
+        );
+        // The width is bounded so the bar can never push the figures off the row.
+        assert_eq!(context_bar(1, 2, 100).chars().count(), CONTEXT_BAR_MAX);
+        assert_eq!(context_bar(1, 2, 1).chars().count(), CONTEXT_BAR_MIN);
+    }
+
+    /// The row carries the bar beside its figures, and the bar turns to the
+    /// warning tone on the same rung the figures do.
+    #[test]
+    fn the_context_row_carries_the_bar_beside_its_figures() {
+        fn rows(terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>) -> Vec<String> {
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(60)
+                .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect()
+        }
+        fn sidebar(usage: crate::status::UsageSummary) -> SidebarPane {
+            SidebarPane {
+                hover_rows: Vec::new(),
+                subagents: Vec::new(),
+                changes: None,
+                mode: None,
+                theme: home_theme(),
+                session: Some(home_row("ses_c", "occupancy", None)),
+                usage: Some(usage),
+                usage_hourly: None,
+                quota: None,
+                goal: None,
+                plan: None,
+                todos: Vec::new(),
+                chord: None,
+                lang: Lang::En,
+                hint_offset: 0,
+            }
+        }
+        let summary = |window: u64, tokens: u64| {
+            crate::status::UsageSummary::from_value(&serde_json::json!({
+                "turns": 1,
+                "context": { "window": window, "tokens": tokens },
+            }))
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).expect("terminal");
+
+        let mut pane = sidebar(summary(1_000_000, 900_000));
+        terminal
+            .draw(|frame| pane.render(frame, frame.area()))
+            .expect("draw");
+        let painted = rows(&mut terminal);
+        let line = painted
+            .iter()
+            .find(|row| row.contains("context "))
+            .expect("the occupancy row");
+        assert!(
+            line.contains(CONTEXT_BAR_GLYPH) && line.contains(CONTEXT_BAR_EMPTY),
+            "the row carries a bar beside its figures: {line:?}"
+        );
+        let row = painted
+            .iter()
+            .position(|row| row.contains("context "))
+            .expect("row")
+            * 60;
+        let warned = terminal.backend().buffer().content[row..row + 60]
+            .iter()
+            .filter(|cell| {
+                cell.symbol() == CONTEXT_BAR_GLYPH.to_string()
+                    || cell.symbol() == CONTEXT_BAR_EMPTY.to_string()
+            })
+            .all(|cell| cell.style().fg == Some(home_theme().palette.warning));
+        assert!(warned, "the bar warns on the compaction rung: {line:?}");
+
+        let mut pane = sidebar(summary(1_000_000, 200_000));
+        terminal
+            .draw(|frame| pane.render(frame, frame.area()))
+            .expect("draw");
+        let row = rows(&mut terminal)
+            .iter()
+            .position(|row| row.contains("context "))
+            .expect("row")
+            * 60;
+        let calm = terminal.backend().buffer().content[row..row + 60]
+            .iter()
+            .filter(|cell| cell.symbol() == CONTEXT_BAR_GLYPH.to_string())
+            .all(|cell| cell.style().fg == Some(home_theme().palette.accent));
+        assert!(calm, "twenty percent is not the compaction rung");
     }
 
     /// How full the live context is reads differently from what was billed, so
