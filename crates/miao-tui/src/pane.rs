@@ -2558,8 +2558,8 @@ fn transcript_lines(
                                 expanded,
                                 toggle,
                             );
-                            // Each call is a panel band, not a line of prose:
-                            // butting two bands together read as one crammed
+                            // Each call is its own block, not a line of prose:
+                            // butting two calls together read as one crammed
                             // block. One blank row keeps the calls distinct.
                             rows.push(Row::plain(Line::default()));
                             // A tool row carries its own indentation: the
@@ -7516,8 +7516,8 @@ mod tests {
 
     #[test]
     fn consecutive_tools_open_with_a_blank_row() {
-        // Each call is its own panel band, so two calls in a row are separated
-        // by one blank row instead of reading as a single crammed block.
+        // Each call is its own block, so two calls in a row are separated by
+        // one blank row instead of reading as a single crammed block.
         let palette =
             crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
                 .expect("theme");
