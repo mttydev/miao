@@ -78,10 +78,11 @@ schedule_wakeup/cancel_wakeup/cron_* → schedule   lsp_* → lsp
 
 | 工具 | 行 |
 |---|---|
-| bash | `✓ bash  <command 首行>`；输出前 6 行（剥 ANSI），超出 `… N more lines`；失败输出 error 色 |
-| read | `✓ read  <filePath>` + `⎿ Read N lines` / `Read image` / `Read N entries`（truncated 注明） |
-| glob/grep | `✓ glob  <pattern>` + `⎿ N matches`（truncated 注明） |
-| write/edit/apply_patch | `✓ Edit/Write/Patch <path>` + `⎿ Added N lines, removed M lines`；每个 display 文件 `◆ action path +N −M` 与 12 行 diff（`+` success、`-` error、`@@` accent） |
+| 所有工具 | 头部整行铺一块 `palette.surface` 底色并在面板内补齐到右边缘；工具名是嵌在这块底色上的实心徽标（大写、粗体、前景取 `palette.background`，底色按类别：bash 取 secondary、读/搜取 accent、写类取 success） |
+| bash | `✓ BASH [<command 首行>]`；输出前 2 行（剥 ANSI），超出 `… +N lines [<chord> to expand]`；失败输出 error 色 |
+| read | `✓ READ [<filePath>]` + 行内 `N lines` / `image` / `N entries`（truncated 注明） |
+| glob/grep | `✓ GLOB/GREP [<pattern>]` + 行内 `N matches`（truncated 注明） |
+| write/edit/apply_patch | `✓ EDIT/WRITE/APPLY_PATCH [<path>]` + `⎿ Added N lines, removed M lines`；每个 display 文件 `◆ action path +N −M` 与 12 行 diff（`+` success、`-` error、`@@` accent） |
 | todowrite | todo 块：`[✓] id: content ← deps`；in_progress warning、completed/cancelled muted |
 | question | 每个问题一行提示（muted）+ 一行答案（逗号分隔；无答案 `(no answer)`） |
 | webfetch/websearch/skill | 单行，不显示正文 |

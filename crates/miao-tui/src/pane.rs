@@ -1443,9 +1443,9 @@ impl Row {
 
 /// The display width of a line's leading indentation.
 ///
-/// Tool rows are indented by design: a header opens with its `● ` bullet and a
-/// result with the `  ⎿ ` gutter. Wrapped as plain text, a continuation started
-/// at column zero and `  ⎿ Read 2 lines` read as two unrelated rows — which is
+/// Tool rows are indented by design: a header opens with its state glyph and a
+/// result with the `  │ ` gutter. Wrapped as plain text, a continuation started
+/// at column zero and `  │ line` read as two unrelated rows — which is
 /// what made a narrow pane look like the prose wrapped early. The continuation
 /// hangs under the indent the row was projected with instead.
 fn tool_row_shape(line: &Line<'static>) -> (u16, u16) {
@@ -2566,9 +2566,9 @@ fn transcript_lines(
                             }
                             inline_run = tool_rows.len() == 1;
                             // A tool row carries its own indentation: the
-                            // header's `● ` bullet and the result's `  ⎿ `
-                            // gutter. Folding such a row as plain text broke
-                            // `  ⎿ Read 2 lines` across two rows with no
+                            // header's glyph and the result's `  │ ` gutter.
+                            // Folding such a row as plain text broke
+                            // `  │ line` across two rows with no
                             // indent, which is what made a narrow pane look
                             // like the text wrapped early. Hang each row under
                             // the cells it opens with.
@@ -6208,14 +6208,17 @@ mod tests {
             assert!(painted.contains(needle), "missing {needle:?}: {painted}");
         }
         assert!(!painted.contains("example.com"), "{painted}");
-        // The image result is a placeholder naming the media; its bytes never
+        // The image result names the media on the read header; its bytes never
         // reach the buffer.
-        assert!(painted.contains("Read image"), "{painted}");
+        assert!(
+            painted.contains("READ [assets/logo.png] image"),
+            "{painted}"
+        );
         assert!(!painted.contains("iVBOR"), "{painted}");
         // Long output folds to its budget and names the chord that reopens it.
         assert!(painted.contains("line 1"), "{painted}");
         assert!(
-            painted.contains("more lines") && painted.contains("ctrl+x u expand"),
+            painted.contains("  │ … +") && painted.contains("[ctrl+x u to expand]"),
             "{painted}"
         );
         assert!(
@@ -6228,7 +6231,7 @@ mod tests {
             painted.contains("line 12"),
             "expansion shows the tail: {painted}"
         );
-        assert!(!painted.contains("more lines"), "{painted}");
+        assert!(!painted.contains("[ctrl+x u to expand]"), "{painted}");
     }
 
     #[test]
@@ -7564,7 +7567,7 @@ mod tests {
             .expect("first fetch");
         assert_eq!(
             rendered[fetch_a + 1],
-            "· WebSearch  q",
+            "· WEBSEARCH [q]",
             "the second inline row follows with no blank row"
         );
         let note = rendered
@@ -7578,6 +7581,68 @@ mod tests {
             "and leaves one before the next tool"
         );
         assert!(rendered[note + 2].contains("http://b"));
+    }
+
+    /// A tool header carries the panel band in its line style, so the pane pads
+    /// it to its own edge the way it pads a diff row. Without that the badge
+    /// reads as a floating chip that stops mid-row.
+    #[test]
+    fn a_tool_header_band_reaches_the_pane_edge() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let transcript = Transcript {
+            entries: vec![Entry::Assistant {
+                agent: None,
+                model: None,
+                parts: vec![Part::Tool(crate::session::ToolPart {
+                    id: "call_ls".into(),
+                    name: "run_command".into(),
+                    input: serde_json::json!({"argv": ["ls"]}),
+                    output: Some(serde_json::json!({"stdout": "a\nb", "exit_code": 0}).to_string()),
+                    failed: false,
+                    unreturned: false,
+                })],
+            }],
+            ..Transcript::default()
+        };
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.set_transcript(&transcript);
+        let width = 60u16;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 16))
+            .expect("terminal");
+        terminal
+            .draw(|frame| shell.transcript.render(frame, frame.area()))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rows = buffer.content.chunks(width as usize).collect::<Vec<_>>();
+        let header = rows
+            .iter()
+            .position(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("BASH")
+            })
+            .expect("the tool header is painted");
+        // The row is one band with the badge set into it: no column between
+        // them falls back to the page background.
+        for (column, cell) in rows[header].iter().enumerate() {
+            assert!(
+                cell.bg == palette.surface || cell.bg == palette.secondary,
+                "column {column} paints {:?} outside the header's band",
+                cell.bg
+            );
+        }
+        assert_eq!(
+            rows[header][width as usize - 1].bg,
+            palette.surface,
+            "the band is padded to the pane's right edge"
+        );
     }
 
     #[test]
@@ -11091,7 +11156,7 @@ mod draft_tool_tests {
     use super::*;
 
     /// A tool call that runs mid-stream is work the turn did, so the draft
-    /// paints it as a `✓ bash …` row instead of waiting for the commit. Without
+    /// paints it as a `✓ BASH […]` row instead of waiting for the commit. Without
     /// this the operator saw the answer's paragraphs with no sign of the calls
     /// between them.
     #[test]
@@ -11125,7 +11190,7 @@ mod draft_tool_tests {
             .collect();
         let joined = text.join("\n");
         assert!(
-            joined.contains("bash"),
+            joined.contains("BASH"),
             "the tool row names the tool: {joined}"
         );
         assert!(
