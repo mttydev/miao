@@ -7583,6 +7583,68 @@ mod tests {
         assert!(rendered[note + 2].contains("http://b"));
     }
 
+    /// A tool header carries the panel band in its line style, so the pane pads
+    /// it to its own edge the way it pads a diff row. Without that the badge
+    /// reads as a floating chip that stops mid-row.
+    #[test]
+    fn a_tool_header_band_reaches_the_pane_edge() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let transcript = Transcript {
+            entries: vec![Entry::Assistant {
+                agent: None,
+                model: None,
+                parts: vec![Part::Tool(crate::session::ToolPart {
+                    id: "call_ls".into(),
+                    name: "run_command".into(),
+                    input: serde_json::json!({"argv": ["ls"]}),
+                    output: Some(serde_json::json!({"stdout": "a\nb", "exit_code": 0}).to_string()),
+                    failed: false,
+                    unreturned: false,
+                })],
+            }],
+            ..Transcript::default()
+        };
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.set_transcript(&transcript);
+        let width = 60u16;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 16))
+            .expect("terminal");
+        terminal
+            .draw(|frame| shell.transcript.render(frame, frame.area()))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rows = buffer.content.chunks(width as usize).collect::<Vec<_>>();
+        let header = rows
+            .iter()
+            .position(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("BASH")
+            })
+            .expect("the tool header is painted");
+        // The row is one band with the badge set into it: no column between
+        // them falls back to the page background.
+        for (column, cell) in rows[header].iter().enumerate() {
+            assert!(
+                cell.bg == palette.surface || cell.bg == palette.secondary,
+                "column {column} paints {:?} outside the header's band",
+                cell.bg
+            );
+        }
+        assert_eq!(
+            rows[header][width as usize - 1].bg,
+            palette.surface,
+            "the band is padded to the pane's right edge"
+        );
+    }
+
     #[test]
     fn a_changed_diff_row_paints_to_the_pane_edge() {
         // The changed rows of one block are not padded to the block's longest
