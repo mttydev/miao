@@ -29,9 +29,6 @@ pub struct Palette {
     /// The gutter number and the folded-hunk glyph of a diff block.
     pub diff_line_number: Color,
     pub diff_hunk_header: Color,
-    /// The filled badge behind a tool call's label.
-    pub tool_badge_bg: Color,
-    pub tool_badge_fg: Color,
 }
 
 impl Palette {
@@ -60,8 +57,6 @@ impl Palette {
             diff_removed_bg: Color::Reset,
             diff_line_number: Color::Reset,
             diff_hunk_header: Color::Reset,
-            tool_badge_bg: Color::Reset,
-            tool_badge_fg: Color::Reset,
         }
     }
 
@@ -459,8 +454,6 @@ fn parse_theme(text: &str, mode: ThemeMode, warnings: &mut Vec<String>) -> Resul
         diff_removed_bg: Color::Reset,
         diff_line_number: Color::Reset,
         diff_hunk_header: Color::Reset,
-        tool_badge_bg: Color::Reset,
-        tool_badge_fg: Color::Reset,
     };
     // Code and diff colours are optional: a theme written before they existed
     // still loads, and an absent key falls back to a derived hue instead of
@@ -488,8 +481,6 @@ fn parse_theme(text: &str, mode: ThemeMode, warnings: &mut Vec<String>) -> Resul
         token("diffRemovedBg").unwrap_or_else(|| diff_band(palette.background, false));
     palette.diff_line_number = token("diffLineNumber").unwrap_or(palette.text_muted);
     palette.diff_hunk_header = token("diffHunkHeader").unwrap_or(palette.text_muted);
-    palette.tool_badge_bg = token("toolBadgeBg").unwrap_or(palette.secondary);
-    palette.tool_badge_fg = token("toolBadgeFg").unwrap_or(palette.background);
     Ok(palette)
 }
 
@@ -1215,15 +1206,6 @@ mod tests {
         assert_eq!(palette.diff_added, rgb("4CC88E"), "diffAdded");
         assert_eq!(palette.diff_removed, rgb("E16B7A"), "diffRemoved");
         assert_eq!(palette.diff_line_number, rgb("8A94A8"), "diffLineNumber");
-    }
-
-    /// The tool badge is a theme token, not a per-tool hue: the default is one
-    /// filled stamp for every call, and a theme that names its own pair keeps it.
-    #[test]
-    fn a_theme_paints_its_tool_badge() {
-        let palette = builtin(DEFAULT_THEME, ThemeMode::Dark).expect("builtin theme");
-        assert_eq!(palette.tool_badge_bg, rgb("5945B1"), "toolBadgeBg");
-        assert_eq!(palette.tool_badge_fg, rgb("f4f4f4"), "toolBadgeFg");
     }
 
     #[test]
