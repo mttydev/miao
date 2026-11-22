@@ -17,7 +17,11 @@ use crate::session::{DisplayFile, ToolPart};
 use crate::theme::Theme;
 
 /// Output lines one command row shows before collapsing.
-const TOOL_PREVIEW_LINES: usize = 2;
+///
+/// Three rows: enough for a command's real answer to be readable without
+/// opening anything, few enough that a wall of output still folds. A mature
+/// terminal agent keeps three; the row budget is a preview, not a transcript.
+const TOOL_PREVIEW_LINES: usize = 3;
 /// Diff lines one changed file shows before collapsing.
 const DIFF_PREVIEW_LINES: usize = 12;
 /// Characters one terminal read lays out per row.
@@ -385,22 +389,28 @@ fn preview(
 }
 
 /// One folded row, cut to [`FOLDED_ROW_CELLS`] display cells.
+fn clip_entry(line: &str) -> (String, bool) {
+    clip_cells(line, FOLDED_ROW_CELLS)
+}
+
+/// Cut `text` to at most `cells` display cells, ending in `…` when it was too
+/// wide.
 ///
 /// The cut is by display width, not characters, so a CJK or emoji blob is not
 /// clipped early by counting bytes, and it ends in `…` so the row reads as
 /// continuing rather than as a truncated value.
-fn clip_entry(line: &str) -> (String, bool) {
-    if line.width() <= FOLDED_ROW_CELLS {
-        return (line.to_string(), false);
+fn clip_cells(text: &str, cells: usize) -> (String, bool) {
+    if text.width() <= cells {
+        return (text.to_string(), false);
     }
     let mut used = 0;
     let mut cut = String::new();
-    for character in line.chars() {
-        let cells = character.width().unwrap_or(0);
-        if used + cells > FOLDED_ROW_CELLS.saturating_sub(1) {
+    for character in text.chars() {
+        let width = character.width().unwrap_or(0);
+        if used + width > cells.saturating_sub(1) {
             break;
         }
-        used += cells;
+        used += width;
         cut.push(character);
     }
     cut.push('…');
@@ -973,7 +983,7 @@ fn file(
         // only record of the change, and a row that is a bare filename tells
         // the operator nothing about what was edited.
         let (rows, hidden) = input_diff(name, input, diff_limit);
-        paint_diff(out, &rows, hidden, &path, theme, fold.toggle);
+        paint_diff(out, &rows, hidden, &path, theme, fold);
         return;
     };
     let added: u64 = files.iter().map(|file| file.additions).sum();
@@ -991,7 +1001,7 @@ fn file(
             Style::new().fg(palette.accent),
         )));
         let (rows, hidden) = patch_diff(&file.patch, diff_limit);
-        paint_diff(out, &rows, hidden, &file.path, theme, fold.toggle);
+        paint_diff(out, &rows, hidden, &file.path, theme, fold);
     }
 }
 
@@ -1127,7 +1137,7 @@ fn paint_diff(
     hidden: usize,
     path: &str,
     theme: &Theme,
-    toggle: Option<&str>,
+    fold: Fold<'_>,
 ) {
     let palette = theme.palette;
     // One gutter width for the whole block: a digit count that varies per row
@@ -1146,6 +1156,7 @@ fn paint_diff(
     // The grammar carries block-comment state across lines, so the file's own
     // language decides the spans; an extension no grammar claims stays plain.
     let mut highlighter = Highlighter::new(extension(path), palette);
+    let mut clipped_rows = false;
     for row in rows {
         match row {
             DiffRow::Hunk => out.push(Line::from(Span::styled(
@@ -1186,9 +1197,18 @@ fn paint_diff(
                             .patch(block_style),
                     ),
                 ];
+                // The gutter already spends cells, so a long line is measured
+                // against what is left. A minified or generated file has rows of
+                // thousands of columns: left whole, one of them wrapped across
+                // the viewport and buried the change it was meant to show.
+                let (text, clipped) = match fold.expanded {
+                    true => ((*text).to_string(), false),
+                    false => clip_cells(text, FOLDED_ROW_CELLS.saturating_sub(width + 6)),
+                };
+                clipped_rows |= clipped;
                 spans.extend(
                     highlighter
-                        .line(text)
+                        .line(&text)
                         .into_iter()
                         .map(|span| span.patch_style(block_style)),
                 );
@@ -1205,10 +1225,18 @@ fn paint_diff(
             }
         }
     }
-    if hidden > 0 {
-        let line = match toggle {
-            Some(chord) => format!("  … {hidden} more diff lines · {chord} expand"),
-            None => format!("  … {hidden} more diff lines"),
+    if hidden > 0 || clipped_rows {
+        let mut notes = Vec::new();
+        if hidden > 0 {
+            notes.push(format!("{hidden} more diff lines"));
+        }
+        if clipped_rows {
+            notes.push("long lines clipped".to_string());
+        }
+        let detail = notes.join(" · ");
+        let line = match fold.toggle {
+            Some(chord) => format!("  … {detail} · {chord} expand"),
+            None => format!("  … {detail}"),
         };
         out.push(Line::from(Span::styled(
             line,
@@ -2083,21 +2111,99 @@ mod tests {
         let part = tool(
             "run_command",
             json!({"argv": ["echo", "hi"]}),
-            Some(json!({"stdout": "hi\nthere", "stderr": "", "exit_code": 0})),
+            Some(json!({"stdout": "hi\nthere\nand\nmore", "stderr": "", "exit_code": 0})),
             false,
         );
         let lines = lines(&part, None, &theme(), false, Some("ctrl+x u"));
         let rendered = rendered(&lines);
         assert_eq!(rendered[0], "✓ BASH [echo hi]");
         assert!(rendered.contains(&"  │ hi".to_string()));
-        // Folded output keeps two lines; the tail and the hint stay reachable
-        // through the elision marker instead of crowding the transcript.
+        // Folded output keeps the row budget; the tail and the hint stay
+        // reachable through the elision marker instead of crowding the
+        // transcript.
         assert!(rendered.iter().any(|line| line.contains("  │ … +")));
         // The hint names the key the operator presses, not the config's
         // `<leader>` placeholder.
         assert!(rendered
             .iter()
             .any(|line| line.contains("[ctrl+x u to expand]")));
+    }
+
+    /// The fold budget is a preview, not a transcript: three rows is enough for
+    /// a command's answer to read without opening anything.
+    #[test]
+    fn a_folded_preview_keeps_three_rows() {
+        let output = (0..10)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let part = tool(
+            "run_command",
+            json!({"argv": ["seq", "10"]}),
+            Some(json!({"stdout": output, "stderr": "", "exit_code": 0})),
+            false,
+        );
+        let rendered = rendered(&lines(&part, None, &theme(), false, None));
+        let kept = rendered
+            .iter()
+            .filter(|line| line.starts_with("  │ line"))
+            .count();
+        assert_eq!(kept, TOOL_PREVIEW_LINES, "{rendered:?}");
+    }
+
+    /// A minified or generated file has rows of thousands of columns. Left
+    /// whole, one of them wrapped across the viewport and buried the change the
+    /// diff was meant to show, so a folded diff clips it and says so.
+    #[test]
+    fn a_diff_row_too_wide_to_read_is_clipped_while_folded() {
+        let long = "x".repeat(4000);
+        let part = tool(
+            "edit_file",
+            json!({"filePath": "bundle.min.js"}),
+            None,
+            false,
+        );
+        let files = [DisplayFile {
+            path: "bundle.min.js".into(),
+            action: "update".into(),
+            patch: format!(
+                "Index: bundle.min.js\n====\n--- bundle.min.js\n+++ bundle.min.js\n@@ -1 +1 @@\n-{long}\n+{long}y\n"
+            ),
+            additions: 1,
+            deletions: 1,
+        }];
+        let folded = rendered(&lines(
+            &part,
+            Some(&files),
+            &theme(),
+            false,
+            Some("ctrl+x u"),
+        ));
+        let body = folded
+            .iter()
+            .find(|line| line.trim_start().starts_with('+') || line.contains("xxx"))
+            .expect("the diff paints its rows");
+        assert!(
+            body.width() <= FOLDED_ROW_CELLS + 8,
+            "a folded diff row stays readable: {} cells",
+            body.width()
+        );
+        assert!(
+            folded
+                .iter()
+                .any(|line| line.contains("long lines clipped")),
+            "the block says it clipped: {folded:?}"
+        );
+        // Unfolding is the escape hatch, so the full row comes back.
+        let open = rendered(&lines(
+            &part,
+            Some(&files),
+            &theme(),
+            true,
+            Some("ctrl+x u"),
+        ));
+        assert!(open.iter().any(|line| line.len() > 4000));
+        assert!(!open.iter().any(|line| line.contains("clipped")));
     }
 
     /// A result that is one enormous line has no line to fold away: the line
