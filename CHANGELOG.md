@@ -13,6 +13,15 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-11-22
+
+### Added
+- **tui**: show the queue depth as a filled chip (#3331) (`d8188b0022`)
+
+### Fixed
+- **tui**: adopt the host canvas so the page meets its pane (#3336) (`c7ff1bb456`)
+- **tui**: lift the sidebar chord hint off the composer's bottom edge (#3333) (`cd2950656b`)
+
 ## [0.4.10] - 2026-11-22
 
 ### Added
