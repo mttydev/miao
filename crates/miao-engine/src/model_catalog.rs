@@ -599,7 +599,7 @@ impl Provider for Catalog {
 
 #[cfg(test)]
 mod window_tests {
-    use super::{apply_overlay, index_windows, window_in_index};
+    use super::{apply_overlay, index_windows, newest_snapshot, window_in_index};
 
     fn document() -> serde_json::Value {
         serde_json::json!({
