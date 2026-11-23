@@ -715,6 +715,19 @@ impl Shell {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
+        self.render_screen(frame, None);
+    }
+
+    /// The landing paints this screen too — the same columns, the same
+    /// sidebar, the same composer box and facts row — so the first submit
+    /// changes nothing on screen but the words. The header rides in the body
+    /// while the transcript has no rows of its own, and the first answer
+    /// claims the body from it.
+    pub fn render_landing(&mut self, frame: &mut Frame, home: &mut Home) {
+        self.render_screen(frame, Some(home));
+    }
+
+    fn render_screen(&mut self, frame: &mut Frame, mut landing: Option<&mut Home>) {
         // The strip's hits belong to this paint alone: a frame that lays the
         // row out differently must not leave last paint's ranges reachable,
         // and a wire built from them would repeat every fact per frame.
@@ -774,7 +787,12 @@ impl Shell {
                     Some(status_area),
                 )
             };
-        self.transcript.render(frame, body_area);
+        // The landing keeps the body for its header while the transcript has
+        // nothing to say; otherwise this is the Session's body, rows and all.
+        match landing.as_mut().filter(|_| self.transcript.is_empty()) {
+            Some(home) => home.paint_header(frame, body_area, &self.status),
+            None => self.transcript.render(frame, body_area),
+        }
         if let (Some(sidebar), Some(sidebar_area)) = (self.sidebar.as_mut(), sidebar_area) {
             sidebar.render(frame, sidebar_area);
         }
@@ -1013,11 +1031,18 @@ pub struct TranscriptPane {
 pub(crate) const DRAFT_REFRESH: Duration = Duration::from_millis(50);
 
 impl TranscriptPane {
+    /// Whether nothing has been projected into the pane yet. The landing
+    /// paints its header into the body only while the transcript has no rows
+    /// of its own; the first projection claims the body from the header.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty() && self.draft.is_empty()
+    }
+
     fn new(theme: Theme) -> Self {
         Self {
             theme,
             lang: Lang::En,
-            rows: vec![Row::plain(Line::from("no Session selected"))],
+            rows: Vec::new(),
             draft_source: None,
             draft: Vec::new(),
             draft_dirty: false,
@@ -1926,31 +1951,19 @@ fn selection_text(rendered: &[Vec<String>], inner: Rect, a: Position, b: Positio
 
 pub struct Home {
     /// A transient problem (an engine restart, a failed submit): painted under
-    /// the prompt.
+    /// the header.
     notice: Option<String>,
     /// A configuration problem that outlives one load: painted the same way,
     /// in the warning colour.
     warning: Option<String>,
-    /// `prompt.max_width`: a fixed cap the landing band still honours; the
-    /// default fills the column the Session composer fills.
-    prompt_width: crate::config::PromptWidth,
     /// The directory the TUI was started in, named on the landing header the
     /// way a terminal prompt names it. The App owns the real workspace; the
     /// header only paints it.
     workspace: PathBuf,
     /// When the operator last typed, pasted or clicked. The idle light rests
-    /// after a stretch of no input, the way the product's logo does, so a home
-    /// screen left open stops repainting instead of running forever.
-    footer_hits: Vec<FooterHit>,
-    /// The embedded host merges the landing facts into its own footer.
-    embedded_footer: bool,
+    /// after a stretch of no input, the way the product's logo does, so a
+    /// header left open stops repainting instead of running forever.
     last_input: Instant,
-    /// Where the landing prompt painted its draft last frame, so a pointer
-    /// inside it selects text the way the Session composer does.
-    composer_text: Option<ComposerText>,
-    /// A drag that began on the draft owns the selection until the button comes
-    /// up, which is when its text is copied.
-    composer_drag: bool,
     theme: Theme,
     /// Painted idle animation, like the landing banner's shimmer. Off leaves
     /// every surface static and the loop never wakes for a frame.
@@ -1962,76 +1975,16 @@ impl Home {
         Self {
             notice: None,
             warning: None,
-            prompt_width: crate::config::PromptWidth::default(),
             workspace: PathBuf::new(),
-            footer_hits: Vec::new(),
-            embedded_footer: crate::mtty_state::host_footer_active(),
             last_input: Instant::now(),
-            composer_text: None,
-            composer_drag: false,
             theme,
             animated: true,
         }
     }
 
-    /// Take the landing facts over: nothing painted on the rule, the hits
-    /// kept for the host's synthesized presses.
-    pub fn set_embedded_footer(&mut self, on: bool) {
-        self.embedded_footer = on;
-    }
-
-    /// The landing facts the embedded host's footer should show now, read
-    /// straight from the strip: labels only, no cells. `None` while nothing
-    /// is on screen for the host to show.
-    pub fn footer_wire(&self, status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
-        wire_from_status(status)
-    }
-
-    /// The strip fact a press at this position acts on, if the last paint
-    /// recorded one there.
-    pub fn footer_segment(&self, position: ratatui::layout::Position) -> Option<FooterSegment> {
-        self.footer_hits
-            .iter()
-            .find(|hit| hit.covers(position.y, position.x))
-            .map(|hit| hit.segment)
-    }
-
     /// Any keystroke, paste or click restarts the idle light.
     pub fn wake(&mut self) {
         self.last_input = Instant::now();
-    }
-
-    /// A press inside the landing prompt selects the draft's text. The composer
-    /// belongs to the shell, so it is passed in rather than held here.
-    pub fn begin_selection(&mut self, composer: &mut Composer, position: Position) -> bool {
-        let Some(text) = self
-            .composer_text
-            .filter(|text| text.input.contains(position))
-        else {
-            return false;
-        };
-        let offset = text.offset(&composer.editor, position);
-        composer.editor.select_from(offset, offset);
-        self.composer_drag = true;
-        true
-    }
-
-    pub fn update_selection(&mut self, composer: &mut Composer, position: Position) {
-        if let (true, Some(text)) = (self.composer_drag, self.composer_text) {
-            let offset = text.offset(&composer.editor, position);
-            composer.editor.select_to(offset);
-        }
-    }
-
-    /// Consume the drag's selection, which is what the release copies.
-    pub fn take_selection(&mut self, composer: &mut Composer) -> Option<String> {
-        if !self.composer_drag {
-            return None;
-        }
-        self.composer_drag = false;
-        let text = composer.editor.selected_text().map(str::to_string);
-        composer.editor.clear_selection();
-        text
     }
 
     /// Whether the banner still paints its sweep: on a colour terminal, and
@@ -2044,10 +1997,6 @@ impl Home {
 
     pub fn set_animated(&mut self, animated: bool) {
         self.animated = animated;
-    }
-
-    pub fn set_prompt_width(&mut self, width: crate::config::PromptWidth) {
-        self.prompt_width = width;
     }
 
     /// Name the directory the landing header paints.
@@ -2063,14 +2012,6 @@ impl Home {
         self.notice.as_deref()
     }
 
-    /// The first cell of the draft as last painted, so a test can aim a drag at
-    /// the landing prompt instead of guessing where it landed.
-    #[cfg(test)]
-    pub fn draft_cell(&self) -> Option<Position> {
-        self.composer_text
-            .map(|text| Position::new(text.input.x, text.input.y))
-    }
-
     pub fn set_warning(&mut self, warning: Option<String>) {
         self.warning = warning;
     }
@@ -2083,27 +2024,17 @@ impl Home {
         self.theme = theme;
     }
 
-    /// The launcher screen, drawn like the Session it opens into: the mark,
-    /// the build, the model and the workspace sit in a header at the top
-    /// left, and the prompt is pinned to the bottom rows the Session composer
-    /// uses, so the input the operator types into does not move when the
-    /// first Session opens. There is no session list here — history lives in
-    /// the session dialog, reachable from the prompt.
-    pub fn render(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        composer: &mut Composer,
-        status: &StatusStrip,
-    ) {
-        // The landing strip's hits belong to this paint alone, like the
-        // Session's: without the clear, every frame appended its ranges and
-        // the merged-footer wire repeated the facts hundreds of times.
-        self.footer_hits.clear();
+    /// The landing header, painted into the transcript's body while the
+    /// transcript has no rows of its own: the mark, the build, the model the
+    /// next prompt would run on, the workspace, and any problem that outlives
+    /// a load. The landing shares the Session's screen — the same columns,
+    /// sidebar, composer box and facts row — so the first submit changes
+    /// nothing on screen but the words, and the first answer claims the body
+    /// from this block the way a transcript claims its welcome.
+    pub fn paint_header(&mut self, frame: &mut Frame, area: Rect, status: &StatusStrip) {
+        // The body ground: the transcript would have painted it, so the cells
+        // the header leaves otherwise keep the terminal's own background.
         let palette = self.theme.palette;
-        // The page ground: every other row is painted by something, and the
-        // cells around the banner would otherwise keep the terminal's own
-        // background, a band that matches nothing beside it.
         frame.render_widget(
             Block::new().style(Style::new().bg(palette.background)),
             area,
@@ -2116,32 +2047,6 @@ impl Home {
             Some(version) => version,
             None => env!("CARGO_PKG_VERSION"),
         };
-
-        // The band fills the column the Session composer fills; a fixed
-        // `prompt.max_width` still caps it.
-        let prompt_width = self.prompt_width.resolve(area.width);
-        // The band wraps at the landing prompt's own width, so a long draft
-        // grows it the same way it grows the Session composer; sizing it from
-        // the whole window left it one row tall and clipped.
-        let prompt_h = crate::pane::composer_height(composer, prompt_width, area.height).max(3);
-        // The composer's own notice used to ride the box's border title. The
-        // landing band has no title, so notices read like the home's own
-        // warnings: one line each under the header, in the tone of their kind.
-        let notices = composer
-            .notice
-            .iter()
-            .map(|notice| (notice.clone(), palette.accent))
-            .chain(
-                self.warning
-                    .iter()
-                    .map(|warning| (warning.clone(), palette.warning)),
-            )
-            .chain(
-                self.notice
-                    .iter()
-                    .map(|notice| (notice.clone(), palette.error)),
-            )
-            .collect::<Vec<_>>();
 
         // The header, two cells in from the edge — the offset the Session's
         // facts row uses — so the mark, the build and the facts align on one
@@ -2203,35 +2108,19 @@ impl Home {
             );
             y += 1;
         }
-        for (notice, ink) in &notices {
+        for (notice, ink) in self
+            .warning
+            .iter()
+            .map(|warning| (warning, palette.warning))
+            .chain(self.notice.iter().map(|notice| (notice, palette.error)))
+        {
             header_line(
                 frame,
                 y,
-                Line::from(Span::styled(notice.clone(), Style::new().fg(*ink))),
+                Line::from(Span::styled(notice.clone(), Style::new().fg(ink))),
             );
             y += 1;
         }
-
-        // The prompt takes the bottom rows, the seat the Session composer
-        // keeps, so the band the operator types into stays put across the
-        // first submit. A window too short for header and band lets the band
-        // win: it paints last, over the rows it shares.
-        let prompt_h = prompt_h.min(area.height);
-        let prompt_area = Rect {
-            x: area.x,
-            y: area.bottom().saturating_sub(prompt_h),
-            width: prompt_width,
-            height: prompt_h,
-        };
-        self.composer_text = render_home_composer(
-            frame,
-            prompt_area,
-            composer,
-            &mut self.footer_hits,
-            &self.theme,
-            Some(&ComposerFooter { status }),
-            self.embedded_footer,
-        );
     }
 }
 
@@ -2887,58 +2776,6 @@ fn wire_from_status(status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
     (!segs.is_empty()).then_some(segs)
 }
 
-/// What the landing prompt's bottom rule carries: the facts the status strip
-/// used to spend the window's last row on — what the run waits on, what it
-/// runs on, what it has cost.
-pub struct ComposerFooter<'a> {
-    pub status: &'a StatusStrip,
-}
-
-/// The run's hints, then the model, then what the session has cost: the order
-/// the strip painted, minus the version, which keeps the row's right edge.
-/// Each span carries the segment a press on it acts on, if any.
-fn footer_status_spans(
-    status: &StatusStrip,
-    theme: &Theme,
-) -> Vec<(Span<'static>, Option<FooterSegment>)> {
-    let palette = theme.palette;
-    let muted = Style::new().fg(palette.text_muted);
-    let mut pairs = hint_spans(status, theme);
-    if let Some(model) = &status.model {
-        if !pairs.is_empty() {
-            pairs.push((Span::styled(" · ", muted), None));
-        }
-        // The model this window runs on is the row in effect for the whole
-        // screen, so it carries the same accent the lists mark theirs with:
-        // the strip used to paint it like any other text, which left "which
-        // model am I on" to be read rather than seen. A press on it opens
-        // the picker.
-        pairs.push((
-            Span::styled(
-                model.clone(),
-                Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
-            ),
-            Some(FooterSegment::Model),
-        ));
-    }
-    if let Some(provider) = &status.provider {
-        if !pairs.is_empty() {
-            pairs.push((Span::styled(" · ", muted), None));
-        }
-        pairs.push((
-            Span::styled(provider.clone(), muted),
-            Some(FooterSegment::Provider),
-        ));
-    }
-    if let Some(usage) = &status.usage {
-        if !pairs.is_empty() {
-            pairs.push((Span::styled(" · ", muted), None));
-        }
-        pairs.push((Span::styled(usage.clone(), muted), None));
-    }
-    pairs
-}
-
 /// The exceptions a status line names, in the order the operator scans
 /// them. Each span carries the segment a press on it acts on, when one
 /// exists: the auto-approve hint flips the policy it names.
@@ -3196,115 +3033,6 @@ fn render_queued(frame: &mut Frame, area: Rect, prompts: &[String], theme: &Them
             .block(Block::new().padding(ratatui::widgets::Padding::left(2))),
         area,
     );
-}
-
-/// The landing prompt, drawn the way the TypeScript home draws it: a rule above
-/// and one below, no sides, the draft two cells in from either edge, and the
-/// element background behind it.
-///
-/// The Session composer keeps its closed box and its border title because that
-/// title is where a run's phase, queue depth and notice live. The landing
-/// screen has no run, so it gets the open band the product shows there instead
-/// of a box titled with nothing.
-fn render_home_composer(
-    frame: &mut Frame,
-    area: Rect,
-    composer: &Composer,
-    hits: &mut Vec<FooterHit>,
-    theme: &Theme,
-    footer: Option<&ComposerFooter>,
-    embedded: bool,
-) -> Option<ComposerText> {
-    let palette = theme.palette;
-    if area.width < 5 || area.height < 2 {
-        return None;
-    }
-    let shell = composer.mode() == Mode::Shell;
-    let rule = Style::new().fg(match shell {
-        true => palette.warning,
-        false => palette.primary,
-    });
-    for y in [area.y, area.y + area.height - 1] {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "─".repeat(area.width as usize),
-                rule,
-            ))),
-            Rect {
-                y,
-                height: 1,
-                ..area
-            },
-        );
-    }
-    // The landing prompt absorbs the status strip the same way the Session
-    // box does: its facts sit on the bottom rule. The running build keeps
-    // the landing header's own line as its home — the landing screen is
-    // where an operator verifies an upgrade before any Session exists, and
-    // a caption that eats into the rule would leave the band's own width
-    // unmeasurable.
-    if let Some(footer) = footer {
-        let row = area.y + area.height - 1;
-        let mut pairs = footer_status_spans(footer.status, theme);
-        if !pairs.is_empty() {
-            let text: usize = pairs
-                .iter()
-                .map(|(span, _)| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum();
-            pairs.insert(0, (Span::raw(" "), None));
-            let x0 = area.x + 1;
-            let mut col = 1u16;
-            let mut spans = Vec::new();
-            for (span, segment) in &pairs {
-                let width = UnicodeWidthStr::width(span.content.as_ref()) as u16;
-                if let Some(segment) = segment {
-                    hits.push(FooterHit {
-                        row,
-                        start: x0 + col,
-                        end: x0 + col + width,
-                        segment: *segment,
-                    });
-                }
-                spans.push(span.clone());
-                col += width;
-            }
-            match embedded {
-                // The host merges these facts into its own footer; the hit
-                // geometry stays, so its synthesized presses land on the same
-                // segments a painted press would.
-                true => {}
-                false => frame.render_widget(
-                    Paragraph::new(Line::from(spans)).style(Style::new().bg(palette.background)),
-                    Rect {
-                        x: x0,
-                        y: row,
-                        width: (text as u16).min(area.width.saturating_sub(2)) + 1,
-                        height: 1,
-                    },
-                ),
-            }
-        }
-    }
-    let body = Rect {
-        y: area.y + 1,
-        height: area.height - 2,
-        ..area
-    };
-    frame.render_widget(Block::new().style(Style::new().bg(palette.element)), body);
-    if body.width < 5 {
-        return None;
-    }
-    Some(render_composer_body(
-        frame,
-        Rect {
-            x: body.x + 2,
-            width: body.width.saturating_sub(4),
-            ..body
-        },
-        composer,
-        theme,
-        shell,
-    ))
 }
 
 /// A painted band of rows a pointer can select from. Read-only text — the
@@ -4456,17 +4184,12 @@ impl Pane for SidebarPane {
         // The column never wraps, so a title or path longer than it is cut with
         // an ellipsis instead of pushing the rest of the column down.
         let text_width = area.width as usize;
-        let mut lines = match &self.session {
-            None => vec![Line::from(Span::styled(
-                "no Session selected",
-                Style::new().fg(palette.text_muted),
-            ))],
-            // The Session's title, path and last-updated time belong to the
-            // window chrome that already carries them. The column starts with
-            // the usage only it can show.
-            Some(_) => Vec::new(),
-        };
-        if self.session.is_some() {
+        // The column paints for the window rather than the Session: the 24H
+        // strip and the quota meters are workspace facts the landing shows
+        // before the first prompt, and the session-scoped blocks carry their
+        // own empty states until a run fills them in.
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        {
             // The workspace strip opens the billed-usage section: a "Context"
             // banner above it read as two stacked headers for one block of
             // numbers, and the strip already says what the rows below explain.
@@ -8124,125 +7847,100 @@ mod tests {
         assert_eq!(composer_height(&composer, 75, 12), 2 + 6);
     }
 
-    /// The landing prompt is the product's open band: a rule above and one
-    /// below, no sides, and the draft two cells in from either edge on the
-    /// element ground. Pinned to the window's last rows, left-aligned — the
-    /// seat the Session composer keeps — and the header sits above it.
+    /// The landing is the Session's screen with an empty transcript: the same
+    /// columns — a sidebar above its divider on the right — the same closed
+    /// composer box pinned above the facts row, and the header riding in the
+    /// body until the first answer claims it. Nothing about the screen moves
+    /// or restyles when the prompt is sent.
     #[test]
-    fn the_landing_prompt_is_the_products_open_band() {
+    fn the_landing_is_the_session_screen_with_an_empty_transcript() {
         let theme = home_theme();
+        let mut shell = Shell::new(Path::new("/repo/landing"), theme.clone());
         let mut home = Home::new(theme.clone());
-        // The band's shape is what this test is about, so the width is pinned
-        // to the product's fixed cap; the default is `"auto"`, and its own
-        // arithmetic is asserted below.
-        home.set_prompt_width(crate::config::PromptWidth::Fixed(75));
-        let mut composer = crate::editor::Composer::new(Path::new("."));
+        home.set_workspace(PathBuf::from("/repo/landing"));
+        shell.status.model = Some("glm-5".into());
+        shell.status.provider = Some("zhipuai · openai-chat".into());
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("terminal");
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
+            .draw(|frame| shell.render_landing(frame, &mut home))
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         let row = |y: u16| {
-            (0..120)
+            (0..140)
                 .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect::<String>()
         };
-        let rule = "─".repeat(75);
-        let rules = (0..30)
-            .filter(|y| row(*y).contains(&rule))
-            .collect::<Vec<_>>();
-        assert_eq!(rules.len(), 2, "one rule above the draft and one below");
-        let (top, bottom) = (rules[0], rules[1]);
-        assert_eq!(bottom - top, 2, "the band is a rule, the draft, a rule");
-        assert_eq!(
-            bottom, 29,
-            "the band pins to the window's last row, the Session composer's seat"
-        );
-        // The band is capped at the fixed width and sits at the left edge,
-        // where the Session composer starts.
-        assert_eq!(row(top).find('─'), Some(0), "{:?}", row(top));
-        assert_eq!(row(top).trim_end().chars().count(), 75);
-        // No vertical borders: the cell beside the band stays blank.
-        assert_eq!(buffer[(75, top)].symbol(), " ");
-        // A draft starts two cells in from the edge, on the element ground.
-        // The empty band's hint keeps the caret's cell to itself — a block
-        // cursor would cut a wide first glyph in half — so it reads one cell
-        // right of that, which the second draw below pins.
-        assert_eq!(buffer[(3, top + 1)].symbol(), "A");
-        assert_eq!(buffer[(3, top + 1)].bg, theme.palette.element);
-        assert!(row(top + 1).contains("Ask anything"), "{:?}", row(top + 1));
-        let mut typed = crate::editor::Composer::new(Path::new("."));
-        typed.editor.insert_str("Ask");
-        terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut typed, &StatusStrip::default()))
-            .expect("draw");
-        assert_eq!(
-            terminal.backend().buffer()[(2, top + 1)].symbol(),
-            "A",
-            "a draft starts two cells in from the edge"
-        );
-        // The header sits at the top left: the mark, then the build under it.
+        // The header rides in the body, top left: the mark, the build, the
+        // model the next prompt would run on, the workspace.
         let banner_row = row(2);
         assert!(banner_row.contains("/\\/\\"), "{banner_row:?}");
         assert_eq!(banner_row.find('/'), Some(3), "{banner_row:?}");
         assert!(banner_row.contains('█'), "{banner_row:?}");
         assert!(row(7).contains("miao v"), "{:?}", row(7));
-        // The default fills the column instead of sitting at the product's
-        // fixed 75 columns: the width the Session composer keeps.
+        assert!(row(8).contains("glm-5"), "{:?}", row(8));
+        assert!(row(8).contains("zhipuai"), "{:?}", row(8));
+        assert!(row(9).contains("/repo/landing"), "{:?}", row(9));
+        // The right column is the Session's sidebar above its divider, not a
+        // placeholder naming a session that does not exist yet.
         assert_eq!(
-            crate::config::PromptWidth::default().resolve(120),
-            120,
-            "the default band fills the column"
+            buffer[(97, 10)].symbol(),
+            "│",
+            "the sidebar divider paints: {:?}",
+            row(10)
         );
+        assert!(!row(2).contains("no Session selected"));
+        // The composer is the Session's closed box: a side border, the empty
+        // hint one cell right of the caret's own cell inside it.
+        let interior = (0..30)
+            .position(|y| row(y).contains("Ask anything"))
+            .expect("the landing hint paints inside the box") as u16;
+        assert_eq!(
+            buffer[(0, interior)].symbol(),
+            "│",
+            "the box's side border paints: {:?}",
+            row(interior)
+        );
+        assert_eq!(buffer[(3, interior)].symbol(), "A");
+        // The facts row sits on the window's last row and names the model,
+        // exactly as a Session's does.
+        assert!(row(29).contains("glm-5"), "{:?}", row(29));
+        assert!(row(29).contains("miao"), "{:?}", row(29));
     }
 
-    /// The landing prompt is not a one-row field: a draft with newlines in it
-    /// grows the band and shows every line, which is what makes `shift+enter`
+    /// The landing box is not a one-row field: a draft with newlines in it
+    /// grows the box and shows every line, which is what makes `shift+enter`
     /// (or a pasted multi-line prompt) usable before a Session exists.
     #[test]
-    fn the_landing_band_shows_every_line_of_its_draft() {
+    fn the_landing_box_shows_every_line_of_its_draft() {
         let theme = home_theme();
-        let mut home = Home::new(theme.clone());
-        home.set_prompt_width(crate::config::PromptWidth::Fixed(75));
-        let mut composer = crate::editor::Composer::new(Path::new("."));
-        composer
+        let mut shell = Shell::new(Path::new("."), theme.clone());
+        let mut home = Home::new(theme);
+        shell
+            .composer
             .editor
             .set_text("first line\nsecond line\nthird line");
-        // Two rules and one row per draft line.
-        assert_eq!(composer_height(&composer, 75, 30), 2 + 3);
+        // Borders plus one row per draft line.
+        assert_eq!(composer_height(&shell.composer, 120, 30), 2 + 3);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
+            .draw(|frame| shell.render_landing(frame, &mut home))
             .expect("draw");
-        let buffer = terminal.backend().buffer().clone();
-        let row = |y: u16| {
-            (0..120)
-                .map(|x| buffer[(x, y)].symbol().to_string())
-                .collect::<String>()
-        };
-        let rule = "─".repeat(75);
-        let rules = (0..30)
-            .filter(|y| row(*y).contains(&rule))
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(120)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>();
-        assert_eq!(rules.len(), 2, "one rule above the draft and one below");
-        let (top, bottom) = (rules[0], rules[1]);
-        // Two rules plus three draft rows: a five-row band, so the rules sit
-        // four rows apart.
-        assert_eq!(
-            bottom - top,
-            2 + 3 - 1,
-            "three draft rows between the rules"
-        );
         for (offset, line) in ["first line", "second line", "third line"]
             .iter()
             .enumerate()
         {
-            let painted = row(top + 1 + offset as u16);
             assert!(
-                painted.contains(line),
-                "line {offset} of the draft is missing: {painted:?}"
+                rows.iter().any(|row| row.contains(line)),
+                "line {offset} of the draft is missing: {rows:?}"
             );
         }
     }
@@ -8542,55 +8240,56 @@ mod tests {
         );
     }
 
-    /// The landing prompt carries the facts on its bottom rule when it has
-    /// them, and keeps the rule whole when it does not — the header's own
-    /// build line is the landing screen's build marker.
+    /// The landing names the model on the facts row under the composer box,
+    /// the row a Session's model reads on, and the header's own build line is
+    /// the landing screen's build marker.
     #[test]
-    fn the_landing_prompt_carries_the_run_facts_on_its_rule() {
+    fn the_landing_facts_row_names_the_model_like_a_session() {
         let theme = home_theme();
-        let mut home = Home::new(theme.clone());
-        home.set_prompt_width(crate::config::PromptWidth::Fixed(40));
-        let mut composer = crate::editor::Composer::new(Path::new("."));
-        let status = StatusStrip {
-            model: Some("glm-5".into()),
-            ..StatusStrip::default()
-        };
+        let mut shell = Shell::new(Path::new("."), theme.clone());
+        let mut home = Home::new(theme);
+        shell.status.model = Some("glm-5".into());
         let height = 24u16;
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
             .expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer, &status))
+            .draw(|frame| shell.render_landing(frame, &mut home))
             .expect("draw");
         let row = |y: u16| {
             (0..60u16)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>()
         };
-        let rule_row = (0..height)
-            .position(|y| row(y).contains("glm-5") && row(y).contains('─'))
-            .expect("the facts paint on the bottom rule") as u16;
+        // The row is a plain line under the box, not the box itself: the model
+        // reads on it without a side border in the way.
         assert!(
-            !row(rule_row - 1).contains("glm-5"),
-            "no strip row above the rule: {:?}",
-            row(rule_row - 1)
+            row(height - 1).contains("glm-5"),
+            "the facts row names the model: {:?}",
+            row(height - 1)
+        );
+        assert!(
+            !row(height - 1).contains('│'),
+            "the facts row is a plain line, not the box: {:?}",
+            row(height - 1)
         );
 
-        // An empty strip keeps the rule whole.
-        let empty = StatusStrip::default();
+        // An empty strip still paints the row: the build marker keeps its
+        // place at the right edge.
+        shell.status.model = None;
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height))
             .expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer, &empty))
+            .draw(|frame| shell.render_landing(frame, &mut home))
             .expect("draw");
         let empty_row = |y: u16| {
             (0..60u16)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>()
         };
-        let full_rule = "─".repeat(30);
         assert!(
-            (0..height).any(|y| empty_row(y).contains(&full_rule)),
-            "the rule stays measurable without facts"
+            empty_row(height - 1).contains("miao"),
+            "the build marker survives an empty strip: {:?}",
+            empty_row(height - 1)
         );
     }
 
@@ -9788,27 +9487,22 @@ mod tests {
         );
     }
 
-    /// The landing prompt is the same composer, so the same drag works there.
+    /// The landing composer is the Session composer, so the same drag works
+    /// there.
     #[test]
     fn a_drag_over_the_landing_draft_copies_what_it_covered() {
+        let mut shell = Shell::new(Path::new("."), home_theme());
         let mut home = Home::new(home_theme());
-        let mut composer = Composer::new(Path::new("."));
-        composer.editor.set_text("draft text");
+        shell.composer.editor.set_text("draft text");
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 16)).expect("terminal");
         terminal
-            .draw(|frame| home.render(frame, frame.area(), &mut composer, &StatusStrip::default()))
+            .draw(|frame| shell.render_landing(frame, &mut home))
             .expect("draw");
-        let draft = home.composer_text.expect("the prompt painted its draft");
-        assert!(home.begin_selection(
-            &mut composer,
-            Position::new(draft.input.x + 6, draft.input.y)
-        ));
-        home.update_selection(
-            &mut composer,
-            Position::new(draft.input.x + 10, draft.input.y),
-        );
-        assert_eq!(home.take_selection(&mut composer).as_deref(), Some("text"));
+        let draft = shell.composer_text.expect("the prompt painted its draft");
+        assert!(shell.begin_selection(Position::new(draft.input.x + 6, draft.input.y)));
+        shell.update_selection(Position::new(draft.input.x + 10, draft.input.y));
+        assert_eq!(shell.take_selection().as_deref(), Some("text"));
     }
 
     fn home_theme() -> Theme {
@@ -11517,48 +11211,41 @@ mod draft_gap_tests {
         assert_eq!(shell.footer_wire(), None);
     }
 
-    /// The landing prompt merges the same way: no painted facts on the rule,
-    /// a wire that names the model and the provider tail serving it.
+    /// The landing merges the same way under an embedded host: the box pins
+    /// to the last row with no painted facts row, and the wire names the
+    /// model and the provider tail serving it.
     #[test]
     fn embedded_landing_paints_no_facts_and_reports_the_wire() {
+        let mut shell = Shell::new(Path::new("."), strip_theme());
+        shell.set_embedded_footer(true);
+        shell.status.model = Some("deepseek-v4".into());
+        shell.status.provider = Some("volcengine · mtp".into());
         let mut home = Home::new(strip_theme());
-        home.set_embedded_footer(true);
-        let status = StatusStrip {
-            model: Some("deepseek-v4".into()),
-            provider: Some("volcengine · mtp".into()),
-            usage: None,
-            hints: Vec::new(),
-        };
-        let mut composer = crate::editor::Composer::new(Path::new("."));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         terminal
-            .draw(|frame| {
-                home.render(frame, frame.area(), &mut composer, &status);
-            })
+            .draw(|frame| shell.render_landing(frame, &mut home))
             .expect("draw");
         // The host footer owns the strip's facts in embedded mode, so the
-        // band's rule stays bare. The landing header still names the model —
-        // that line is the header's own job, not the strip's.
+        // composer box pins to the window's last row with no facts row under
+        // it. The landing header still names the model — that line is the
+        // header's own job, not the strip's.
         let row = |y: u16| {
             (0..80u16)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>()
         };
-        let rule_row = 23;
         assert!(
-            row(rule_row).contains('─'),
-            "the band pins to the window's last row: {:?}",
-            row(rule_row)
+            row(23).contains('┘'),
+            "the box pins to the window's last row: {:?}",
+            row(23)
         );
         assert!(
-            !row(rule_row).contains("volcengine"),
-            "the landing facts leaked onto the rule: {:?}",
-            row(rule_row)
+            !row(23).contains("volcengine"),
+            "the landing facts leaked under the box: {:?}",
+            row(23)
         );
-        let wire = home
-            .footer_wire(&status)
-            .expect("the landing wire survives the takeover");
+        let wire = shell.footer_wire().expect("the landing wire survives");
         let ids: Vec<&str> = wire.iter().map(|seg| seg.id).collect();
         assert_eq!(ids, vec!["model", "provider"], "{wire:?}");
         assert_eq!(wire[1].text, "volcengine · mtp", "{wire:?}");
@@ -11619,25 +11306,19 @@ mod draft_gap_tests {
 
     #[test]
     fn repeated_landing_paints_do_not_stack_the_wire() {
+        let mut shell = Shell::new(Path::new("."), strip_theme());
+        shell.set_embedded_footer(true);
+        shell.status.model = Some("deepseek-v4".into());
+        shell.status.provider = Some("volcengine · mtp".into());
         let mut home = Home::new(strip_theme());
-        home.set_embedded_footer(true);
-        let status = StatusStrip {
-            model: Some("deepseek-v4".into()),
-            provider: Some("volcengine · mtp".into()),
-            usage: None,
-            hints: Vec::new(),
-        };
-        let mut composer = crate::editor::Composer::new(Path::new("."));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("terminal");
         for _ in 0..2 {
             terminal
-                .draw(|frame| home.render(frame, frame.area(), &mut composer, &status))
+                .draw(|frame| shell.render_landing(frame, &mut home))
                 .expect("draw");
         }
-        let wire = home
-            .footer_wire(&status)
-            .expect("the landing wire survives");
+        let wire = shell.footer_wire().expect("the landing wire survives");
         assert_eq!(
             wire.len(),
             2,

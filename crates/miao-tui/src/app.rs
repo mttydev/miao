@@ -1006,13 +1006,6 @@ impl App {
         self.terminal_title_allowed = allowed;
     }
 
-    /// `prompt.max_width` from `tui.json`: the landing prompt's width cap.
-    /// The Session's prompt fills its column, like the TS session route, so
-    /// only the Home pane reads this.
-    pub fn configure_prompt_width(&mut self, width: crate::config::PromptWidth) {
-        self.home.set_prompt_width(width);
-    }
-
     pub fn configure_animations(&mut self, animated: bool) {
         self.home.set_animated(animated);
     }
@@ -1092,34 +1085,21 @@ impl App {
         let leader_hint = self.armed_leader_hint();
         self.shell.set_leader_hint(leader_hint);
         match self.screen {
-            Screen::Home => {
-                // The launcher fills the window: the strip's facts ride the
-                // landing prompt's bottom rule now, the same way the Session
-                // box carries them on its border, so the row the strip spent
-                // stays with the page.
-                self.home.render(
-                    frame,
-                    frame.area(),
-                    &mut self.shell.composer,
-                    &self.shell.status,
-                );
-            }
-            Screen::Session => {
-                self.shell.render(frame);
-                if let Some(at) = self.mouse_pos {
-                    // The column decides as much as the row: the transcript
-                    // shares these rows, so only a pointer inside the sidebar
-                    // opens its tooltip.
-                    let tip = self
-                        .shell
-                        .sidebar
-                        .as_ref()
-                        .and_then(|sidebar| sidebar.hover_tip(at.0, at.1))
-                        .map(str::to_string);
-                    if let Some(tip) = tip {
-                        crate::pane::render_hover_tip(frame, at, &tip, &self.shell.theme().clone());
-                    }
-                }
+            Screen::Home => self.shell.render_landing(frame, &mut self.home),
+            Screen::Session => self.shell.render(frame),
+        }
+        if let Some(at) = self.mouse_pos {
+            // The column decides as much as the row: the transcript shares
+            // these rows, so only a pointer inside the sidebar opens its
+            // tooltip. The landing carries the same column.
+            let tip = self
+                .shell
+                .sidebar
+                .as_ref()
+                .and_then(|sidebar| sidebar.hover_tip(at.0, at.1))
+                .map(str::to_string);
+            if let Some(tip) = tip {
+                crate::pane::render_hover_tip(frame, at, &tip, &self.shell.theme().clone());
             }
         }
         if let Some(dialog) = self.dialog.as_ref() {
@@ -1138,10 +1118,7 @@ impl App {
     /// in the host's chrome reaches the same handler a press on the painted
     /// strip would.
     fn footer_wire(&self) -> Option<Vec<FooterWireSeg>> {
-        let mut wire = match self.screen {
-            Screen::Home => self.home.footer_wire(&self.shell.status),
-            Screen::Session => self.shell.footer_wire(),
-        }?;
+        let mut wire = self.shell.footer_wire()?;
         // Each fact carries the chord it answers to, in the keymap's own
         // spelling: the host sends it as keystrokes, so a press on the host's
         // row lands on the same handler a press inside the terminal would.
@@ -1992,10 +1969,7 @@ impl App {
                     // the row flips the policy it names or opens the picker
                     // for the model it names, and never starts a transcript
                     // selection.
-                    let segment = match self.screen {
-                        Screen::Session => self.shell.footer_segment(position),
-                        Screen::Home => self.home.footer_segment(position),
-                    };
+                    let segment = self.shell.footer_segment(position);
                     match segment {
                         Some(FooterSegment::ApprovalMode) => {
                             self.toggle_auto_approve();
@@ -2011,32 +1985,15 @@ impl App {
                     {
                         return;
                     }
-                    match self.screen {
-                        Screen::Session => {
-                            self.shell.begin_selection(position);
-                        }
-                        Screen::Home => {
-                            self.home
-                                .begin_selection(&mut self.shell.composer, position);
-                        }
-                    }
+                    self.shell.begin_selection(position);
                     return;
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
-                    match self.screen {
-                        Screen::Session => self.shell.update_selection(position),
-                        Screen::Home => {
-                            self.home
-                                .update_selection(&mut self.shell.composer, position);
-                        }
-                    }
+                    self.shell.update_selection(position);
                     return;
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
-                    let text = match self.screen {
-                        Screen::Session => self.shell.take_selection(),
-                        Screen::Home => self.home.take_selection(&mut self.shell.composer),
-                    };
+                    let text = self.shell.take_selection();
                     if let Some(text) = text {
                         crate::platform::clipboard::copy(&text);
                         self.notice(&format!("Copied {} characters", text.chars().count()));
@@ -7349,7 +7306,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 30)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("draw");
         let start = app
-            .home
+            .shell
             .draft_cell()
             .expect("the landing prompt painted its draft");
         for (kind, column) in [
