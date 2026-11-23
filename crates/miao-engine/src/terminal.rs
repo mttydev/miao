@@ -133,7 +133,7 @@ impl Output {
         let next = start + bytes.len() as u64;
         self.cursor = next;
         Ok(
-            json!({"id":id,"output":String::from_utf8_lossy(&bytes),"cursor":next,"retained_from":self.offset,"dropped":start - requested,"truncated":next < end,"exit":self.exit}),
+            json!({"id":id,"output":crate::process::decode_output(&bytes),"cursor":next,"retained_from":self.offset,"dropped":start - requested,"truncated":next < end,"exit":self.exit}),
         )
     }
 }
