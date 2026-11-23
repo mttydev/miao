@@ -164,7 +164,12 @@ pub enum AppEvent {
     /// The open Session's jobs, re-read for the waiting line rather than for a
     /// dialog: a Session paused on background work shows what is running, how
     /// long it has run and what it last said, and that has to move on its own.
-    JobStatus(Vec<JobRow>),
+    ///
+    /// `None` is a read that did not answer. It is not the same as an empty
+    /// list, and it must not be treated as one: keeping the previous rows would
+    /// let a single failed read leave a finished job on the status line
+    /// forever, because the clock only stops once every cached row is terminal.
+    JobStatus(Option<Vec<JobRow>>),
     /// The open Session's delegated children, refreshed while any is busy.
     Subagents(Vec<SubagentRow>),
     /// The git worktrees of the checkout the open Session works in, the
