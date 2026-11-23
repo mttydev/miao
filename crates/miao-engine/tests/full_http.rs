@@ -95,7 +95,7 @@ async fn both_wire_adapters_drive_real_http_tool_dispatch_and_durable_continuati
         // The coordination tools ride along with every standalone Session, and
         // so do the worktree tools the engine owns itself — planwrite joins
         // them once the pending-plan kind exists.
-        assert_eq!(first["tools"].as_array().unwrap().len(), 21);
+        assert_eq!(first["tools"].as_array().unwrap().len(), 22);
         if protocol == "anthropic" {
             assert!(first["system"].as_str().unwrap().contains("miao"));
         } else {

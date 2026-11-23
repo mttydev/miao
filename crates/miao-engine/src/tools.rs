@@ -12,6 +12,7 @@ use cap_std::{ambient_authority, fs::Dir};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock as StdRwLock},
 };
@@ -246,6 +247,21 @@ pub(crate) fn canonical_plain(path: std::path::PathBuf) -> std::path::PathBuf {
 pub struct Tools {
     root: PathBuf,
     directory: Arc<Dir>,
+    /// The engine's directory handle, restored when a scoped clone names a
+    /// Session that has not been placed in a worktree.
+    base_directory: Arc<Dir>,
+    /// The checkout this engine was opened on. A Session's clone may point at
+    /// a worktree, but commands that address the project rather than one
+    /// Session's files still use this root.
+    base_root: PathBuf,
+    /// Per-Session working roots. The map is shared by every clone, so a
+    /// placement change is visible to the next tool call without rebuilding
+    /// the runtime.
+    session_roots: Arc<StdRwLock<HashMap<String, SessionRoot>>>,
+    /// The main checkout when this clone works in a linked worktree. A command
+    /// that would redirect git into it is refused: the checkout belongs to the
+    /// Session that holds its lease.
+    main_checkout: Option<PathBuf>,
     gate: Arc<RwLock<()>>,
     gates: Arc<StdRwLock<Gates>>,
     /// `sandbox.writable_roots`: extra directories a confined command may
@@ -288,6 +304,13 @@ pub struct Tools {
     compact_disclosure: bool,
     mcp_disclosure: crate::mcp::Disclosure,
     mcp_disclosure_allowlist: std::collections::BTreeSet<String>,
+}
+
+#[derive(Clone)]
+struct SessionRoot {
+    root: PathBuf,
+    directory: Arc<Dir>,
+    main_checkout: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -344,9 +367,14 @@ impl Tools {
             tokio::task::spawn_blocking(move || Dir::open_ambient_dir(path, ambient_authority()))
                 .await
                 .map_err(|_| ToolError::Io(std::io::Error::other("directory worker failed")))??;
+        let directory = Arc::new(directory);
         Ok(Self {
+            base_root: root.clone(),
             root,
-            directory: Arc::new(directory),
+            base_directory: directory.clone(),
+            directory,
+            session_roots: Arc::new(StdRwLock::new(HashMap::new())),
+            main_checkout: None,
             gate: Arc::new(RwLock::new(())),
             gates: Arc::new(StdRwLock::new(Gates {
                 writes: false,
@@ -420,6 +448,21 @@ impl Tools {
     /// detection is per session, never across sessions sharing a runtime.
     pub fn with_read_scope(mut self, session: &str) -> Self {
         self.read_scope = session.to_owned();
+        let placed = self
+            .session_roots
+            .read()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(session)
+            .cloned();
+        if let Some(placed) = placed {
+            self.root = placed.root;
+            self.directory = placed.directory;
+            self.main_checkout = placed.main_checkout;
+        } else {
+            self.root = self.base_root.clone();
+            self.directory = self.base_directory.clone();
+            self.main_checkout = None;
+        }
         self
     }
 
@@ -1496,10 +1539,137 @@ impl Tools {
         self.root.to_str().expect("validated UTF-8 Location")
     }
 
+    /// The checkout the engine was opened on, independent of any Session's
+    /// scoped worktree.
+    pub fn engine_root(&self) -> &Path {
+        &self.base_root
+    }
+
+    /// The working root this clone resolves paths against.
+    pub fn session_root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Record where one Session's tools work. The directory handle is opened
+    /// once here so every later clone can switch roots without another syscall;
+    /// a linked worktree also records the main checkout it must not write.
+    pub async fn register_session_root(&self, session: &str, root: &str) -> Result<(), ToolError> {
+        let root = crate::placement::canonical(Path::new(root));
+        if !tokio::fs::metadata(&root).await?.is_dir() {
+            return Err(ToolError::InvalidInput);
+        }
+        let path = root.clone();
+        let directory =
+            tokio::task::spawn_blocking(move || Dir::open_ambient_dir(path, ambient_authority()))
+                .await
+                .map_err(|_| ToolError::Io(std::io::Error::other("directory worker failed")))??;
+        let main_checkout = crate::worktree::main_checkout(&root);
+        self.session_roots
+            .write()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(
+                session.to_owned(),
+                SessionRoot {
+                    root,
+                    directory: Arc::new(directory),
+                    main_checkout,
+                },
+            );
+        Ok(())
+    }
+
     /// The branch this workspace's checkout records, so a permission decision can
     /// name the branch a landing action would move.
     pub(crate) fn head(&self) -> crate::branch_discipline::Head {
         crate::branch_discipline::Head::observe(&self.directory)
+    }
+
+    /// A Session placed in a linked worktree must not reach back into the
+    /// checkout another Session owns. File tools are already confined to
+    /// `root`; process tools need the same rule for git, because a command can
+    /// name the checkout with `git -C`, `--git-dir`, an environment variable or
+    /// a `cd` before `git`. Refuse rather than guess: a false positive is a
+    /// retry, while a missed redirect destroys the other Session's HEAD.
+    fn deny_checkout_redirect(&self, name: &str, input: &Value) -> Result<(), ToolError> {
+        let Some(main) = &self.main_checkout else {
+            return Ok(());
+        };
+        if self.root == *main {
+            return Ok(());
+        }
+        if !matches!(
+            name,
+            "bash" | "run_command" | "start_job" | "monitor" | "terminal_start"
+        ) {
+            return Ok(());
+        }
+        let mut text = String::new();
+        if let Some(command) = input.get("command").and_then(Value::as_str) {
+            text.push_str(command);
+        }
+        if let Some(argv) = input.get("argv").and_then(Value::as_array) {
+            for part in argv {
+                if let Some(part) = part.as_str() {
+                    text.push(' ');
+                    text.push_str(part);
+                }
+            }
+        }
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        let has_git = tokens
+            .iter()
+            .any(|token| *token == "git" || token.ends_with("/git"));
+        if !has_git {
+            return Ok(());
+        }
+        let main_text = main.to_string_lossy();
+        let redirected = text.contains(main_text.as_ref())
+            || tokens.iter().any(|token| {
+                *token == "--git-dir"
+                    || *token == "--work-tree"
+                    || token.starts_with("--git-dir=")
+                    || token.starts_with("--work-tree=")
+                    || token.starts_with("GIT_DIR")
+                    || token.starts_with("GIT_WORK_TREE")
+            });
+        // `..` is how a worktree under the checkout climbs back into it. Only
+        // a `cd` target is judged here; `git diff A..B` is a range, not a path.
+        let cd_outside = tokens
+            .iter()
+            .position(|token| *token == "cd")
+            .and_then(|index| tokens.get(index + 1))
+            .is_some_and(|target| {
+                let candidate = if Path::new(target).is_absolute() {
+                    PathBuf::from(target)
+                } else {
+                    self.root.join(target)
+                };
+                let candidate =
+                    canonical_plain(std::fs::canonicalize(&candidate).unwrap_or(candidate));
+                !candidate.starts_with(&self.root)
+            });
+        let outside_c = tokens
+            .iter()
+            .position(|token| *token == "-C")
+            .and_then(|index| tokens.get(index + 1))
+            .is_some_and(|target| {
+                let candidate = if Path::new(target).is_absolute() {
+                    PathBuf::from(target)
+                } else {
+                    self.root.join(target)
+                };
+                let candidate =
+                    canonical_plain(std::fs::canonicalize(&candidate).unwrap_or(candidate));
+                !candidate.starts_with(&self.root)
+            });
+        if redirected || outside_c || cd_outside {
+            return Err(ToolError::InvalidArgs(
+                "this Session is isolated in a worktree; git must stay inside it, \
+                 not in the main checkout"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn verification_source(&self, scope: &crate::verification::Scope) -> Value {
@@ -1569,6 +1739,7 @@ impl Tools {
         if invocation.is_some() {
             return Err(ToolError::Unsupported);
         }
+        self.deny_checkout_redirect(name, &input)?;
         let path = match name {
             name if crate::codegraph::is_codegraph(name) && self.codegraph_enabled() => {
                 crate::codegraph::parse(name, &input)?
@@ -1758,7 +1929,9 @@ impl Tools {
             "list_sessions" | "send_message" | "read_session_context" => ".".into(),
             // A worktree is created under the workspace itself, so the
             // permission target is the workspace, not a file path.
-            "worktree_list" | "worktree_create" | "worktree_remove" => ".".into(),
+            "worktree_list" | "worktree_create" | "worktree_remove" | "worktree_enter" => {
+                ".".into()
+            }
             _ => return Err(ToolError::Unsupported),
         };
         let path = if name == "apply_patch" {
@@ -1948,6 +2121,7 @@ impl Tools {
                 | "apply_patch"
                 | "worktree_create"
                 | "worktree_remove"
+                | "worktree_enter"
                 | "memory_save"
         ) || (name == "knowledge"
             && matches!(input["op"].as_str(), Some("put" | "index_file" | "delete")))
@@ -1982,6 +2156,7 @@ impl Tools {
                         | "worktree_list"
                         | "worktree_create"
                         | "worktree_remove"
+                        | "worktree_enter"
                 ),
             access,
             name: name.into(),
@@ -2584,8 +2759,9 @@ impl Tools {
         // for a second checkout without the operator leaving the TUI.
         definitions.extend([
             ToolDefinition{name:"worktree_list".into(),description:"List the git worktrees of this workspace's checkout, the checkout itself first.".into(),input_schema:json!({"type":"object","properties":{},"additionalProperties":false})},
-            ToolDefinition{name:"worktree_create".into(),description:"Add a git worktree named NAME under the checkout's worktree directory and return its path. This Session keeps working where it is.".into(),input_schema:json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false})},
+            ToolDefinition{name:"worktree_create".into(),description:"Add a git worktree named NAME under the checkout's worktree directory and return its path. This Session keeps working where it is; use worktree_enter to move into it.".into(),input_schema:json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false})},
             ToolDefinition{name:"worktree_remove".into(),description:"Remove one git worktree and the branch it holds. Refused while any Session still works in the tree.".into(),input_schema:json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false})},
+            ToolDefinition{name:"worktree_enter".into(),description:"Move this Session's files into its own worktree of the current checkout and return the new root. Use this when the checkout already holds another Session's work; every later tool call is confined to the worktree.".into(),input_schema:json!({"type":"object","properties":{"name":{"type":"string"}},"additionalProperties":false})},
         ]);
         // Inter-Session coordination: discovery is read-only, so it ships
         // before delivery does. `specs/v2/session-messaging.md` holds the whole
@@ -2841,22 +3017,86 @@ impl Tools {
                     })?;
                     crate::codegraph::execute(name, input, self.root.clone(), database).await
                 }
-                "worktree_list" => Ok(json!(crate::worktree::list(&self.root)
+                "worktree_list" => Ok(json!(crate::worktree::list(self.engine_root())
                     .map_err(|error| ToolError::External(error.to_string()))?)),
                 "worktree_create" => {
                     let name = input
                         .get("name")
                         .and_then(Value::as_str)
                         .ok_or(ToolError::InvalidInput)?;
-                    Ok(json!(crate::worktree::create(&self.root, name)
+                    Ok(json!(crate::worktree::create(self.engine_root(), name)
                         .map_err(|error| ToolError::External(error.to_string()))?))
+                }
+                "worktree_enter" => {
+                    let session = self.read_scope.clone();
+                    if session.is_empty() {
+                        return Err(ToolError::External(
+                            "worktree_enter needs an open Session".into(),
+                        ));
+                    }
+                    let name = input
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            session.strip_prefix("ses_").unwrap_or(&session).to_owned()
+                        });
+                    let checkout = crate::worktree::checkout(self.engine_root())
+                        .map_err(|error| ToolError::External(error.to_string()))?;
+                    let tree = match crate::worktree::create_detached(&checkout, &name) {
+                        Ok(tree) => tree,
+                        Err(error) => {
+                            let path = crate::placement::canonical(
+                                &checkout.join(crate::worktree::DIRECTORY).join(&name),
+                            );
+                            if !path.is_dir() {
+                                return Err(ToolError::External(error.to_string()));
+                            }
+                            crate::worktree::Tree {
+                                name: name.clone(),
+                                path: path.display().to_string(),
+                                branch: None,
+                                main: false,
+                            }
+                        }
+                    };
+                    let ledger = self.ledger.as_ref().ok_or_else(|| {
+                        ToolError::External(
+                            "worktree_enter needs the engine ledger to place the Session".into(),
+                        )
+                    })?;
+                    let connection = rusqlite::Connection::open(ledger)
+                        .map_err(|error| ToolError::External(error.to_string()))?;
+                    connection
+                        .busy_timeout(std::time::Duration::from_secs(5))
+                        .map_err(|error| ToolError::External(error.to_string()))?;
+                    connection
+                        .execute(
+                            "UPDATE engine_location SET root=?2 WHERE session_id=?1",
+                            rusqlite::params![session, tree.path],
+                        )
+                        .map_err(|error| ToolError::External(error.to_string()))?;
+                    // The checkout is now free for another Session; keeping the
+                    // lease would strand the main checkout behind a Session
+                    // that no longer writes there.
+                    connection
+                        .execute(
+                            "DELETE FROM engine_checkout_lease WHERE session_id=?1",
+                            rusqlite::params![session],
+                        )
+                        .map_err(|error| ToolError::External(error.to_string()))?;
+                    self.register_session_root(&session, &tree.path).await?;
+                    Ok(json!({"session_id":session,"worktree":tree}))
                 }
                 "worktree_remove" => {
                     let name = input
                         .get("name")
                         .and_then(Value::as_str)
                         .ok_or(ToolError::InvalidInput)?;
-                    let tree = self.root.join(crate::worktree::DIRECTORY).join(name);
+                    let tree = self
+                        .engine_root()
+                        .join(crate::worktree::DIRECTORY)
+                        .join(name);
                     // Removal strands the Sessions whose working directory is
                     // inside the tree, so the count decides -- and without the
                     // ledger there is no count to trust.
@@ -2874,7 +3114,7 @@ impl Tools {
                             tree.display()
                         )));
                     }
-                    crate::worktree::remove(&self.root, name)
+                    crate::worktree::remove(self.engine_root(), name)
                         .map_err(|error| ToolError::External(error.to_string()))?;
                     Ok(json!({"removed": name}))
                 }
@@ -3465,6 +3705,36 @@ mod worktree_tool_tests {
             .collect();
         assert_eq!(names.len(), 2, "the checkout plus the new tree");
         assert!(names.contains(&"wt"));
+    }
+
+    #[tokio::test]
+    async fn a_worktree_session_can_run_git_but_not_redirect_it_to_the_checkout() {
+        let root = repository();
+        let tree = crate::worktree::create_detached(&root, "w").expect("worktree");
+        let tools = Tools::new(&root).await.unwrap();
+        tools
+            .register_session_root("ses_w", &tree.path)
+            .await
+            .unwrap();
+        let scoped = tools.with_read_scope("ses_w");
+        assert!(scoped
+            .deny_checkout_redirect("bash", &json!({"command": "git status --porcelain"}))
+            .is_ok());
+        assert!(scoped
+            .deny_checkout_redirect("bash", &json!({"command": "git -C . status"}))
+            .is_ok());
+        for command in [
+            format!("git -C {} checkout -- .", root.display()),
+            "cd .. && git checkout -- .".to_string(),
+            "GIT_DIR=../.git git status".to_string(),
+        ] {
+            assert!(
+                scoped
+                    .deny_checkout_redirect("bash", &json!({ "command": command }))
+                    .is_err(),
+                "{command} must be refused"
+            );
+        }
     }
 
     /// Removal is the destructive half: without a ledger there is no way to know
