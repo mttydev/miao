@@ -5726,7 +5726,7 @@ impl App {
             true => {
                 ComposerHint::from_next_work(miao_engine::state::next_work(&self.state.todos_state))
             }
-            false => ComposerHint::None,
+            false => ComposerHint::Busy,
         };
         // The checklist names the next step when it can; a model prediction only
         // fills the gap a *finished* list leaves. A list held by a wait or a
@@ -9470,7 +9470,10 @@ mod tests {
             transcript: Box::new(Transcript::default()),
             state: Box::new(running),
         });
-        assert_eq!(app.shell.composer.hint, ComposerHint::None);
+        // Busy is its own answer, not `None`: an idle Session with an empty
+        // checklist reports `None` and shows the rotating example, which must
+        // not appear beside a run in flight.
+        assert_eq!(app.shell.composer.hint, ComposerHint::Busy);
 
         // A wait is not nothing: the composer says what the Session is waiting
         // on instead of falling back to an example unrelated to the Session.
