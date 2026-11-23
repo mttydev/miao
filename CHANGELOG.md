@@ -13,6 +13,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-23
+
+### Fixed
+- **engine**: admit a prompt at the Session's placed root (#3363) (`d335ef639e`)
+- **engine**: never interrupt a run whose lease is alive elsewhere (#3362) (`0ca03e6f65`)
+
 ## [0.5.0] - 2026-11-23
 
 ### Added
