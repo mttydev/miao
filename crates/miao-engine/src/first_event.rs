@@ -152,7 +152,7 @@ pub(crate) fn content(event: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{content, semantic_event};
+    use super::semantic_event;
     use serde_json::json;
 
     /// A frame that names the assistant role, or carries only a usage block,
