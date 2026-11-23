@@ -200,7 +200,7 @@ const table = sqliteTable("session", {
 - Run `bun script/set-version.ts X.Y.Z` to update it and synchronize workspace manifests; run without an argument to synchronize existing versions.
 - Builds and source runtime read that version. `MIAO_VERSION` may only assert the same value; automatic bumps and timestamp versions are not supported.
 - CHANGELOG and GitHub releases record publication history, not the current development version.
-- Releases are patches by default. A minor may be chosen earlier for a structural or behavioral change; 99 is the carry point, not the earliest point a minor may be used.
+- Releases are patches by default; increment the third component until 99, then carry to the next minor. A minor bump requires the owner's explicit instruction — do not choose it from a change's size or structure. `0.5.0` is an owner-approved exception, not a precedent.
 
 ## Local install workflow
 

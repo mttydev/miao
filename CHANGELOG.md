@@ -5,10 +5,10 @@ All notable changes to **miao** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and miao adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 When any version component reaches 99, the next release carries to the next
-component (`0.3.99` → `0.4.0`); versions like `0.3.100` do not exist here. A
-minor may also be chosen earlier for a structural or behavioral change that
-changes how Sessions or the workspace work; `0.4.20` → `0.5.0` (per-Session
-worktrees) is one. Other releases are patches.
+component (`0.3.99` → `0.4.0`); versions like `0.3.100` do not exist here.
+Releases are patches by default. A minor bump happens only when the owner
+explicitly asks for one; the assistant does not choose it from a change's size
+or structure. `0.5.0` is the owner-approved exception, not a precedent.
 Releases are tagged `vX.Y.Z`. This changelog summarizes Conventional Commits;
 run `bun script/changelog.ts --version X.Y.Z --write` to add a section here.
 Published release bodies use the curated English and Simplified Chinese pair
