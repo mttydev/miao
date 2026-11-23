@@ -1068,10 +1068,7 @@ impl Anthropic {
             }
         }
         // Internal commit metadata is not part of the provider message schema.
-        let messages: Vec<Value> = messages
-            .into_iter()
-            .map(|message| json!({"role":message.role,"content":message.content}))
-            .collect();
+        let messages = anthropic_turns(messages);
         // The default stays the plain string system prompt and a plain tool
         // catalog; the block form is only needed to carry a cache breakpoint.
         let tools = if self.prompt_cache {
@@ -1126,6 +1123,66 @@ impl Anthropic {
         )
         .await
     }
+}
+
+/// Anthropic pairs an assistant turn's `tool_use` blocks with the
+/// `tool_result` blocks that open the next user message, and only the leading
+/// run of results answers them. The engine commits each settled call as its own
+/// user message, so a turn with parallel calls otherwise reaches the API as
+/// several user messages and is rejected with "tool_use ids were found without
+/// tool_result blocks immediately after". Merging consecutive user turns
+/// restores one answer.
+fn anthropic_turns(messages: Vec<Message>) -> Vec<Value> {
+    let mut turns: Vec<Value> = Vec::with_capacity(messages.len());
+    for message in messages {
+        let mut content = match message.content {
+            Value::Array(content) => content,
+            content => {
+                turns.push(json!({"role":message.role,"content":content}));
+                continue;
+            }
+        };
+        if message.role == "user" {
+            attach_result_media(&mut content);
+        }
+        match turns.last_mut() {
+            Some(turn) if message.role == "user" && turn["role"] == "user" => {
+                turn["content"]
+                    .as_array_mut()
+                    .expect("an Anthropic user turn was validated as blocks")
+                    .extend(content);
+            }
+            _ => turns.push(json!({"role":message.role,"content":content})),
+        }
+    }
+    turns
+}
+
+/// A media block stored right after a tool result is that call's output, not a
+/// separate user attachment. Anthropic wants it inside the result: a sibling
+/// block ends the run of results that answers the assistant turn.
+fn attach_result_media(parts: &mut Vec<Value>) {
+    let mut grouped: Vec<Value> = Vec::with_capacity(parts.len());
+    for part in parts.drain(..) {
+        if matches!(part["type"].as_str(), Some("image" | "document")) {
+            if let Some(result) = grouped
+                .last_mut()
+                .filter(|last| last["type"] == "tool_result")
+            {
+                let mut content = match result["content"].take() {
+                    Value::Array(content) => content,
+                    content => {
+                        vec![json!({"type":"text","text":content.as_str().unwrap_or_default()})]
+                    }
+                };
+                content.push(part);
+                result["content"] = Value::Array(content);
+                continue;
+            }
+        }
+        grouped.push(part);
+    }
+    *parts = grouped;
 }
 
 #[async_trait]

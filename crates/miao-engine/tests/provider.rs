@@ -365,6 +365,83 @@ async fn anthropic_defaults_keep_the_plain_system_prompt_uncached() {
 }
 
 #[tokio::test]
+async fn anthropic_merges_split_tool_results_and_keeps_media_inside_the_result() {
+    let (url, mut requests, server) = common::endpoint(vec![(200, text_stream())]).await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let image = json!({"type":"image","mime":"image/png","data":"aGk="});
+    let opened = ModelRequest {
+        system: String::new(),
+        messages: vec![
+            Message {
+                role: "user".into(),
+                content: json!([{"type":"text","text":"看两张图"}]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            Message {
+                role: "assistant".into(),
+                content: json!([
+                    {"type":"tool_use","id":"call_a","name":"read_image","input":{"path":"a.png"}},
+                    {"type":"tool_use","id":"call_b","name":"read_image","input":{"path":"b.png"}}
+                ]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            Message {
+                role: "user".into(),
+                content: json!([
+                    {"type":"tool_result","tool_use_id":"call_a","content":"first","is_error":false},
+                    image.clone()
+                ]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            Message {
+                role: "user".into(),
+                content: json!([
+                    {"type":"tool_result","tool_use_id":"call_b","content":"second","is_error":false},
+                    image
+                ]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+            Message {
+                role: "user".into(),
+                content: json!([{"type":"text","text":"continue"}]),
+                checkpoint: None,
+                recorded_at_ms: None,
+            },
+        ],
+        tools: vec![],
+    };
+    let (progress, _receive) = mpsc::channel(64);
+    provider
+        .stream(opened, progress, CancellationToken::new())
+        .await
+        .unwrap();
+    let body = requests.recv().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        3,
+        "the two split results must arrive as one answer: {body}"
+    );
+    let content = messages[2]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3, "{body}");
+    assert_eq!(content[0]["type"], "tool_result");
+    assert_eq!(content[0]["tool_use_id"], "call_a");
+    assert_eq!(
+        content[0]["content"][0],
+        json!({"type":"text","text":"first"})
+    );
+    assert_eq!(content[0]["content"][1]["type"], "image");
+    assert_eq!(content[1]["tool_use_id"], "call_b");
+    assert_eq!(content[1]["content"][1]["type"], "image");
+    assert_eq!(content[2], json!({"type":"text","text":"continue"}));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn openai_chat_tolerates_explicit_null_delta_fields() {
     // Captured from the opencode-go inference gateway serving mimo-v2.6-flash
     // on 2026-10-23: every frame carries explicit nulls for absent delta
