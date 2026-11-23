@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ratatui::buffer::CellDiffOption;
@@ -1931,9 +1931,13 @@ pub struct Home {
     /// A configuration problem that outlives one load: painted the same way,
     /// in the warning colour.
     warning: Option<String>,
-    /// `prompt.max_width`: the TS home caps the landing prompt and leaves the
-    /// Session's full width, so the cap lives here rather than on the composer.
+    /// `prompt.max_width`: a fixed cap the landing band still honours; the
+    /// default fills the column the Session composer fills.
     prompt_width: crate::config::PromptWidth,
+    /// The directory the TUI was started in, named on the landing header the
+    /// way a terminal prompt names it. The App owns the real workspace; the
+    /// header only paints it.
+    workspace: PathBuf,
     /// When the operator last typed, pasted or clicked. The idle light rests
     /// after a stretch of no input, the way the product's logo does, so a home
     /// screen left open stops repainting instead of running forever.
@@ -1959,6 +1963,7 @@ impl Home {
             notice: None,
             warning: None,
             prompt_width: crate::config::PromptWidth::default(),
+            workspace: PathBuf::new(),
             footer_hits: Vec::new(),
             embedded_footer: crate::mtty_state::host_footer_active(),
             last_input: Instant::now(),
@@ -2045,6 +2050,11 @@ impl Home {
         self.prompt_width = width;
     }
 
+    /// Name the directory the landing header paints.
+    pub fn set_workspace(&mut self, workspace: PathBuf) {
+        self.workspace = workspace;
+    }
+
     pub fn set_notice(&mut self, notice: Option<String>) {
         self.notice = notice;
     }
@@ -2073,10 +2083,12 @@ impl Home {
         self.theme = theme;
     }
 
-    /// The launcher screen, drawn the way the TS home draws it: the wordmark
-    /// banner and the version centred in the vertical leftover, the prompt
-    /// beneath, and any notice under that. There is no session list here —
-    /// history lives in the session dialog, reachable from the prompt.
+    /// The launcher screen, drawn like the Session it opens into: the mark,
+    /// the build, the model and the workspace sit in a header at the top
+    /// left, and the prompt is pinned to the bottom rows the Session composer
+    /// uses, so the input the operator types into does not move when the
+    /// first Session opens. There is no session list here — history lives in
+    /// the session dialog, reachable from the prompt.
     pub fn render(
         &mut self,
         frame: &mut Frame,
@@ -2089,7 +2101,6 @@ impl Home {
         // the merged-footer wire repeated the facts hundreds of times.
         self.footer_hits.clear();
         let palette = self.theme.palette;
-        let width = area.width as usize;
         // The page ground: every other row is painted by something, and the
         // cells around the banner would otherwise keep the terminal's own
         // background, a band that matches nothing beside it.
@@ -2106,14 +2117,16 @@ impl Home {
             None => env!("CARGO_PKG_VERSION"),
         };
 
+        // The band fills the column the Session composer fills; a fixed
+        // `prompt.max_width` still caps it.
         let prompt_width = self.prompt_width.resolve(area.width);
         // The band wraps at the landing prompt's own width, so a long draft
         // grows it the same way it grows the Session composer; sizing it from
         // the whole window left it one row tall and clipped.
         let prompt_h = crate::pane::composer_height(composer, prompt_width, area.height).max(3);
         // The composer's own notice used to ride the box's border title. The
-        // landing band has no title, so it is painted under the prompt the way
-        // the product shows a notice there: one line, in the accent tone.
+        // landing band has no title, so notices read like the home's own
+        // warnings: one line each under the header, in the tone of their kind.
         let notices = composer
             .notice
             .iter()
@@ -2130,58 +2143,84 @@ impl Home {
             )
             .collect::<Vec<_>>();
 
-        // Vertical, following the TS home's flex stack
-        // (`packages/tui/src/routes/home.tsx`):
-        //
-        //   flexGrow 1  ─┐
-        //   height 4    ─┤ spacer above the banner
-        //   logo + version, prompt          ← the used block
-        //   height 1    ─┤ one blank row
-        //   flexGrow 1  ─┘
-        //
-        // The two `flexGrow` children split the leftover evenly, so the group
-        // sits centred and never higher than half a screen down. The previous
-        // rule (`free * 2 / 5`) pushed it slightly below centre on every
-        // height, which is why nothing could reproduce the TS layout.
-        let used = banner.height() + 1 + 1 + 1 + prompt_h as usize + notices.len();
-        let free = (area.height as usize).saturating_sub(used);
-        let gap_top = free / 2;
-
-        let y = area.y as usize + gap_top.min(free);
-        // The banner centres as one block, its columns carrying their own ink;
-        // the version rides under it, then one blank row, then the prompt.
-        let banner_x = width.saturating_sub(banner.width()) / 2;
+        // The header, two cells in from the edge — the offset the Session's
+        // facts row uses — so the mark, the build and the facts align on one
+        // column the way a terminal prompt stacks them.
+        let header_x = area.x + 2;
+        let mut y = area.y + 1;
         for row in 0..banner.height() {
             frame.render_widget(
                 Paragraph::new(banner.line(row, now, shimmer, &self.theme)),
                 Rect {
-                    x: area.x + banner_x as u16,
-                    y: (y + row) as u16,
+                    x: header_x,
+                    y: y + row as u16,
                     width: banner.width() as u16,
                     height: 1,
                 },
             );
         }
-        let version = format!("v{version}");
-        let pad = width.saturating_sub(version.width()) / 2;
-        frame.render_widget(
-            Paragraph::new(Span::styled(version, Style::new().fg(palette.text_muted))),
-            Rect {
-                x: area.x + pad as u16,
-                y: (y + banner.height()) as u16,
-                height: 1,
-                ..area
-            },
+        y += banner.height() as u16 + 1;
+        let header_line = |frame: &mut Frame, y: u16, line: Line<'static>| {
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect {
+                    x: header_x,
+                    y,
+                    width: area.width.saturating_sub(2),
+                    height: 1,
+                },
+            );
+        };
+        header_line(
+            frame,
+            y,
+            Line::from(Span::styled(
+                format!("miao v{version}"),
+                Style::new().fg(palette.text),
+            )),
         );
-        let prompt_x = width.saturating_sub(prompt_width as usize) / 2;
+        y += 1;
+        if let Some(model) = &status.model {
+            let mut line = Vec::new();
+            line.push(Span::styled(model.clone(), Style::new().fg(palette.text)));
+            if let Some(provider) = &status.provider {
+                line.push(Span::styled(
+                    format!(" · {provider}"),
+                    Style::new().fg(palette.text_muted),
+                ));
+            }
+            header_line(frame, y, Line::from(line));
+            y += 1;
+        }
+        if !self.workspace.as_os_str().is_empty() {
+            header_line(
+                frame,
+                y,
+                Line::from(Span::styled(
+                    self.workspace.display().to_string(),
+                    Style::new().fg(palette.text_muted),
+                )),
+            );
+            y += 1;
+        }
+        for (notice, ink) in &notices {
+            header_line(
+                frame,
+                y,
+                Line::from(Span::styled(notice.clone(), Style::new().fg(*ink))),
+            );
+            y += 1;
+        }
+
+        // The prompt takes the bottom rows, the seat the Session composer
+        // keeps, so the band the operator types into stays put across the
+        // first submit. A window too short for header and band lets the band
+        // win: it paints last, over the rows it shares.
+        let prompt_h = prompt_h.min(area.height);
         let prompt_area = Rect {
-            x: area.x + prompt_x as u16,
-            // The banner, the version and one blank row above the band, the
-            // TypeScript prompt's `paddingTop`.
-            y: (y + banner.height() + 1 + 1) as u16,
+            x: area.x,
+            y: area.bottom().saturating_sub(prompt_h),
             width: prompt_width,
-            // The height already carries the rules, so adding them again left
-            // an empty row under a one-line prompt.
             height: prompt_h,
         };
         self.composer_text = render_home_composer(
@@ -2193,17 +2232,6 @@ impl Home {
             Some(&ComposerFooter { status }),
             self.embedded_footer,
         );
-        for (offset, (notice, ink)) in notices.iter().enumerate() {
-            frame.render_widget(
-                Paragraph::new(Span::styled(notice.clone(), Style::new().fg(*ink))),
-                Rect {
-                    x: prompt_area.x,
-                    y: prompt_area.y + prompt_h + offset as u16,
-                    width: prompt_area.width,
-                    height: 1,
-                },
-            );
-        }
     }
 }
 
@@ -3210,10 +3238,11 @@ fn render_home_composer(
         );
     }
     // The landing prompt absorbs the status strip the same way the Session
-    // box does: its facts sit on the bottom rule. The running build keeps the
-    // banner's own `v` line as its home here — the landing screen is where an
-    // operator verifies an upgrade before any Session exists, and a caption
-    // that eats into the rule would leave the band's own width unmeasurable.
+    // box does: its facts sit on the bottom rule. The running build keeps
+    // the landing header's own line as its home — the landing screen is
+    // where an operator verifies an upgrade before any Session exists, and
+    // a caption that eats into the rule would leave the band's own width
+    // unmeasurable.
     if let Some(footer) = footer {
         let row = area.y + area.height - 1;
         let mut pairs = footer_status_spans(footer.status, theme);
@@ -8095,10 +8124,10 @@ mod tests {
         assert_eq!(composer_height(&composer, 75, 12), 2 + 6);
     }
 
-    /// The landing prompt is the product's open band: 75 columns, a rule above
-    /// and one below, no sides, and the draft two cells in from either edge on
-    /// the element ground. The closed box it used to be read as a small,
-    /// separate widget rather than the home's own input.
+    /// The landing prompt is the product's open band: a rule above and one
+    /// below, no sides, and the draft two cells in from either edge on the
+    /// element ground. Pinned to the window's last rows, left-aligned — the
+    /// seat the Session composer keeps — and the header sits above it.
     #[test]
     fn the_landing_prompt_is_the_products_open_band() {
         let theme = home_theme();
@@ -8126,19 +8155,22 @@ mod tests {
         assert_eq!(rules.len(), 2, "one rule above the draft and one below");
         let (top, bottom) = (rules[0], rules[1]);
         assert_eq!(bottom - top, 2, "the band is a rule, the draft, a rule");
-        // The band is capped at the TypeScript default and centred on the
-        // window, so a wide terminal does not stretch the input.
-        assert_eq!(row(top).find('─'), Some(22), "{:?}", row(top));
-        assert_eq!(row(top).trim_end().chars().count(), 97);
-        // No vertical borders: the cells beside the band stay blank.
-        assert_eq!(buffer[(21, top)].symbol(), " ");
-        assert_eq!(buffer[(97, top)].symbol(), " ");
+        assert_eq!(
+            bottom, 29,
+            "the band pins to the window's last row, the Session composer's seat"
+        );
+        // The band is capped at the fixed width and sits at the left edge,
+        // where the Session composer starts.
+        assert_eq!(row(top).find('─'), Some(0), "{:?}", row(top));
+        assert_eq!(row(top).trim_end().chars().count(), 75);
+        // No vertical borders: the cell beside the band stays blank.
+        assert_eq!(buffer[(75, top)].symbol(), " ");
         // A draft starts two cells in from the edge, on the element ground.
         // The empty band's hint keeps the caret's cell to itself — a block
         // cursor would cut a wide first glyph in half — so it reads one cell
         // right of that, which the second draw below pins.
-        assert_eq!(buffer[(25, top + 1)].symbol(), "A");
-        assert_eq!(buffer[(25, top + 1)].bg, theme.palette.element);
+        assert_eq!(buffer[(3, top + 1)].symbol(), "A");
+        assert_eq!(buffer[(3, top + 1)].bg, theme.palette.element);
         assert!(row(top + 1).contains("Ask anything"), "{:?}", row(top + 1));
         let mut typed = crate::editor::Composer::new(Path::new("."));
         typed.editor.insert_str("Ask");
@@ -8146,21 +8178,22 @@ mod tests {
             .draw(|frame| home.render(frame, frame.area(), &mut typed, &StatusStrip::default()))
             .expect("draw");
         assert_eq!(
-            terminal.backend().buffer()[(24, top + 1)].symbol(),
+            terminal.backend().buffer()[(2, top + 1)].symbol(),
             "A",
             "a draft starts two cells in from the edge"
         );
-        // The banner sits above it, centred as one block.
-        let banner_row = row(top - 6);
+        // The header sits at the top left: the mark, then the build under it.
+        let banner_row = row(2);
         assert!(banner_row.contains("/\\/\\"), "{banner_row:?}");
-        assert_eq!(banner_row.find('/'), Some(46), "{banner_row:?}");
+        assert_eq!(banner_row.find('/'), Some(3), "{banner_row:?}");
         assert!(banner_row.contains('█'), "{banner_row:?}");
-        // The default scales with the window instead of sitting at the
-        // product's fixed 75 columns.
+        assert!(row(7).contains("miao v"), "{:?}", row(7));
+        // The default fills the column instead of sitting at the product's
+        // fixed 75 columns: the width the Session composer keeps.
         assert_eq!(
             crate::config::PromptWidth::default().resolve(120),
-            84,
-            "the default band is 70% of a 120-column window"
+            120,
+            "the default band fills the column"
         );
     }
 
@@ -8510,8 +8543,8 @@ mod tests {
     }
 
     /// The landing prompt carries the facts on its bottom rule when it has
-    /// them, and keeps the rule whole when it does not — the banner's own `v`
-    /// line is the landing screen's build marker.
+    /// them, and keeps the rule whole when it does not — the header's own
+    /// build line is the landing screen's build marker.
     #[test]
     fn the_landing_prompt_carries_the_run_facts_on_its_rule() {
         let theme = home_theme();
@@ -11504,16 +11537,24 @@ mod draft_gap_tests {
                 home.render(frame, frame.area(), &mut composer, &status);
             })
             .expect("draw");
-        let painted: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        // The host footer owns the strip's facts in embedded mode, so the
+        // band's rule stays bare. The landing header still names the model —
+        // that line is the header's own job, not the strip's.
+        let row = |y: u16| {
+            (0..80u16)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let rule_row = 23;
         assert!(
-            !painted.contains("volcengine"),
-            "the landing facts leaked onto the rule: {painted}"
+            row(rule_row).contains('─'),
+            "the band pins to the window's last row: {:?}",
+            row(rule_row)
+        );
+        assert!(
+            !row(rule_row).contains("volcengine"),
+            "the landing facts leaked onto the rule: {:?}",
+            row(rule_row)
         );
         let wire = home
             .footer_wire(&status)
