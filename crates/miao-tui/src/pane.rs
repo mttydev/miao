@@ -3817,23 +3817,28 @@ const CONTEXT_BAR_EMPTY: char = '░';
 const CONTEXT_BAR_MAX: usize = 24;
 const CONTEXT_BAR_MIN: usize = 6;
 
-/// The `filled` share of `total` as a bar of at most `width` cells. Zero total
-/// paints nothing rather than a full bar: an unknown ceiling is not a full one.
-fn context_bar(filled: u64, total: u64, width: usize) -> String {
+/// The `filled` share of `total` as `(filled cells, total cells)`.
+///
+/// The two runs are reported apart because they carry different ink: one colour
+/// for both made the whole bar read as full, and the filled share — the only
+/// part the reader needs — disappeared into the empty rest.
+///
+/// A non-zero occupancy keeps at least one cell. Truncating the share painted a
+/// completely empty bar beside a figure that said a tenth of the window was
+/// used; on the six-cell bar a narrow column leaves, that hid every reading
+/// below seventeen percent. Zero total paints nothing rather than a full bar:
+/// an unknown ceiling is not a full one.
+fn context_bar(filled: u64, total: u64, width: usize) -> (usize, usize) {
     let cells = width.clamp(CONTEXT_BAR_MIN, CONTEXT_BAR_MAX);
     if total == 0 {
-        return String::new();
+        return (0, 0);
     }
     let share = (filled.min(total) as u128 * cells as u128 / total as u128) as usize;
-    let mut bar = String::with_capacity(cells);
-    for cell in 0..cells {
-        bar.push(if cell < share {
-            CONTEXT_BAR_GLYPH
-        } else {
-            CONTEXT_BAR_EMPTY
-        });
-    }
-    bar
+    let share = match filled {
+        0 => 0,
+        _ => share.max(1),
+    };
+    (share.min(cells), cells)
 }
 
 /// A section header: upper case, bold, tinted with a syntax hue so stacked
@@ -4515,20 +4520,30 @@ impl Pane for SidebarPane {
                         // The figures state the fraction; the bar beside them
                         // answers "how close is compaction" without arithmetic.
                         // It rides the same row so the column keeps its height,
-                        // and it takes only the room the figures left.
+                        // and it takes only the room the figures left. The
+                        // filled share and the empty rest get separate ink: one
+                        // colour for both painted a solid block whatever the
+                        // figure said, which is the opposite of a gauge.
                         if let Some(line) = lines.last_mut() {
                             let used = line.width();
                             let room = text_width.saturating_sub(used + 2);
                             if room >= CONTEXT_BAR_MIN {
-                                line.spans.push(Span::styled("  ", Style::new()));
-                                line.spans.push(Span::styled(
-                                    context_bar(tokens, window, room),
-                                    Style::new().fg(if percent >= 80 {
-                                        palette.warning
-                                    } else {
-                                        palette.accent
-                                    }),
-                                ));
+                                let (filled, cells) = context_bar(tokens, window, room);
+                                if cells > 0 {
+                                    line.spans.push(Span::styled("  ", Style::new()));
+                                    line.spans.push(Span::styled(
+                                        CONTEXT_BAR_GLYPH.to_string().repeat(filled),
+                                        Style::new().fg(if percent >= 80 {
+                                            palette.warning
+                                        } else {
+                                            palette.accent
+                                        }),
+                                    ));
+                                    line.spans.push(Span::styled(
+                                        CONTEXT_BAR_EMPTY.to_string().repeat(cells - filled),
+                                        Style::new().fg(palette.element),
+                                    ));
+                                }
                             }
                         }
                         if let Some(row) = self.hover_rows.last_mut() {
@@ -10399,31 +10414,46 @@ mod tests {
     /// when the ceiling is unknown.
     #[test]
     fn the_context_bar_fills_by_the_share_of_the_window() {
-        let bar = context_bar(500, 1000, 10);
-        assert_eq!(
-            bar.chars().count(),
-            CONTEXT_BAR_MIN.clamp(10, CONTEXT_BAR_MAX)
-        );
-        assert_eq!(bar.matches(CONTEXT_BAR_GLYPH).count(), 5, "{bar:?}");
-        assert_eq!(bar.matches(CONTEXT_BAR_EMPTY).count(), 5, "{bar:?}");
+        let (filled, cells) = context_bar(500, 1000, 10);
+        assert_eq!(cells, CONTEXT_BAR_MIN.clamp(10, CONTEXT_BAR_MAX));
+        assert_eq!(filled, 5, "half the window fills half the bar");
 
-        let full = context_bar(1_000, 1_000, 10);
-        assert_eq!(full.matches(CONTEXT_BAR_GLYPH).count(), 10, "{full:?}");
-        let overflow = context_bar(2_000, 1_000, 10);
+        assert_eq!(context_bar(1_000, 1_000, 10), (10, 10));
         assert_eq!(
-            overflow.matches(CONTEXT_BAR_GLYPH).count(),
-            10,
+            context_bar(2_000, 1_000, 10),
+            (10, 10),
             "an overflowed ceiling is full, never a bar past its width"
         );
-        let empty = context_bar(0, 1_000, 10);
-        assert_eq!(empty.matches(CONTEXT_BAR_GLYPH).count(), 0, "{empty:?}");
-        assert!(
-            context_bar(10, 0, 10).is_empty(),
+        assert_eq!(context_bar(0, 1_000, 10), (0, 10));
+        assert_eq!(
+            context_bar(10, 0, 10),
+            (0, 0),
             "an unknown ceiling is not a full bar"
         );
         // The width is bounded so the bar can never push the figures off the row.
-        assert_eq!(context_bar(1, 2, 100).chars().count(), CONTEXT_BAR_MAX);
-        assert_eq!(context_bar(1, 2, 1).chars().count(), CONTEXT_BAR_MIN);
+        assert_eq!(context_bar(1, 2, 100).1, CONTEXT_BAR_MAX);
+        assert_eq!(context_bar(1, 2, 1).1, CONTEXT_BAR_MIN);
+    }
+
+    /// A small occupancy must still show. Truncating the share left a bar that
+    /// painted nothing while the figures beside it said a tenth of the window
+    /// was in use — the same empty bar for 1% and for 16%, on the shortest bar
+    /// a narrow column leaves. The reading has to move with the percentage.
+    #[test]
+    fn a_small_occupancy_keeps_a_visible_cell() {
+        for percent in [1_u64, 5, 10, 16] {
+            let (filled, cells) = context_bar(percent, 100, CONTEXT_BAR_MIN);
+            assert_eq!(filled, 1, "{percent}% paints at least one cell");
+            assert_eq!(cells, CONTEXT_BAR_MIN);
+        }
+        // The share still grows as the figure does, so the bar moves.
+        let (low, _) = context_bar(10, 100, CONTEXT_BAR_MAX);
+        let (mid, _) = context_bar(50, 100, CONTEXT_BAR_MAX);
+        let (high, _) = context_bar(90, 100, CONTEXT_BAR_MAX);
+        assert!(
+            low < mid && mid < high,
+            "the filled run has to track the window: {low} < {mid} < {high}"
+        );
     }
 
     /// The row carries the bar beside its figures, and the bar turns to the
@@ -10485,14 +10515,54 @@ mod tests {
             .position(|row| row.contains("context "))
             .expect("row")
             * 60;
-        let warned = terminal.backend().buffer().content[row..row + 60]
+        // The filled share and the empty rest must not share one colour: with
+        // one ink for both the whole bar reads as full and the gauge says
+        // nothing.
+        let painted_ink = |glyph: char| {
+            terminal.backend().buffer().content[row..row + 60]
+                .iter()
+                .filter(|cell| cell.symbol() == glyph.to_string())
+                .map(|cell| cell.style().fg)
+                .collect::<Vec<_>>()
+        };
+        let filled_ink = painted_ink(CONTEXT_BAR_GLYPH);
+        let empty_ink = painted_ink(CONTEXT_BAR_EMPTY);
+        assert!(!filled_ink.is_empty() && !empty_ink.is_empty(), "{line:?}");
+        assert!(
+            filled_ink
+                .iter()
+                .all(|ink| *ink == Some(home_theme().palette.warning)),
+            "the bar warns on the compaction rung: {line:?}"
+        );
+        assert!(
+            empty_ink
+                .iter()
+                .all(|ink| *ink == Some(home_theme().palette.element)),
+            "the empty rest is a quieter ink than the share: {line:?}"
+        );
+        assert_ne!(
+            filled_ink[0], empty_ink[0],
+            "the gauge cannot be one solid block: {line:?}"
+        );
+
+        // A tenth of the window is a reading, not an empty bar.
+        let mut pane = sidebar(summary(967_200, 105_000));
+        terminal
+            .draw(|frame| pane.render(frame, frame.area()))
+            .expect("draw");
+        let painted = rows(&mut terminal);
+        let line = painted
             .iter()
-            .filter(|cell| {
-                cell.symbol() == CONTEXT_BAR_GLYPH.to_string()
-                    || cell.symbol() == CONTEXT_BAR_EMPTY.to_string()
-            })
-            .all(|cell| cell.style().fg == Some(home_theme().palette.warning));
-        assert!(warned, "the bar warns on the compaction rung: {line:?}");
+            .find(|row| row.contains("context "))
+            .expect("the occupancy row");
+        assert!(
+            line.contains("10%"),
+            "the row keeps the figure it was drawn for: {line:?}"
+        );
+        assert!(
+            line.matches(CONTEXT_BAR_GLYPH).count() >= 1,
+            "ten percent fills at least one cell: {line:?}"
+        );
 
         let mut pane = sidebar(summary(1_000_000, 200_000));
         terminal
