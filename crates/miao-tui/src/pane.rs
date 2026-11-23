@@ -2160,7 +2160,7 @@ impl Home {
             );
         }
         y += banner.height() as u16 + 1;
-        let mut header_line = |frame: &mut Frame, y: u16, line: Line<'static>| {
+        let header_line = |frame: &mut Frame, y: u16, line: Line<'static>| {
             frame.render_widget(
                 Paragraph::new(line),
                 Rect {
