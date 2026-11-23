@@ -805,12 +805,14 @@ impl Shell {
                     Some(status_area),
                 )
             };
-        // The landing keeps the body for its header while the transcript has
-        // nothing to say; otherwise this is the Session's body, rows and all.
-        match landing.as_mut().filter(|_| self.transcript.is_empty()) {
-            Some(home) => home.paint_header(frame, body_area, &self.status),
-            None => self.transcript.render(frame, body_area),
+        // The landing header is the transcript's first block, not a separate
+        // screen. The first answer appends below it and later rows scroll it
+        // up, so submitting does not clear the page or replace the welcome.
+        if let Some(home) = landing.as_mut() {
+            let header = home.header_rows(&self.status);
+            self.transcript.set_header(header);
         }
+        self.transcript.render(frame, body_area);
         if let (Some(sidebar), Some(sidebar_area)) = (self.sidebar.as_mut(), sidebar_area) {
             sidebar.render(frame, sidebar_area);
         }
@@ -996,6 +998,13 @@ pub struct TranscriptPane {
     /// row `i`, so a projection that changes only its tail drops the wrapped
     /// rows after the change and keeps the rest.
     body: Vec<Line<'static>>,
+    /// The landing header as the first rows of `body`. It scrolls with the
+    /// conversation instead of being replaced by the first projection, so the
+    /// welcome does not vanish (and the screen does not look cleared) when the
+    /// first answer arrives.
+    header: Vec<Row>,
+    header_body_len: usize,
+    header_width: Option<u16>,
     body_rows: usize,
     body_ends: Vec<usize>,
     body_width: Option<u16>,
@@ -1067,6 +1076,9 @@ impl TranscriptPane {
             draft_dirty: false,
             draft_built: None,
             body: Vec::new(),
+            header: Vec::new(),
+            header_body_len: 0,
+            header_width: None,
             body_rows: 0,
             body_ends: Vec::new(),
             body_width: None,
@@ -1102,9 +1114,29 @@ impl TranscriptPane {
             .count();
         self.body_rows = self.body_rows.min(keep);
         self.body_ends.truncate(self.body_rows);
-        self.body
-            .truncate(self.body_ends.last().copied().unwrap_or(0));
+        self.body.truncate(
+            self.body_ends
+                .last()
+                .copied()
+                .unwrap_or(self.header_body_len),
+        );
         self.rows = rows;
+    }
+
+    /// Install the landing header as the transcript's first block. The header
+    /// is part of the scrollable body: the first answer appends below it and
+    /// later rows push it up, the way Claude Code keeps its welcome with the
+    /// conversation instead of switching pages.
+    pub fn set_header(&mut self, header: Vec<Row>) {
+        if self.header == header {
+            return;
+        }
+        self.header = header;
+        self.header_width = None;
+        self.body.clear();
+        self.body_ends.clear();
+        self.body_rows = 0;
+        self.body_width = None;
     }
 
     /// The active children, one block each: a title, the live run clock and
@@ -1290,11 +1322,18 @@ impl Pane for TranscriptPane {
         // between two edges that the rows around it touch.
         let content = area;
         let resized = content.width != self.width;
-        if self.body_width != Some(content.width) {
+        if self.body_width != Some(content.width) || self.header_width != Some(content.width) {
             self.body.clear();
             self.body_ends.clear();
             self.body_rows = 0;
             self.body_width = Some(content.width);
+            self.header_width = Some(content.width);
+            self.header_body_len = 0;
+            if !self.header.is_empty() {
+                let wrapped = wrap_rows(&self.header, content.width);
+                self.header_body_len = wrapped.len();
+                self.body.extend(wrapped);
+            }
         }
         while self.body_rows < self.rows.len() {
             let wrapped = {
@@ -2043,89 +2082,54 @@ impl Home {
         self.theme = theme;
     }
 
-    /// The landing header, painted into the transcript's body while the
-    /// transcript has no rows of its own: the mark, the build, the model the
-    /// next prompt would run on, the workspace, and any problem that outlives
-    /// a load. The landing shares the Session's screen — the same columns,
-    /// sidebar, composer box and facts row — so the first submit changes
-    /// nothing on screen but the words, and the first answer claims the body
-    /// from this block the way a transcript claims its welcome.
-    pub fn paint_header(&mut self, frame: &mut Frame, area: Rect, status: &StatusStrip) {
-        // The body ground: the transcript would have painted it, so the cells
-        // the header leaves otherwise keep the terminal's own background.
+    /// The landing header as the transcript's first rows: the mark, the build,
+    /// the model the next prompt would run on, the workspace, and any problem
+    /// that outlives a load. The rows live in the transcript body, so the first
+    /// answer appends below them and later rows scroll them up instead of
+    /// replacing the welcome with a different screen.
+    pub fn header_rows(&self, status: &StatusStrip) -> Vec<Row> {
         let palette = self.theme.palette;
-        frame.render_widget(
-            Block::new().style(Style::new().bg(palette.background)),
-            area,
-        );
         let banner = crate::banner::Banner::new();
         let shimmer = self.shimmering();
         let now = now_ms();
-
         let version = match option_env!("MIAO_TUI_VERSION") {
             Some(version) => version,
             None => env!("CARGO_PKG_VERSION"),
         };
-
-        // The header, two cells in from the edge — the offset the Session's
-        // facts row uses — so the mark, the build and the facts align on one
-        // column the way a terminal prompt stacks them.
-        let header_x = area.x + 2;
-        let mut y = area.y + 1;
-        for row in 0..banner.height() {
-            frame.render_widget(
-                Paragraph::new(banner.line(row, now, shimmer, &self.theme)),
-                Rect {
-                    x: header_x,
-                    y: y + row as u16,
-                    width: banner.width() as u16,
-                    height: 1,
-                },
-            );
-        }
-        y += banner.height() as u16 + 1;
-        let header_line = |frame: &mut Frame, y: u16, line: Line<'static>| {
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect {
-                    x: header_x,
-                    y,
-                    width: area.width.saturating_sub(2),
-                    height: 1,
-                },
-            );
+        let indent = || Span::raw("  ");
+        let line = |mut spans: Vec<Span<'static>>| {
+            spans.insert(0, indent());
+            Row::plain(Line::from(spans))
         };
-        header_line(
-            frame,
-            y,
-            Line::from(Span::styled(
-                format!("miao v{version}"),
-                Style::new().fg(palette.text),
-            )),
-        );
-        y += 1;
+
+        // One blank row above the mark, the mark, one blank row below it, then
+        // the stack a terminal prompt shows.
+        let mut rows = vec![Row::plain(Line::default())];
+        for row in 0..banner.height() {
+            let mut spans = vec![indent()];
+            spans.extend(banner.line(row, now, shimmer, &self.theme).spans);
+            rows.push(Row::plain(Line::from(spans)));
+        }
+        rows.push(Row::plain(Line::default()));
+        rows.push(line(vec![Span::styled(
+            format!("miao v{version}"),
+            Style::new().fg(palette.text),
+        )]));
         if let Some(model) = &status.model {
-            let mut line = Vec::new();
-            line.push(Span::styled(model.clone(), Style::new().fg(palette.text)));
+            let mut spans = vec![Span::styled(model.clone(), Style::new().fg(palette.text))];
             if let Some(provider) = &status.provider {
-                line.push(Span::styled(
+                spans.push(Span::styled(
                     format!(" · {provider}"),
                     Style::new().fg(palette.text_muted),
                 ));
             }
-            header_line(frame, y, Line::from(line));
-            y += 1;
+            rows.push(line(spans));
         }
         if !self.workspace.as_os_str().is_empty() {
-            header_line(
-                frame,
-                y,
-                Line::from(Span::styled(
-                    self.workspace.display().to_string(),
-                    Style::new().fg(palette.text_muted),
-                )),
-            );
-            y += 1;
+            rows.push(line(vec![Span::styled(
+                self.workspace.display().to_string(),
+                Style::new().fg(palette.text_muted),
+            )]));
         }
         for (notice, ink) in self
             .warning
@@ -2133,13 +2137,12 @@ impl Home {
             .map(|warning| (warning, palette.warning))
             .chain(self.notice.iter().map(|notice| (notice, palette.error)))
         {
-            header_line(
-                frame,
-                y,
-                Line::from(Span::styled(notice.clone(), Style::new().fg(ink))),
-            );
-            y += 1;
+            rows.push(line(vec![Span::styled(
+                notice.clone(),
+                Style::new().fg(ink),
+            )]));
         }
+        rows
     }
 }
 
@@ -8483,6 +8486,65 @@ mod tests {
             empty_row(height - 1).contains("miao"),
             "the build marker survives an empty strip: {:?}",
             empty_row(height - 1)
+        );
+    }
+
+    /// The landing header is the transcript's first block. The first
+    /// projection appends below it instead of replacing it, so submitting does
+    /// not look like a clear or a jump to another page.
+    #[test]
+    fn the_first_projection_keeps_the_landing_header_above_it() {
+        let theme = home_theme();
+        let mut shell = Shell::new(Path::new("/repo/landing"), theme.clone());
+        let mut home = Home::new(theme);
+        home.set_workspace(std::path::PathBuf::from("/repo/landing"));
+        shell.status.model = Some("glm-5".into());
+        let height = 24u16;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height))
+            .expect("terminal");
+        terminal
+            .draw(|frame| shell.render_landing(frame, &mut home))
+            .expect("draw");
+        let rows = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            (0..height)
+                .map(|y| {
+                    (0..80u16)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let landing = rows(&terminal);
+        let header = landing
+            .iter()
+            .position(|row| row.contains("miao v"))
+            .expect("the landing header paints");
+        assert!(landing.iter().any(|row| row.contains("/repo/landing")));
+        assert!(landing.iter().any(|row| row.contains("glm-5")));
+
+        // The first projection is one user turn. It joins the same body below
+        // the header rather than claiming the body for itself.
+        shell.set_transcript(&Transcript {
+            entries: vec![Entry::User {
+                text: "hello".into(),
+                seq: 1,
+            }],
+            ..Transcript::default()
+        });
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let after = rows(&terminal);
+        let still_header = after
+            .iter()
+            .position(|row| row.contains("miao v"))
+            .expect("the header stays on the Session screen");
+        let message = after
+            .iter()
+            .position(|row| row.contains("hello"))
+            .expect("the first message paints");
+        assert_eq!(still_header, header, "the header does not move: {after:?}");
+        assert!(
+            message > still_header,
+            "the message joins below the header: {after:?}"
         );
     }
 

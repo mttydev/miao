@@ -390,12 +390,12 @@ fn plain(text: &str) -> String {
 fn wait_for_plain(harness: &Harness, needle: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if plain(&harness.text()).contains(needle) {
+        if plain(&harness.screen()).contains(needle) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    plain(&harness.text()).contains(needle)
+    plain(&harness.screen()).contains(needle)
 }
 
 fn wait_for_screen(harness: &Harness, needle: &str, timeout: Duration) -> bool {
@@ -412,12 +412,38 @@ fn wait_for_screen(harness: &Harness, needle: &str, timeout: Duration) -> bool {
 fn wait_for(harness: &Harness, needle: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
+        if harness.screen().contains(needle) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    harness.screen().contains(needle)
+}
+
+/// Wait for a byte sequence the screen does not show: alternate-screen
+/// restore, terminal-title OSC, or a shell line that still carries its CRLF.
+fn wait_for_raw(harness: &Harness, needle: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
         if harness.text().contains(needle) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
     harness.text().contains(needle)
+}
+
+/// Wait for text that the composer clips on screen but the raw stream carries
+/// in full, such as a notice longer than the line's budget.
+fn wait_for_raw_plain(harness: &Harness, needle: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if plain(&harness.text()).contains(needle) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    plain(&harness.text()).contains(needle)
 }
 
 fn wait_exit(child: &mut Box<dyn Child + Send + Sync>, timeout: Duration) -> Option<ExitStatus> {
@@ -471,7 +497,7 @@ fn quitting_names_the_session_and_how_to_continue_it() {
     assert!(
         wait_for(&harness, "Continue  miao -s ses_a", Duration::from_secs(5)),
         "the exit epilogue never named the Session:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.shutdown();
 }
@@ -490,7 +516,7 @@ fn the_exit_hands_the_screen_back_once_before_the_epilogue() {
     assert!(
         wait_for(&harness, "Continue  miao -s ses_a", Duration::from_secs(5)),
         "the exit epilogue never named the Session:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     let raw = harness.text();
     let epilogue = raw.find("Continue  miao -s ses_a").expect("the epilogue");
@@ -513,7 +539,7 @@ fn tag_sets_the_label_from_its_argument() {
     assert!(
         wait_for_screen(&harness, "Fixture Notes", Duration::from_secs(3)),
         "the Session never showed the fixture message:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
 
     // An argument sets the label directly; the engine answers, and a refusal
@@ -523,7 +549,7 @@ fn tag_sets_the_label_from_its_argument() {
     assert!(
         !wait_for_screen(&harness, "tag failed", Duration::from_secs(2)),
         "the engine refused the tag:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
 
     harness.write(b"\x03");
@@ -543,25 +569,25 @@ fn recall_restores_an_elided_tool_output() {
             Duration::from_secs(3)
         ),
         "the elision marker did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
 
     harness.write(b"/recall call_elided");
     assert!(
         wait_for_plain(&harness, "call_elided", Duration::from_secs(3)),
         "the composer did not take the command:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\r");
     assert!(
         wait_for_plain(&harness, "restored fixture bytes", Duration::from_secs(3)),
         "the restored window did not open:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     assert!(
-        plain(&harness.text()).contains("Archived tool output"),
+        harness.screen().contains("Archived tool output"),
         "the window did not name itself:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
 
     harness.write(b"\x03");
@@ -584,7 +610,7 @@ fn recall_reports_a_handle_the_archive_cannot_resolve() {
     assert!(
         wait_for_plain(&harness, "call_missing", Duration::from_secs(3)),
         "the composer did not take the command:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\r");
     // An empty window is a failure notice, never a blank card that reads like
@@ -592,7 +618,7 @@ fn recall_reports_a_handle_the_archive_cannot_resolve() {
     assert!(
         wait_for_plain(&harness, "recall failed", Duration::from_secs(3)),
         "an unknown handle did not report failure:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
 
     harness.write(b"\x03");
@@ -618,7 +644,7 @@ fn a_literal_launcher_prefix_reaches_the_child_without_shell_parsing() {
     assert!(
         wait_for_plain(&harness, "hello from the fixture", Duration::from_secs(3)),
         "{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\x03");
     let status =
@@ -637,7 +663,7 @@ fn the_transcript_renders_markdown_and_tool_rows() {
     assert!(
         wait_for_screen(&harness, "Fixture Notes", Duration::from_secs(2)),
         "the markdown heading did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     assert!(
         wait_for_screen(&harness, "2 lines", Duration::from_secs(2)),
@@ -737,7 +763,7 @@ fn redraw_preserves_the_open_transcript_and_unsent_draft() {
 fn resize_keeps_process_alive() {
     let mut harness = Harness::spawn_engine("resize");
     assert!(
-        wait_for(&harness, "Ask anything", Duration::from_secs(5)),
+        wait_for_raw(&harness, "Ask anything", Duration::from_secs(5)),
         "the launcher did not render in time:\n{}",
         harness.text()
     );
@@ -819,7 +845,7 @@ fn ctrl_c_clears_a_draft_before_it_quits() {
     assert!(
         wait_for_plain(&harness, "draft text", Duration::from_secs(2)),
         "typing did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\x03");
     std::thread::sleep(Duration::from_millis(300));
@@ -854,13 +880,13 @@ fn a_blocking_approval_is_readable_within_a_three_second_scan() {
     assert!(
         wait_for_plain(&harness, "always allow", Duration::from_secs(3)),
         "the approval panel did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     let panel_at = spawned.elapsed();
     let phase_deadline = Instant::now() + Duration::from_secs(3);
     let mut phase_at = None;
     while Instant::now() < phase_deadline {
-        if plain(&harness.text()).contains("needs approval · bash") {
+        if harness.screen().contains("needs approval · bash") {
             phase_at = Some(spawned.elapsed());
             break;
         }
@@ -899,16 +925,16 @@ fn an_approval_is_answered_from_the_panel() {
     assert!(
         wait_for_plain(&harness, "always allow", Duration::from_secs(3)),
         "the approval panel did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     assert!(
-        plain(&harness.text()).contains("ls -la"),
+        harness.screen().contains("ls -la"),
         "the approval resource is missing"
     );
     // A blocking approval outranks the run phase, so the status line names the
     // approval and the tool instead of a generic "working".
     assert!(
-        plain(&harness.text()).contains("needs approval · bash"),
+        harness.screen().contains("needs approval · bash"),
         "the status line did not name the blocking approval"
     );
     harness.write(b"1");
@@ -959,7 +985,7 @@ fn an_unconfigured_provider_takes_a_key_and_stores_it() {
     assert!(
         wait_for_plain(&harness, "needs a key", Duration::from_secs(3)),
         "the picker never offered the unserved provider:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     // Two served models and the group header precede the provider row. The
     // picker filters on typed letters, so the cursor moves with arrow keys.
@@ -970,7 +996,7 @@ fn an_unconfigured_provider_takes_a_key_and_stores_it() {
     assert!(
         wait_for_screen(&harness, "API key", Duration::from_secs(3)),
         "the key prompt never opened:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"sk-smoke");
     harness.write(b"\r");
@@ -997,13 +1023,13 @@ fn an_unconfigured_provider_takes_a_key_and_stores_it() {
     // The notice names the provider it stored; the composer line clips the
     // rest at this width, so that is what the raw stream carries.
     assert!(
-        wait_for_plain(
+        wait_for_raw_plain(
             &harness,
             "stored the opencode-go key",
             Duration::from_secs(3)
         ),
         "the notice never said the key was stored:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\x03");
     let _ = wait_exit(&mut harness.child, Duration::from_secs(5));
@@ -1016,14 +1042,14 @@ fn the_leader_opens_the_model_dialog_and_selects_a_binding() {
     assert!(
         wait_for_plain(&harness, "hello from the fixture", Duration::from_secs(2)),
         "the Session did not open:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     // Ctrl+X is the leader; `m` opens the model dialog once the catalog lands.
     harness.write(b"\x18m");
     assert!(
         wait_for_plain(&harness, "fake/gpt", Duration::from_secs(3)),
         "the model dialog did not render the catalog:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\r");
     let log = harness.dir.join("admit.log");
@@ -1061,12 +1087,12 @@ fn the_leader_opens_the_theme_dialog_and_saves_the_choice() {
     assert!(
         wait_for_plain(&harness, "enter apply · esc close", Duration::from_secs(2)),
         "the theme dialog did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     assert!(
         wait_for_plain(&harness, "▸ miao", Duration::from_secs(2)),
         "the theme dialog did not open around the active theme:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     // One row down from the active theme ("miao") lands on "opencode".
     harness.select_second_row();
@@ -1098,15 +1124,15 @@ fn the_status_dialog_shows_the_usage_report_and_the_debug_view() {
     assert!(
         wait_for_plain(&harness, "hello from the fixture", Duration::from_secs(2)),
         "the Session did not open:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\x18s");
     assert!(
         wait_for_plain(&harness, "3 (1 partial)", Duration::from_secs(3)),
         "the status dialog did not render the usage report:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
-    let rendered = plain(&harness.text());
+    let rendered = harness.screen();
     assert!(
         rendered.contains("avg 812 ms"),
         "the status dialog is missing TTFT:\n{rendered}"
@@ -1123,7 +1149,7 @@ fn the_status_dialog_shows_the_usage_report_and_the_debug_view() {
     assert!(
         wait_for_plain(&harness, "state dir", Duration::from_secs(3)),
         "the debug dialog did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\x03");
     let status = wait_exit(&mut harness.child, Duration::from_secs(5))
@@ -1138,13 +1164,13 @@ fn ctrl_o_switches_the_pinned_account() {
     assert!(
         wait_for_plain(&harness, "hello from the fixture", Duration::from_secs(2)),
         "the Session did not open:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\x0f");
     assert!(
         wait_for_plain(&harness, "all keys", Duration::from_secs(3)),
         "the provider key list did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     // The flat list of every credential is one Enter below the provider rows.
     // The fixture serves credentials the store does not hold, which is the
@@ -1153,7 +1179,7 @@ fn ctrl_o_switches_the_pinned_account() {
     assert!(
         wait_for_plain(&harness, "cred_a", Duration::from_secs(3)),
         "the key dialog did not render the catalog:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     // The second row is the other credential.
     harness.select_second_row();
@@ -1185,7 +1211,7 @@ fn a_stashed_draft_comes_back_into_the_composer() {
     assert!(
         wait_for_plain(&harness, "hello from the fixture", Duration::from_secs(2)),
         "the Session did not open:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"stash me");
     // Ctrl+X then Shift+P stashes the draft and clears the composer.
@@ -1208,7 +1234,7 @@ fn a_stashed_draft_comes_back_into_the_composer() {
     assert!(
         wait_for_plain(&harness, "stash me", Duration::from_secs(3)),
         "the stash dialog did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     // Enter restores the draft into the composer, then submitting it must reach
     // the engine. Sending both blindly raced the focus change: on a loaded runner
@@ -1223,7 +1249,7 @@ fn a_stashed_draft_comes_back_into_the_composer() {
     assert!(
         wait_for_plain(&harness, "restored from stash", Duration::from_secs(5)),
         "the restore never settled:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\r");
     let log = harness.dir.join("admit.log");
@@ -1263,14 +1289,14 @@ fn the_palette_runs_actions_and_a_template_command_reaches_the_engine() {
     assert!(
         wait_for_plain(&harness, "hello from the fixture", Duration::from_secs(2)),
         "the Session did not open:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     // Ctrl+P opens the palette; typing narrows it to the help entry.
     harness.write(b"\x10");
     assert!(
         wait_for_plain(&harness, "Select a theme", Duration::from_secs(2)),
         "the palette did not render:\n{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"keys");
     harness.write(b"\r");
@@ -1324,7 +1350,7 @@ fn panic_restores_terminal() {
     // Windows still verifies the panic status and diagnostic below.
     #[cfg(not(windows))]
     assert!(
-        wait_for(&harness, "Ask anything", Duration::from_secs(5)),
+        wait_for_raw(&harness, "Ask anything", Duration::from_secs(5)),
         "the launcher did not render in time:\n{}",
         harness.text()
     );
@@ -1347,7 +1373,7 @@ fn panic_restores_terminal() {
     #[cfg(not(windows))]
     {
         assert!(
-            wait_for(&harness, "\x1b[?1049l", Duration::from_secs(2)),
+            wait_for_raw(&harness, "\x1b[?1049l", Duration::from_secs(2)),
             "terminal was not restored after panic:\n{}",
             harness.text()
         );
@@ -1383,7 +1409,7 @@ fn exit_signals_restore_the_terminal() {
             .expect("signal did not stop the UI");
         assert!(status.success(), "{signal}: {status:?}");
         assert!(
-            wait_for(&harness, "\x1b[?1049l", Duration::from_secs(2)),
+            wait_for_raw(&harness, "\x1b[?1049l", Duration::from_secs(2)),
             "{signal} did not leave the alternate screen: {}",
             harness.text()
         );
@@ -1407,7 +1433,7 @@ fn saved_permissions_review_and_revoke_through_the_engine_wire() {
     assert!(
         wait_for_plain(&harness, "public/**", Duration::from_secs(3)),
         "{}",
-        plain(&harness.text())
+        harness.screen()
     );
     harness.write(b"\r");
     assert!(wait_for_plain(
@@ -1429,7 +1455,7 @@ fn saved_permissions_review_and_revoke_through_the_engine_wire() {
     assert!(
         wait_for_plain(&harness, "Saved permission revoked", Duration::from_secs(3)),
         "{}",
-        plain(&harness.text())
+        harness.screen()
     );
     let recorded = std::fs::read_to_string(&log).unwrap();
     assert_eq!(recorded.matches("permission_pattern_remove").count(), 1);
@@ -1456,7 +1482,11 @@ fn terminal_title_toggle_persists_across_restart_and_an_environment_disable_wins
         "Ask anything",
         Duration::from_secs(3)
     ));
-    assert!(wait_for(&first, "\x1b]0;miao\x07", Duration::from_secs(2)));
+    assert!(wait_for_raw(
+        &first,
+        "\x1b]0;miao\x07",
+        Duration::from_secs(2)
+    ));
     first.write(b"\x14");
     assert!(wait_for_screen(
         &first,
@@ -1484,7 +1514,11 @@ fn terminal_title_toggle_persists_across_restart_and_an_environment_disable_wins
         "Terminal title enabled",
         Duration::from_secs(2)
     ));
-    assert!(wait_for(&second, "\x1b]0;miao\x07", Duration::from_secs(2)));
+    assert!(wait_for_raw(
+        &second,
+        "\x1b]0;miao\x07",
+        Duration::from_secs(2)
+    ));
     second.write(b"\x03");
     assert!(wait_exit(&mut second.child, Duration::from_secs(5))
         .unwrap()
@@ -1720,7 +1754,7 @@ fn shell_job_control_restores_the_terminal_and_preserves_the_draft() {
             "terminal was not restored before shell handoff"
         );
         harness.write(b"printf 'SHELL_HAS_INPUT\\n'\r");
-        assert!(wait_for(
+        assert!(wait_for_raw(
             &harness,
             "SHELL_HAS_INPUT\r\n",
             Duration::from_secs(2)

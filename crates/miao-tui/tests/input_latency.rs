@@ -165,12 +165,19 @@ impl Harness {
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.output.lock().expect("output lock")).into_owned()
     }
+
+    fn screen(&self) -> String {
+        let size = self.pty.get_size().expect("pty size");
+        let mut parser = vt100::Parser::new(size.rows, size.cols, 0);
+        parser.process(&self.output.lock().expect("output lock"));
+        parser.screen().contents()
+    }
 }
 
 fn wait_for_plain(harness: &Harness, needle: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if harness.text().replace("\r", "").contains(needle) {
+        if harness.screen().contains(needle) {
             return true;
         }
         if Instant::now() >= deadline {

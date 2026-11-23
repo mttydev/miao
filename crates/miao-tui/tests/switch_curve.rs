@@ -114,6 +114,12 @@ impl Harness {
         String::from_utf8_lossy(&self.output.lock().expect("output lock")).into_owned()
     }
 
+    fn screen(&self) -> String {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(&self.output.lock().expect("output lock"));
+        parser.screen().contents()
+    }
+
     fn wait_for(&self, needle: &str, timeout: Duration) -> bool {
         // Compare against everything the process wrote, not only the current
         // frame: entering and leaving a Session redraws the whole window, so a
@@ -124,12 +130,7 @@ impl Harness {
         // whole on screen.
         let deadline = Instant::now() + timeout;
         loop {
-            if without_csi(&String::from_utf8_lossy(
-                &self.output.lock().expect("output lock"),
-            ))
-            .replace('\r', "")
-            .contains(needle)
-            {
+            if self.screen().contains(needle) {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -303,21 +304,4 @@ fn a_hundred_session_switches_do_not_grow_the_process() {
         rss_recheck <= rss_peak + 1024,
         "after a hundred switches the process kept climbing at rest: checkpoint peak {rss_peak} kB, settled at {rss_recheck} kB"
     );
-}
-
-/// The written stream with every CSI sequence (`ESC [ … final`) removed, so a
-/// label split by cursor moves reads as the text the screen shows.
-fn without_csi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        if chars.next() == Some('[') {
-            chars.by_ref().find(|c| ('@'..='~').contains(c));
-        }
-    }
-    out
 }

@@ -138,8 +138,11 @@ impl Harness {
         writer.flush().expect("flush keys");
     }
 
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().expect("output lock")).into_owned()
+    fn screen(&self) -> String {
+        let size = self.pty.get_size().expect("pty size");
+        let mut parser = vt100::Parser::new(size.rows, size.cols, 0);
+        parser.process(&self.output.lock().expect("output lock"));
+        parser.screen().contents()
     }
 }
 
@@ -148,7 +151,7 @@ impl Harness {
 fn until(harness: &Harness, needle: &str, started: Instant) -> Option<Duration> {
     let deadline = started + BUDGET;
     loop {
-        if harness.text().replace('\r', "").contains(needle) {
+        if harness.screen().contains(needle) {
             return Some(started.elapsed());
         }
         if Instant::now() >= deadline {
