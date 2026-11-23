@@ -64,11 +64,10 @@ pub struct Config {
     /// `keybinds` entries, flattened to action name → strokes. `None` means the
     /// action was explicitly unbound (`false` or `"none"`).
     pub keybinds: BTreeMap<String, Option<Vec<String>>>,
-    /// `prompt.max_width`: the landing prompt's width cap. The TypeScript home
-    /// reads the same key: a positive integer is a fixed cap, `"auto"` scales
-    /// with the terminal, and an absent key uses the TS default of 75 columns.
-    /// Only the landing prompt is capped; the Session's prompt fills its
-    /// column, which is what the TS session route does.
+    /// `prompt.max_width`: the landing prompt's width cap. A positive integer
+    /// is a fixed cap, and an absent key leaves the landing band as wide as
+    /// the Session's composer, so the input keeps its seat and width when the
+    /// first Session opens.
     pub prompt_max_width: PromptWidth,
     /// `auto_effort`: pick a reasoning-effort variant from the model's own
     /// variants for each prompt, so a short question does not spend the budget a
@@ -88,16 +87,15 @@ pub struct Config {
 
 /// `prompt.max_width` from `tui.json`.
 ///
-/// Absent, the landing prompt scales with the window (`Auto`). The product's
-/// home falls back to a fixed 75 columns instead, which is a small field on a
-/// wide terminal — at 200 columns it covers little more than a third of the
-/// window — so this build defaults to the product's own `"auto"` rule, and a
-/// `tui.json` `{"prompt": {"max_width": 75}}` restores the fixed default.
+/// Absent, the landing prompt fills its column the way the Session composer
+/// does, so the input the operator types into does not move or shrink when
+/// the first Session opens. A positive integer caps the band at that many
+/// columns instead (`{"prompt": {"max_width": 75}}`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PromptWidth {
     /// A fixed maximum in columns.
     Fixed(u16),
-    /// `Math.max(75, floor(width * 0.7))`, the TS `"auto"` rule.
+    /// Fill the column, the Session composer's own width.
     #[default]
     Auto,
 }
@@ -105,11 +103,10 @@ pub enum PromptWidth {
 impl PromptWidth {
     /// The width the landing prompt is painted at inside `width` columns.
     pub fn resolve(self, width: u16) -> u16 {
-        let cap = match self {
-            Self::Fixed(columns) => columns,
-            Self::Auto => ((width as usize * 7 / 10).max(75)).min(u16::MAX as usize) as u16,
-        };
-        cap.max(1).min(width)
+        match self {
+            Self::Auto => width,
+            Self::Fixed(columns) => columns.max(1).min(width),
+        }
     }
 }
 
@@ -606,8 +603,8 @@ fn merge_scroll_acceleration(
     }
 }
 
-/// `prompt.max_width`: a positive integer cap, or `"auto"` to scale with the
-/// terminal. The TS schema accepts only those two, so anything else is named
+/// `prompt.max_width`: a positive integer cap, or `"auto"` to fill the
+/// column. The TS schema accepts only those two, so anything else is named
 /// and ignored rather than silently rounding into a usable value.
 fn merge_prompt_width(
     value: &serde_json::Value,
@@ -924,10 +921,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The home caps its prompt at `prompt.max_width` and leaves the Session's
-    /// prompt full width. A number pins the band; `"auto"` scales it with the
-    /// terminal; absent uses this build's default, which is `"auto"` rather
-    /// than the product's fixed 75.
+    /// The landing band honours `prompt.max_width`: a number caps it,
+    /// `"auto"` fills the column the Session composer fills, and absent uses
+    /// this build's default, which is `"auto"`.
     #[test]
     fn the_landing_prompt_width_comes_from_the_typescript_key() {
         let dir = temp_dir("prompt-width");
@@ -940,8 +936,8 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(config.prompt_max_width, PromptWidth::Auto);
 
-        // Absent is this build's default, not a warning: the band scales with
-        // the window instead of sitting at the product's fixed 75 columns.
+        // Absent is this build's default, not a warning: the band fills the
+        // column instead of sitting at the product's fixed 75 columns.
         let (config, warnings) = merge_at(r#"{"prompt": {}}"#, &dir);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(config.prompt_max_width, PromptWidth::Auto);
@@ -960,16 +956,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `"auto"` is `Math.max(75, floor(width * 0.7))` in the TS home, capped by
-    /// the window; a fixed cap is capped the same way.
+    /// `"auto"` fills the column; a fixed cap is capped by the window, and a
+    /// zero-column window has nothing to paint into.
     #[test]
     fn a_prompt_width_never_exceeds_the_window() {
-        assert_eq!(PromptWidth::Auto.resolve(200), 140);
-        assert_eq!(
-            PromptWidth::Auto.resolve(80),
-            75,
-            "the 75 floor wins narrow"
-        );
+        assert_eq!(PromptWidth::Auto.resolve(200), 200);
+        assert_eq!(PromptWidth::Auto.resolve(80), 80);
         assert_eq!(
             PromptWidth::Fixed(100).resolve(80),
             80,

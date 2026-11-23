@@ -832,7 +832,9 @@ impl App {
         attention_config: crate::config::AttentionConfig,
         startup: Startup,
     ) -> Self {
-        let home = Home::new(theme.clone());
+        let mut home = Home::new(theme.clone());
+        // The landing header names the directory a prompt would show.
+        home.set_workspace(workspace.clone());
         let templates = commands::templates(&workspace);
         let mut shell = Shell::new(&workspace, theme);
         shell
