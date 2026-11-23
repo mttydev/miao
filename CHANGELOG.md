@@ -13,6 +13,14 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-11-23
+
+### Added
+- **cli**: locate a session that lives in another workspace ledger (#3345) (`b8a1865368`)
+
+### Fixed
+- **tui**: keep the idle hint to idle, and paint nothing while busy (#3343) (`3a258957a7`)
+
 ## [0.4.17] - 2026-11-23
 
 ### Fixed
