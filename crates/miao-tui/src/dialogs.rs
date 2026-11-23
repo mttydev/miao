@@ -6,6 +6,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::editor::Editor;
 use crate::event::JobRow;
@@ -716,6 +718,11 @@ pub enum Dialog {
     Rename(RenameDialog),
     Tag(TagDialog),
     SignIn(SignInDialog),
+    /// Choose how to sign in to a provider that supports an account login.
+    SignInMethod(ListDialog),
+    /// An account login in flight: the official URL and the code to enter
+    /// there. The poll runs off the UI thread and reports back through events.
+    AccountLogin(AccountLoginDialog),
     WorktreeNew(WorktreeNewDialog),
     /// Type the new expression or delay for one schedule row.
     ScheduleEdit(ScheduleEditDialog),
@@ -807,6 +814,37 @@ pub struct SignInDialog {
 pub enum SignInField {
     Account,
     Key,
+}
+
+/// A ChatGPT account login waiting on the browser. The URL and code are the
+/// only things miao knows; the password and the tokens stay on OpenAI's page
+/// and in the credential store.
+pub struct AccountLoginDialog {
+    pub provider: String,
+    pub name: String,
+    pub url: String,
+    pub user_code: String,
+    /// Set when the operator closes the box, so the background poll stops
+    /// instead of storing a credential nobody is waiting for.
+    pub cancelled: Arc<AtomicBool>,
+}
+
+impl AccountLoginDialog {
+    pub fn new(
+        provider: &str,
+        name: &str,
+        url: &str,
+        user_code: &str,
+        cancelled: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            provider: provider.to_string(),
+            name: name.to_string(),
+            url: url.to_string(),
+            user_code: user_code.to_string(),
+            cancelled,
+        }
+    }
 }
 
 /// A paste into a one-line field: the line breaks a clipboard often carries
@@ -1568,6 +1606,43 @@ impl Dialog {
         })
     }
 
+    /// The choice for a provider that can sign in with an account: the
+    /// official login page, or a pasted API key. The key prompt stays the only
+    /// text input, so this is a list rather than another field.
+    pub fn sign_in_method(provider: &str, name: &str) -> Self {
+        Dialog::SignInMethod(ListDialog::new(
+            "sign in",
+            vec![
+                Row {
+                    id: format!("account:{provider}"),
+                    label: format!("{name} account"),
+                    detail: "opens the provider's login page".into(),
+                },
+                Row {
+                    id: format!("key:{provider}"),
+                    label: "API key".into(),
+                    detail: "paste a key instead".into(),
+                },
+            ],
+            ListKind::Plain,
+            "enter selects · esc cancels",
+        ))
+    }
+
+    /// The wait for an account login: the page to open and the code it asks
+    /// for. The tokens stay in the credential store, never in this dialog.
+    pub fn account_login_prompt(
+        provider: &str,
+        name: &str,
+        url: &str,
+        user_code: &str,
+        cancelled: Arc<AtomicBool>,
+    ) -> Self {
+        Dialog::AccountLogin(AccountLoginDialog::new(
+            provider, name, url, user_code, cancelled,
+        ))
+    }
+
     /// Add a second key for a provider that already holds one. The account
     /// label is collected first because it is what tells the two apart in the
     /// account list and in a route id.
@@ -1682,11 +1757,13 @@ impl Dialog {
             Dialog::Workspaces(list) => handle_list_key(list, key),
             Dialog::Worktrees(list) => handle_list_key(list, key),
             Dialog::TurnTimings(list) => handle_list_key(list, key),
+            Dialog::SignInMethod(list) => handle_list_key(list, key),
             Dialog::Message(text) => handle_text_key(text, key),
             Dialog::Palette(palette) => handle_palette_key(palette, key),
             Dialog::Rename(rename) => handle_rename_key(&mut rename.input, key),
             Dialog::Tag(tag) => handle_rename_key(&mut tag.input, key),
             Dialog::SignIn(sign_in) => handle_sign_in_key(sign_in, key),
+            Dialog::AccountLogin(login) => handle_account_login_key(login, key),
             Dialog::WorktreeNew(dialog) => handle_rename_key(&mut dialog.input, key),
             Dialog::ScheduleEdit(dialog) => handle_rename_key(&mut dialog.input, key),
             Dialog::Confirm(confirm) => handle_confirm_key(confirm, key),
@@ -1719,7 +1796,8 @@ impl Dialog {
             | Dialog::Skills(list)
             | Dialog::Workspaces(list)
             | Dialog::Worktrees(list)
-            | Dialog::TurnTimings(list) => list.move_cursor(rows),
+            | Dialog::TurnTimings(list)
+            | Dialog::SignInMethod(list) => list.move_cursor(rows),
             Dialog::Message(text) => {
                 text.scroll = text.scroll.saturating_add_signed(rows as isize);
             }
@@ -1734,6 +1812,7 @@ impl Dialog {
             Dialog::Rename(_)
             | Dialog::Tag(_)
             | Dialog::SignIn(_)
+            | Dialog::AccountLogin(_)
             | Dialog::WorktreeNew(_)
             | Dialog::ScheduleEdit(_)
             | Dialog::Confirm(_) => {}
@@ -1764,11 +1843,13 @@ impl Dialog {
             Dialog::Skills(list) => list.title,
             Dialog::Workspaces(list) => list.title,
             Dialog::Worktrees(list) => list.title,
+            Dialog::SignInMethod(list) => list.title,
             Dialog::Message(text) => text.title,
             Dialog::Palette(_) => "commands",
             Dialog::Rename(_) => "rename session",
             Dialog::Tag(_) => "tag session",
             Dialog::SignIn(_) => "provider key",
+            Dialog::AccountLogin(_) => "account login",
             Dialog::WorktreeNew(_) => "new worktree",
             Dialog::ScheduleEdit(_) => "edit schedule",
             Dialog::Confirm(confirm) => confirm.title,
@@ -1795,7 +1876,8 @@ impl Dialog {
             | Dialog::Worktrees(list)
             | Dialog::Jobs(list)
             | Dialog::Devices(list)
-            | Dialog::Schedule(list) => Some(list),
+            | Dialog::Schedule(list)
+            | Dialog::SignInMethod(list) => Some(list),
             _ => None,
         }
     }
@@ -1820,7 +1902,8 @@ impl Dialog {
             | Dialog::Worktrees(list)
             | Dialog::Jobs(list)
             | Dialog::Devices(list)
-            | Dialog::Schedule(list) => Some(list),
+            | Dialog::Schedule(list)
+            | Dialog::SignInMethod(list) => Some(list),
             _ => None,
         }
     }
@@ -1831,6 +1914,15 @@ impl Dialog {
     pub fn sign_in(&self) -> Option<&SignInDialog> {
         match self {
             Dialog::SignIn(sign_in) => Some(sign_in),
+            _ => None,
+        }
+    }
+
+    /// The account-login box: the official page and code while the browser
+    /// finishes the sign-in.
+    pub fn account_login(&self) -> Option<&AccountLoginDialog> {
+        match self {
+            Dialog::AccountLogin(login) => Some(login),
             _ => None,
         }
     }
@@ -1935,6 +2027,11 @@ impl Dialog {
         }
         if self.rename_input().is_some() {
             return 5;
+        }
+        // The account login box: provider, two labelled facts (page and code),
+        // and the closing hint.
+        if self.account_login().is_some() {
+            return 8;
         }
         6
     }
@@ -2266,6 +2363,16 @@ fn handle_palette_key(palette: &mut PaletteDialog, key: KeyEvent) -> Action {
         }
         _ => Action::None,
     }
+}
+
+fn handle_account_login_key(login: &mut AccountLoginDialog, key: KeyEvent) -> Action {
+    if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+        // Closing the box ends the wait: the poll checks this flag instead of
+        // storing a credential nobody is waiting for.
+        login.cancelled.store(true, Ordering::Relaxed);
+        return Action::Close;
+    }
+    Action::None
 }
 
 /// The key prompt, with an optional account label in front of the key itself.

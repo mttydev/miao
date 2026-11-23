@@ -5215,6 +5215,10 @@ pub fn render_dialog(frame: &mut Frame, area: Rect, dialog: &Dialog, lang: Lang,
         render_sign_in(frame, inner, sign_in, theme);
         return;
     }
+    if let Some(login) = dialog.account_login() {
+        render_account_login(frame, inner, login, theme);
+        return;
+    }
     if let Some((input, label)) = dialog.rename_input() {
         render_rename(frame, inner, input, label, theme);
         return;
@@ -5553,6 +5557,66 @@ fn render_sign_in(
     }
     let column = focused.min(input_area.width as usize - 1) as u16;
     frame.set_cursor_position(Position::new(input_area.x + column, input_area.y));
+}
+
+/// The wait for a provider account login. The page and the code are the whole
+/// instruction: the operator finishes on the provider's own site, and this box
+/// closes when the background poll stores the credential.
+fn render_account_login(
+    frame: &mut Frame,
+    area: Rect,
+    login: &crate::dialogs::AccountLoginDialog,
+    theme: &Theme,
+) {
+    let palette = theme.palette;
+    let mut row = area.y;
+    let mut draw = |frame: &mut Frame, label: &str, text: &str, accent: bool| {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                clip_cells(label, 0, area.width),
+                Style::new().fg(palette.text_muted),
+            ))),
+            Rect {
+                y: row,
+                height: 1,
+                ..area
+            },
+        );
+        row += 1;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                clip_cells(text, 0, area.width),
+                Style::new().fg(match accent {
+                    true => palette.primary,
+                    false => palette.text,
+                }),
+            ))),
+            Rect {
+                y: row,
+                height: 1,
+                ..area
+            },
+        );
+        row += 2;
+    };
+    draw(
+        frame,
+        &format!("{}  sign in on the official page", login.name),
+        &login.url,
+        true,
+    );
+    draw(frame, "enter this code there", &login.user_code, true);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "the browser finishes the login · esc cancels",
+            Style::new().fg(palette.text_muted),
+        ))),
+        Rect {
+            y: row.saturating_sub(1),
+            height: 1,
+            ..area
+        },
+    );
 }
 
 fn render_confirm(

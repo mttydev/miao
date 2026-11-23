@@ -35,9 +35,10 @@ Usage:
   miao tui [options]    start the terminal UI in this process
   miao models           list the model routes this machine can use
   miao auth             list stored credentials (types only, never secrets)
-  miao auth login INTEGRATION KEY
+  miao auth login INTEGRATION [KEY]
   miao auth logout INTEGRATION
-                        store or remove an API key credential
+                        sign in to a provider (OpenAI uses the ChatGPT account
+                        page), or store/remove an API key credential
   miao serve [options]  run the engine as a resident loopback server
   miao session list     list the sessions in the engine database
   miao session fork SRC DST [--at SEQ]
@@ -5055,12 +5056,20 @@ fn auth_write(rest: &[String]) -> Result<(), String> {
             }
             let Some(integration) = integration else {
                 return Err(
-                    "usage: miao auth login INTEGRATION KEY [--account NAME] [--oauth]".into(),
+                    "usage: miao auth login INTEGRATION [KEY] [--account NAME] [--oauth]"
+                        .into(),
                 );
             };
             let Some(key) = key else {
+                // An account login is the default for a provider whose real
+                // login page is the only safe place for a password. Every other
+                // integration still needs the key on this line.
+                if integration == "openai" {
+                    return login_openai(&db, account.as_deref());
+                }
                 return Err(
-                    "usage: miao auth login INTEGRATION KEY [--account NAME] [--oauth]".into(),
+                    "usage: miao auth login INTEGRATION [KEY] [--account NAME] [--oauth]"
+                        .into(),
                 );
             };
             if key.trim().is_empty() {
@@ -5173,10 +5182,75 @@ fn auth_write(rest: &[String]) -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: miao auth login INTEGRATION KEY [--account NAME] [--oauth] | miao auth logout INTEGRATION [--account NAME]"
+            "usage: miao auth login INTEGRATION [KEY] [--account NAME] [--oauth] | miao auth logout INTEGRATION [--account NAME]"
                 .into(),
         ),
     }
+}
+
+/// Sign in with an OpenAI account instead of pasting a key. The account page
+/// and the code stay on auth.openai.com: this process only shows the URL, asks
+/// the browser to open it, polls the device grant, and stores the resulting
+/// OAuth credential. A headless shell still has the printed URL and code.
+fn login_openai(db: &Path, account: Option<&str>) -> Result<(), String> {
+    let label = account
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("default");
+    let agent = format!("miao/{VERSION}");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let mut start = miao_engine::credential::openai_login_start(&agent)
+            .await
+            .map_err(|error| format!("could not start the OpenAI login: {error}"))?;
+        println!("Open {} and enter code {}", start.url, start.user_code);
+        miao_engine::credential::open_login_page(&start.url);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err(
+                    "the OpenAI login timed out; run `miao auth login openai` again".into(),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(start.interval_ms)).await;
+            match miao_engine::credential::openai_login_poll(&mut start, &agent).await {
+                Ok(None) => {}
+                Ok(Some(value)) => {
+                    let stored = miao_engine::credential::store_oauth(db, "openai", label, &value)
+                        .map_err(|error| format!("could not store the OpenAI login: {error}"))?;
+                    println!("stored openai {} credential {}", stored.label, stored.id);
+                    return Ok(());
+                }
+                Err(error) => return Err(format!("the OpenAI login failed: {error}")),
+            }
+        }
+    })
+}
+
+/// Keep product-owned OAuth rows fresh while the terminal UI runs. The engine
+/// reads credentials and never writes them; the product host is the writer that
+/// stores keys and account logins, so it also rotates an expiring token. A
+/// daemon-owned row is skipped by the engine call itself.
+fn start_credential_refresh(store: PathBuf) {
+    let agent = format!("miao/{VERSION}");
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        loop {
+            let _ = runtime.block_on(miao_engine::credential::refresh_due_oauth(
+                &store, "openai", &agent,
+            ));
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    });
 }
 
 /// List stored credentials. `list_database` reports only normalized type and
@@ -6489,6 +6563,9 @@ fn start_tui(args: impl Iterator<Item = String>) -> std::process::ExitCode {
     match launch(args) {
         Ok(mut launch) => {
             prepare_tui_engine(&mut launch);
+            if let Ok(store) = credential_db_path() {
+                start_credential_refresh(store);
+            }
             match miao_tui::run(launch) {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(error) => {

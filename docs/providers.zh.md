@@ -16,6 +16,8 @@ miao auth logout <integration> [--account NAME]
 
 也可以在 TUI 里输入 `/accounts`，按提示完成 OAuth 或 API key 登录。凭据写入共享凭据库，在 `miao` / `miao-dev` / `miao-preview` 几个入口之间共享，所以只需登录一次。环境变量里已有 key 的供应商无需 `login` 也会被识别。
 
+OpenAI 可以用 ChatGPT 账号登录：`miao auth login openai` 不带 key 时会打开 OpenAI 官方登录页（没有浏览器时打印地址），输入终端显示的验证码即可。密码只在 `auth.openai.com` 输入，miao 只保存登录返回的 OAuth 凭据；登录后 OpenAI 模型走 ChatGPT 订阅后端。仍想用 API key 时写成 `miao auth login openai sk-...`。TUI 里选择 OpenAI 时也会先在「ChatGPT 账号」和「API key」之间选择。TUI 窗口运行期间会在令牌到期前自动续期；只在无界面命令里使用时，过期后重新登录一次即可。
+
 ## 列出与选择模型
 
 ```bash

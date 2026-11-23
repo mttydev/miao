@@ -1,6 +1,8 @@
 use crossterm::event::Event as TerminalEvent;
 use crossterm::event::{KeyEvent, MouseEvent};
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use crate::dialogs::{AccountInfo, ModelInfo};
 use crate::platform::attention;
@@ -103,6 +105,22 @@ pub enum AppEvent {
     /// A tag the engine refused; shown as a notice so the operator does not
     /// believe the label was stored.
     TagFailed(String),
+    /// A ChatGPT account login reached OpenAI's device page. The dialog shows
+    /// the URL and code until the browser finishes the login.
+    LoginStarted {
+        provider: String,
+        url: String,
+        user_code: String,
+        /// Closing the box flips this, so the poll stops instead of storing a
+        /// credential nobody waits for.
+        cancelled: Arc<AtomicBool>,
+    },
+    /// That login finished: the stored credential id, or why it did not.
+    LoginFinished {
+        provider: String,
+        label: String,
+        result: Result<String, String>,
+    },
     /// The suggested next prompt for a Session; `None` when the model had
     /// nothing to suggest. Advisory: nothing was admitted for it.
     Predicted {
@@ -364,6 +382,8 @@ fn requires_delivery(event: &AppEvent) -> bool {
             | AppEvent::SessionOpened { .. }
             | AppEvent::HistoryWindow { .. }
             | AppEvent::HistoryPrepended { .. }
+            | AppEvent::LoginStarted { .. }
+            | AppEvent::LoginFinished { .. }
     )
 }
 

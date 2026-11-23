@@ -196,8 +196,20 @@ fn routes_with(
                     continue;
                 }
                 let position = usize::from(Some(account.id.as_str()) != default_account);
+                let mut base = entry.clone();
+                // An OpenAI account grant belongs to the ChatGPT subscription
+                // backend, not the API-key endpoint. Its transport supplies the
+                // ChatGPT host and account header, so an explicit
+                // api.openai.com endpoint would send the token to the wrong
+                // service.
+                if id == "openai" && account.kind == "oauth" {
+                    base["provider"] = json!("subscription-responses");
+                    if let Some(object) = base.as_object_mut() {
+                        object.remove("endpoint");
+                    }
+                }
                 entries.push(route_entry(
-                    &entry, id, model_id, account, position, &entries,
+                    &base, id, model_id, account, position, &entries,
                 ));
             }
         }
@@ -264,13 +276,14 @@ fn accounts_by_integration(
 }
 
 /// The catalogue half of the derivation: every provider the configuration does
-/// not name, routed by the key credentials the product store already holds.
+/// not name, routed by the credentials the product store already holds.
 ///
-/// A stored key is the operator saying "serve this provider", so a launcher has
-/// to turn it into a route even when no config entry mentions it. The snapshot
-/// supplies the transport, endpoint and models, which is why nothing had to be
-/// configured for this to work — and why leaving it out made a stored key look
-/// unsaved until the operator edited their configuration by hand.
+/// A stored credential is the operator saying "serve this provider", so a
+/// launcher has to turn it into a route even when no config entry mentions it.
+/// The snapshot supplies the transport, endpoint and models, which is why
+/// nothing had to be configured for this to work — and why leaving it out made
+/// a stored key look unsaved until the operator edited their configuration by
+/// hand. Account grants route through the transport they actually speak.
 pub fn catalog_key_routes(
     declared: &serde_json::Map<String, Value>,
     credential_db: Option<&Path>,
@@ -287,10 +300,12 @@ fn catalog_key_routes_with(
     declared: &serde_json::Map<String, Value>,
     credential_db: Option<&Path>,
 ) -> Vec<Value> {
-    match snapshot {
-        Some(snapshot) => snapshot_key_routes(snapshot, declared, credential_db),
-        None => Vec::new(),
-    }
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let mut entries = snapshot_key_routes(snapshot, declared, credential_db);
+    entries.extend(snapshot_oauth_routes(snapshot, declared, credential_db));
+    entries
 }
 
 /// Rewrite the manifest from the configuration and the credential store, and
@@ -626,6 +641,70 @@ fn commandcode_transport(base: &str, model_id: &str) -> Option<(String, Option<S
             .map(|endpoint| ("openai-chat".to_string(), Some(endpoint)))
     }
 }
+/// The account half of the catalogue fallback. An OpenAI account grant is not
+/// an API key: it answers through the ChatGPT subscription transport, with the
+/// models the shipped catalogue names for OpenAI. Without this, signing in
+/// stored a credential no route could spend until the operator wrote an
+/// `openai` provider entry by hand.
+fn snapshot_oauth_routes(
+    snapshot: &Value,
+    declared: &serde_json::Map<String, Value>,
+    credential_db: Option<&Path>,
+) -> Vec<Value> {
+    if declared.contains_key("openai") {
+        return Vec::new();
+    }
+    let Some(db_path) = credential_db else {
+        return Vec::new();
+    };
+    let Ok(credentials) = crate::credential::list_database(db_path) else {
+        return Vec::new();
+    };
+    let accounts: Vec<&crate::credential::Metadata> = credentials
+        .iter()
+        .filter(|credential| {
+            credential.integration == "openai" && credential.kind == "oauth" && !credential.expired
+        })
+        .collect();
+    if accounts.is_empty() {
+        return Vec::new();
+    }
+    let Some(models) = snapshot
+        .get("openai")
+        .and_then(|provider| provider.get("models"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let mut entries: Vec<Value> = Vec::new();
+    for (model_id, model) in models {
+        let produces_text = model
+            .get("modalities")
+            .and_then(|modalities| modalities.get("output"))
+            .and_then(Value::as_array)
+            .is_some_and(|outputs| outputs.iter().any(|item| item == "text"));
+        if !produces_text {
+            continue;
+        }
+        let base = json!({
+            "id": format!("openai/{model_id}"),
+            "provider": "subscription-responses",
+            "model": model_id,
+            "credential": {
+                "type": "database",
+                "path": db_path.display().to_string(),
+                "id": accounts[0].id,
+                "integration": "openai",
+            },
+        });
+        for (position, account) in accounts.iter().enumerate() {
+            entries.push(route_entry(
+                &base, "openai", model_id, account, position, &entries,
+            ));
+        }
+    }
+    entries
+}
 
 /// The wire a configured api rides, and the endpoint it reaches. The mapping
 /// mirrors the product's route planner: an explicit URL wins over the
@@ -897,6 +976,108 @@ mod tests {
         assert_eq!(entry["credential"]["integration"], "volcengine");
         assert_eq!(entry["input_modalities"], json!(["text"]));
         assert_eq!(entry["limit"]["context"], 1048576);
+    }
+
+    /// An OpenAI account grant must ride the ChatGPT subscription transport.
+    /// Sending it to the API-key endpoint answers 401 however valid the token
+    /// is, so the route itself has to change, not just the credential.
+    #[test]
+    fn an_openai_account_grant_routes_the_chatgpt_subscription_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("miao.json"),
+            serde_json::to_string(&json!({
+                "model": "openai/gpt-5",
+                "providers": {
+                    "openai": {
+                        "models": {
+                            "gpt-5": {
+                                "api": {"type": "aisdk", "package": "@ai-sdk/openai"},
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let database = directory.path().join("credentials.db");
+        let grant = json!({
+            "type": "oauth",
+            "access": "a1",
+            "refresh": "r1",
+            "expires": 4102444800000u64,
+            "methodID": "chatgpt-headless",
+        });
+        crate::credential::store_oauth(&database, "openai", "default", &grant).expect("store");
+        let entries = routes(
+            &[Source::Dir(directory.path().to_path_buf())],
+            Some(&database),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "{}",
+            serde_json::to_string(&entries).unwrap()
+        );
+        assert_eq!(entries[0]["provider"], "subscription-responses");
+        assert_eq!(entries[0].get("endpoint"), None);
+
+        // An API key beside the account keeps the ordinary Responses route.
+        crate::credential::store_key(&database, "openai", "sk-live", Some("work")).expect("store");
+        let entries = routes(
+            &[Source::Dir(directory.path().to_path_buf())],
+            Some(&database),
+        )
+        .unwrap()
+        .unwrap();
+        let key = entries
+            .iter()
+            .find(|entry| entry["provider"] == "openai-responses")
+            .expect("the key route");
+        assert_eq!(key["endpoint"], "https://api.openai.com/v1/responses");
+        assert!(entries
+            .iter()
+            .any(|entry| entry["provider"] == "subscription-responses"));
+    }
+
+    /// Signing in has to make OpenAI's models selectable even when the
+    /// configuration never names the provider: the shipped catalogue supplies
+    /// the models and the account grant supplies the transport.
+    #[test]
+    fn a_stored_account_grant_routes_openai_without_a_provider_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("credentials.db");
+        let grant = json!({
+            "type": "oauth",
+            "access": "a1",
+            "refresh": "r1",
+            "expires": 4102444800000u64,
+            "methodID": "chatgpt-headless",
+        });
+        crate::credential::store_oauth(&database, "openai", "default", &grant).expect("store");
+        let snapshot = json!({
+            "openai": {
+                "npm": "@ai-sdk/openai",
+                "models": {
+                    "gpt-5": {"modalities": {"output": ["text"]}},
+                    "gpt-image": {"modalities": {"output": ["image"]}},
+                },
+            },
+        });
+        let entries = snapshot_oauth_routes(&snapshot, &serde_json::Map::new(), Some(&database));
+        assert_eq!(
+            entries.len(),
+            1,
+            "{}",
+            serde_json::to_string(&entries).unwrap()
+        );
+        assert_eq!(entries[0]["id"], "openai/gpt-5");
+        assert_eq!(entries[0]["provider"], "subscription-responses");
+        assert_eq!(entries[0].get("endpoint"), None);
+        assert_eq!(entries[0]["credential"]["integration"], "openai");
     }
 
     /// A provider can hold several accounts, and the engine models an account as
