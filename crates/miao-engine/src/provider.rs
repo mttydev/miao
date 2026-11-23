@@ -284,6 +284,25 @@ const RETRY_AFTER_MAX: Duration = Duration::from_secs(15 * 60);
 /// how much wall clock they may add up to. Two of the most common
 /// `Retry-After: 30s` fit; a rate limit that keeps saying thirty seconds forever
 /// still ends the turn with the refusal naming what it asked for.
+/// How long one provider turn may keep failing before the retries stop.
+///
+/// A retryable failure is detected by a watchdog, not by an immediate error, so
+/// the window must cover the longest of them: `byte_idle` (180 s) plus the
+/// dispatch of the replay it earns. A window shorter than that can never observe
+/// the failure it was armed for.
+const WATCHDOG_WINDOW: Duration = Duration::from_secs(240);
+
+/// The retry window, overridable so a test can observe the schedule without
+/// waiting out a watchdog period. An unreadable or zero value keeps the
+/// default, since a window of zero would refuse every retry.
+fn retry_window() -> Duration {
+    std::env::var("MIAO_LLM_RETRY_WINDOW_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .and_then(|value| Duration::try_from_secs_f64(value / 1000.0).ok())
+        .unwrap_or(WATCHDOG_WINDOW)
+}
 const VENDOR_WAITS_PER_TURN: usize = 2;
 const VENDOR_WAIT_TOTAL: Duration = Duration::from_secs(90);
 
@@ -328,7 +347,14 @@ struct Granted {
 
 impl Budget {
     pub fn new() -> Arc<Self> {
-        Self::with_deadline(Duration::from_secs(60))
+        // The window has to outlast the silence a retryable failure is measured
+        // by. `byte_idle` declares a dead connection only after 180 s of wire
+        // silence, so a 60 s window had already expired by the time the failure
+        // it exists to replay was reported: every retryable transport failure
+        // that took longer than a minute to detect was returned to the operator
+        // instead of being retried. The window starts at the first failure, so
+        // this is one watchdog period plus room for the replay's own dispatch.
+        Self::with_deadline(retry_window())
     }
     /// One provider turn's retry window. Tests build a shorter one so the
     /// schedule can be observed without waiting out the real budget.
@@ -2875,11 +2901,23 @@ async fn read_stream_with_budget<P: Parser>(
         for frame in decoder.push(&chunk)? {
             input_budget.frame(&frame)?;
             parser.frame(&frame)?;
-            if match &frame {
+            // Two facts, two questions. A canonical event — including the
+            // `message_start` a gateway opens with — re-arms the event deadline
+            // so a healthy turn's clock keeps rolling. Only real content marks
+            // the reply as started, which is what decides whether a later
+            // silence is replayable (Transport) or terminal (Stream): a gateway
+            // that says "here comes a message" and then goes quiet has
+            // produced nothing, and its silence must be retried.
+            let canonical = match &frame {
                 Frame::Done => true,
                 Frame::Json(event) => crate::first_event::semantic_event(event),
-            } {
-                received_event = true;
+            };
+            if let Frame::Json(event) = &frame {
+                if crate::first_event::content(event) {
+                    received_event = true;
+                }
+            }
+            if canonical {
                 event = watchdogs.next_event_deadline();
             }
             // Publish a normalized delta alongside the raw frame. The engine's

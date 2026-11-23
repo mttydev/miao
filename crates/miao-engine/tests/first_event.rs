@@ -105,8 +105,21 @@ async fn fixture(mode: usize) -> (String, Arc<AtomicUsize>, tokio::task::JoinHan
                         return;
                     }
                     if mode == 4 {
-                        // Transport keep-alives after a real event must not keep
-                        // a stalled model turn alive indefinitely.
+                        // Transport keep-alives after real output must not keep a
+                        // stalled model turn alive indefinitely. The output has to
+                        // be actual content: `message_start` is framing, and a
+                        // stall before any content is a transport failure the turn
+                        // replays rather than a stalled reply.
+                        let opened = [
+                            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}),
+                        ]
+                        .iter()
+                        .map(|event| format!("data: {event}\n\n"))
+                        .collect::<String>();
+                        if socket.write_all(opened.as_bytes()).await.is_err() {
+                            return;
+                        }
                         loop {
                             if socket
                                 .write_all(b"data: {\"type\":\"ping\"}\n\n")
@@ -180,6 +193,10 @@ async fn actual_native_process_bounds_headers_silence_and_pings_without_refillin
                 &endpoint,
             ])
             .env("ANTHROPIC_API_KEY", "fixture-key")
+            // The production window now covers a watchdog period (240 s), which
+            // no test can wait out. The retrying modes only need a window long
+            // enough for several attempts inside the 90 s wait below.
+            .env("MIAO_LLM_RETRY_WINDOW_MS", "6000")
             // Modes 0-2 exercise the bound itself, so they keep a budget tight
             // enough to fire on every attempt within the retry window. Mode 3
             // is the healthy control: its first event releases the deadline,
@@ -284,14 +301,22 @@ async fn actual_native_process_bounds_headers_silence_and_pings_without_refillin
             assert!(calls <= 25, "attempts escaped the retry cap: {calls}");
         }
         if mode == 4 {
-            assert!(events
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|event| event["kind"] == "stop_failure"
-                    && event["data"]["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("no stream event"))));
+            // The keep-alives keep arriving, so no *event* deadline fires; the
+            // silence that stops the turn is the wire's own, and it is fatal
+            // only because real output already streamed (the fixture sends a
+            // text delta first). Either watchdog message names the same fact.
+            assert!(
+                events
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["kind"] == "stop_failure"
+                        && event["data"]["message"].as_str().is_some_and(|message| {
+                            message.contains("no stream event")
+                                || message.contains("no response bytes")
+                        })),
+                "{events}"
+            );
         }
         assert!(!events
             .as_array()
