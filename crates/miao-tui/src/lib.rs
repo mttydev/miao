@@ -119,7 +119,6 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
     );
     app.configure_scroll(config.scroll_speed, config.scroll_acceleration);
-    app.configure_prompt_width(config.prompt_max_width);
     app.configure_leader_timeout(config.leader_timeout_ms);
     app.configure_animations(config.animations);
     app.configure_auto_effort(config.auto_effort);

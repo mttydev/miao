@@ -64,10 +64,9 @@ pub struct Config {
     /// `keybinds` entries, flattened to action name → strokes. `None` means the
     /// action was explicitly unbound (`false` or `"none"`).
     pub keybinds: BTreeMap<String, Option<Vec<String>>>,
-    /// `prompt.max_width`: the landing prompt's width cap. A positive integer
-    /// is a fixed cap, and an absent key leaves the landing band as wide as
-    /// the Session's composer, so the input keeps its seat and width when the
-    /// first Session opens.
+    /// `prompt.max_width` from `tui.json`: kept so an old `tui.json` still
+    /// parses without a warning. The landing composer is the Session's own
+    /// box now and fills its column, so the knob has nothing left to cap.
     pub prompt_max_width: PromptWidth,
     /// `auto_effort`: pick a reasoning-effort variant from the model's own
     /// variants for each prompt, so a short question does not spend the budget a
@@ -87,10 +86,9 @@ pub struct Config {
 
 /// `prompt.max_width` from `tui.json`.
 ///
-/// Absent, the landing prompt fills its column the way the Session composer
-/// does, so the input the operator types into does not move or shrink when
-/// the first Session opens. A positive integer caps the band at that many
-/// columns instead (`{"prompt": {"max_width": 75}}`).
+/// The landing composer is the Session's own box now and fills its column, so
+/// nothing reads this any more: the key parses for an old `tui.json`'s sake
+/// and the variants stay for the tests that pin the parsing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PromptWidth {
     /// A fixed maximum in columns.
@@ -921,9 +919,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The landing band honours `prompt.max_width`: a number caps it,
-    /// `"auto"` fills the column the Session composer fills, and absent uses
-    /// this build's default, which is `"auto"`.
+    /// `prompt.max_width` still parses: a number or `"auto"`, and absent uses
+    /// this build's default, which is `"auto"`. Nothing reads the value any
+    /// more — the landing composer is the Session's own box — but an old
+    /// `tui.json` must not turn into a pile of warnings.
     #[test]
     fn the_landing_prompt_width_comes_from_the_typescript_key() {
         let dir = temp_dir("prompt-width");
