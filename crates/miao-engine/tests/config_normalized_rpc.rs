@@ -33,6 +33,13 @@ fn the_engine_reports_the_document_it_normalized() {
             &sources,
         ])
         .env("ANTHROPIC_API_KEY", "fixture-key")
+        // The spawned engine must not see the operator's state: a stored
+        // credential in HOME turns the fixture start into a different
+        // derivation and aborts it ("invalid default model route"), which is
+        // exactly the state a self-hosted runner carries.
+        .env("HOME", dir.path().join("home"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("MIAO_DATA_HOME", dir.path().join("data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -85,6 +92,12 @@ fn a_process_without_ordered_sources_says_so() {
             "fixture",
         ])
         .env("ANTHROPIC_API_KEY", "fixture-key")
+        // Same isolation as above: the refusal under test is about the
+        // ordered sources, not about whatever the runner's HOME happens to
+        // hold.
+        .env("HOME", dir.path().join("home"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("MIAO_DATA_HOME", dir.path().join("data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
