@@ -19,6 +19,7 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 - **cli**: locate a session that lives in another workspace ledger (#3345) (`b8a1865368`)
 
 ### Fixed
+- **engine**: replay a gateway that goes silent before any content (#3344) (`662d9009fb`)
 - **tui**: keep the idle hint to idle, and paint nothing while busy (#3343) (`3a258957a7`)
 
 ## [0.4.17] - 2026-11-23
