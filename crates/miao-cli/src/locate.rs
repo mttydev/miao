@@ -47,11 +47,21 @@ struct Index {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct LedgerStamp {
     path: PathBuf,
-    len: u64,
-    modified_ms: u128,
+    /// SQLite's change counter, from the database header. Every write bumps it,
+    /// which makes it the authority on "has this ledger changed".
+    ///
+    /// A length and a modification time are not enough: an insert can leave the
+    /// file exactly the same size, and two writes can land inside one
+    /// millisecond, so a fresh index was accepted over a ledger that had gained
+    /// a Session. Four bytes at offset 24 cost one short read and cannot be
+    /// fooled that way.
+    change_counter: u32,
 }
 
-const INDEX_VERSION: u32 = 1;
+/// Bumped when the recorded shape changes. Version 2 records SQLite's change
+/// counter in place of a length and modification time, so a version-1 file is
+/// rebuilt rather than misread as current.
+const INDEX_VERSION: u32 = 2;
 const INDEX_FILE: &str = "sessions-index.json";
 
 /// A Session found by `locate`, plus whether a prefix matched several.
@@ -118,17 +128,19 @@ fn ledger_paths(storage: &Path) -> Vec<PathBuf> {
 }
 
 fn stamp(path: &Path) -> Option<LedgerStamp> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
+    let mut header = [0u8; 100];
+    let mut file = std::fs::File::open(path).ok()?;
+    // A file without a complete header is not a database yet: report nothing,
+    // so a half-written ledger is scanned instead of trusted.
+    if std::io::Read::read_exact(&mut file, &mut header).is_err() {
+        return None;
+    }
+    if &header[..16] != b"SQLite format 3\0" {
+        return None;
+    }
     Some(LedgerStamp {
         path: path.to_path_buf(),
-        len: metadata.len(),
-        modified_ms,
+        change_counter: u32::from_be_bytes([header[24], header[25], header[26], header[27]]),
     })
 }
 
@@ -345,6 +357,36 @@ mod tests {
         assert_eq!(
             locate_under(&dir, "ses_bbb").unwrap().unwrap().entry.root,
             "/work/two"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The stamp must notice a write that leaves the file the same size.
+    ///
+    /// Measured on a real ledger: every insert here leaves the file at 20480
+    /// bytes, and two writes inside one millisecond carry the same modification
+    /// time, so a length-plus-mtime stamp judged the index fresh over a ledger
+    /// that had gained a Session. SQLite's change counter is bumped by the write
+    /// itself, so it cannot be fooled this way.
+    #[test]
+    fn a_same_size_write_still_changes_the_stamp() {
+        let dir = scratch("same-size");
+        let path = dir.join("a.db");
+        ledger(&path, &[("ses_aaa", "/work/one")]);
+        let size_before = std::fs::metadata(&path).unwrap().len();
+        let before = super::stamp(&path).expect("a readable ledger has a stamp");
+
+        ledger(&path, &[("ses_bbb", "/work/one")]);
+        let size_after = std::fs::metadata(&path).unwrap().len();
+        let after = super::stamp(&path).expect("a readable ledger has a stamp");
+
+        assert_eq!(
+            size_before, size_after,
+            "the size is unchanged, which is exactly why size alone is not enough"
+        );
+        assert_ne!(
+            before.change_counter, after.change_counter,
+            "the change counter must move even when the size does not"
         );
         std::fs::remove_dir_all(dir).ok();
     }
