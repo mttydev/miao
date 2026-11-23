@@ -13,6 +13,13 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-11-23
+
+### Fixed
+- **tui**: a failed job read ends the wait instead of repeating it (#3349) (`563a62569a`)
+- **tui**: resync after non-ASCII cells (#3347) (`1c8646a769`)
+- **engine**: answer parallel tool results in one Anthropic turn (#3342) (`958052332d`)
+
 ## [0.4.18] - 2026-11-23
 
 ### Added
