@@ -25,7 +25,7 @@ pub(crate) const APPLICATION_ID: u32 = 0x4d494145;
 // a destination before its host has switched the authoritative placement.
 // 26 adds `engine_staged_revert.scope` (additive: an older engine keeps writing
 // the combined phases the default already names).
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// How long a second engine waits for whoever holds the migration lock before
 /// giving up. The host times an engine request out at 60 s, so a wait that long
@@ -415,6 +415,7 @@ impl Store {
                     CREATE TABLE IF NOT EXISTS engine_cache_prefix(session_id TEXT PRIMARY KEY REFERENCES engine_session(id), affinity_session TEXT NOT NULL, route_hash TEXT NOT NULL, parameters_hash TEXT NOT NULL, history_hash TEXT NOT NULL, message_count INTEGER NOT NULL, session_seq INTEGER NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_tool(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES engine_run(id), name TEXT NOT NULL, input TEXT NOT NULL, state TEXT NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_location(session_id TEXT PRIMARY KEY REFERENCES engine_session(id),root TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS engine_checkout_lease(root TEXT PRIMARY KEY, session_id TEXT NOT NULL, pid INTEGER, acquired_at_ms INTEGER NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_approval(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES engine_session(id),run_id TEXT NOT NULL REFERENCES engine_run(id),call_id TEXT NOT NULL REFERENCES engine_tool(id),binding TEXT NOT NULL,expires_at INTEGER NOT NULL,state TEXT NOT NULL);
                     CREATE UNIQUE INDEX IF NOT EXISTS engine_pending_approval ON engine_approval(call_id) WHERE state='pending';
                     CREATE TABLE IF NOT EXISTS engine_lineage(session_id TEXT PRIMARY KEY REFERENCES engine_session(id),parent_session_id TEXT NOT NULL REFERENCES engine_session(id),message_seq INTEGER NOT NULL);
@@ -1247,6 +1248,140 @@ impl Store {
         }).await
     }
 
+    /// The directory one Session's tools read and write in. This is normally
+    /// the engine's Location, but a second Session on the same checkout gets a
+    /// worktree root so two Sessions never share a mutable HEAD.
+    pub async fn session_root(&self, session: &str) -> Result<Option<String>, Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT root FROM engine_location WHERE session_id=?1",
+                    [&session],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    /// Every recorded Session root, so a restarted runtime can keep resumed
+    /// Sessions in the worktree they were placed in.
+    pub async fn session_roots(&self) -> Result<Vec<(String, String)>, Error> {
+        self.call(move |conn| {
+            let mut statement =
+                conn.prepare("SELECT session_id,root FROM engine_location ORDER BY session_id")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    /// Move one Session's tools to another root without moving its storage.
+    pub async fn set_session_root(&self, session: &str, root: &str) -> Result<(), Error> {
+        let (session, root) = (session.to_owned(), root.to_owned());
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            tx.execute(
+                "UPDATE engine_location SET root=?2 WHERE session_id=?1",
+                params![session, root],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Claim the one writable main-checkout slot for a Session. The first
+    /// Session that claims a checkout owns it; every later Session is placed in
+    /// a worktree. An archived owner releases the slot, so a later Session can
+    /// take the checkout without a process restart.
+    pub async fn acquire_checkout_lease(&self, root: &str, session: &str) -> Result<bool, Error> {
+        let (root, session) = (root.to_owned(), session.to_owned());
+        let pid = std::process::id() as i64;
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            let current: Option<(String, Option<String>, Option<i64>)> = tx
+                .query_row(
+                    "SELECT l.session_id,s.id,s.archived_at_ms FROM engine_checkout_lease l LEFT JOIN engine_session s ON s.id=l.session_id WHERE l.root=?1",
+                    [&root],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let available = match &current {
+                None => true,
+                Some((owner, _, _)) if owner == &session => true,
+                // A deleted identity has no row; an archived one is no longer
+                // writing. Both release the checkout without needing a sweep.
+                Some((_, owner, archived)) => owner.is_none() || archived.is_some(),
+            };
+            if !available {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO engine_checkout_lease(root,session_id,pid,acquired_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(root) DO UPDATE SET session_id=excluded.session_id,pid=excluded.pid,acquired_at_ms=excluded.acquired_at_ms",
+                params![root, session, pid, crate::approval::now_ms() as i64],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// Drop a Session's checkout claim when it archives, is deleted, or moves
+    /// into a worktree.
+    pub async fn release_checkout_lease(&self, session: &str) -> Result<(), Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            tx.execute(
+                "DELETE FROM engine_checkout_lease WHERE session_id=?1",
+                [&session],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Give an existing checkout to the oldest live Session that already works
+    /// there. Without this an upgraded runtime starts with no lease, so the
+    /// next new Session could claim a checkout that older Sessions are already
+    /// using. A Session archived by the operator no longer counts.
+    pub async fn seed_checkout_lease(&self, root: &str) -> Result<Option<String>, Error> {
+        let root = root.to_owned();
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            let leased: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM engine_checkout_lease WHERE root=?1)",
+                [&root],
+                |row| row.get(0),
+            )?;
+            if leased {
+                return Ok(None);
+            }
+            let owner: Option<String> = tx
+                .query_row(
+                    "SELECT s.id FROM engine_session s JOIN engine_location l ON l.session_id=s.id WHERE l.root=?1 AND s.archived_at_ms IS NULL ORDER BY s.created_at_ms,s.id LIMIT 1",
+                    [&root],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(owner) = owner else {
+                return Ok(None);
+            };
+            tx.execute(
+                "INSERT INTO engine_checkout_lease(root,session_id,pid,acquired_at_ms) VALUES(?1,?2,?3,?4)",
+                params![root, owner, std::process::id() as i64, crate::approval::now_ms() as i64],
+            )?;
+            tx.commit()?;
+            Ok(Some(owner))
+        })
+        .await
+    }
+
     /// The Session's collaboration mode. A Session without a row defaults to
     /// Build, matching the schema default.
     pub async fn mode(&self, session: &str) -> Result<CollaborationMode, Error> {
@@ -1629,6 +1764,7 @@ impl Store {
                 "DELETE FROM engine_context WHERE session_id=?1",
                 "DELETE FROM engine_input WHERE session_id=?1",
                 "DELETE FROM engine_location WHERE session_id=?1",
+                "DELETE FROM engine_checkout_lease WHERE session_id=?1",
                 "DELETE FROM engine_event WHERE session_id=?1",
                 "DELETE FROM engine_lease WHERE session_id=?1",
                 "DELETE FROM engine_lineage WHERE parent_session_id=?1",

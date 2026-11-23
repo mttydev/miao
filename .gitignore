@@ -1,6 +1,7 @@
 .DS_Store
 node_modules
 .worktrees
+.miao-worktrees
 .env
 .env.local
 .idea

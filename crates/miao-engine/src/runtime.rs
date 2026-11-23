@@ -310,6 +310,10 @@ struct Inner {
     /// Sessions with a drain in this process. The timer heartbeat must not claim
     /// one: claiming advances the epoch and would fence the active drain.
     draining: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Session placement reads the checkout lease and may create a worktree, so
+    /// two New Session requests in one engine must not interleave between the
+    /// read and the insert.
+    placement: Mutex<()>,
     /// Why the newest local stop was asked for, per Session. It rides memory
     /// from the actor that cancels a token to the drain that writes its own
     /// terminal event, so no store write sits on the interrupt path and the
@@ -1094,6 +1098,39 @@ impl Runtime {
         store.recover_questions_unowned().await?;
         store.adopt_wakeups().await?;
         store.adopt_crons().await?;
+        // A Session placed in a worktree keeps that root across a restart.
+        // Registering it here means a resumed turn edits the same files it did
+        // before instead of silently falling back to the engine's checkout.
+        for (session, root) in store.session_roots().await? {
+            if let Err(error) = tools.register_session_root(&session, &root).await {
+                // A worktree removed outside miao must not fall back to the
+                // engine checkout: that checkout may belong to another
+                // Session. Re-home the Session in a fresh worktree before it
+                // can run a turn.
+                if let Ok(checkout) = crate::worktree::checkout(tools.engine_root()) {
+                    if let Ok(tree) = Self::session_worktree(&session, &checkout) {
+                        if store.set_session_root(&session, &tree).await.is_ok()
+                            && tools.register_session_root(&session, &tree).await.is_ok()
+                        {
+                            eprintln!(
+                                "miao-engine: Session {session} worktree {root} is gone; \
+                                 re-homed at {tree}"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                eprintln!(
+                    "miao-engine: Session {session} root {root} is unavailable ({error}); \
+                     leaving it at the engine root"
+                );
+            }
+        }
+        // Legacy databases predate the lease. Give the checkout to the oldest
+        // live Session already there so a new Session is not the one that
+        // starts sharing it.
+        let engine_root = tools.engine_root().to_string_lossy().to_string();
+        let _ = store.seed_checkout_lease(&engine_root).await?;
         // Ephemeral progress notices, one per streamed delta. This is a
         // lossless fan-out rather than a `broadcast` ring: a dropped delta has
         // no durable cursor to replay from, so the reader can only re-project
@@ -1128,6 +1165,7 @@ impl Runtime {
                 subagent_pool: FairPool::new(SUBAGENT_SLOTS, crate::subagent::PER_SESSION_LIMIT),
                 started: Mutex::new(std::collections::HashSet::new()),
                 draining: std::sync::Mutex::new(std::collections::HashSet::new()),
+                placement: Mutex::new(()),
                 stop_origins: Mutex::new(HashMap::new()),
                 stop: CancellationToken::new(),
                 heartbeat: Mutex::new(None),
@@ -2529,10 +2567,107 @@ impl Runtime {
     }
 
     pub async fn initialize(&self, session: &str, title: &str) -> Result<Value, Error> {
-        self.inner
+        // Placement is the one place that decides which checkout a Session
+        // writes. It runs under a process lock so two New Session requests
+        // cannot both see a free lease and both take the main checkout.
+        let _placement = self.inner.placement.lock().await;
+        if let Some(root) = self.inner.store.session_root(session).await? {
+            let engine_root = self.inner.tools.engine_root().to_string_lossy().to_string();
+            // A resumed Session keeps its worktree. A Session recorded at the
+            // engine root may have lost the checkout while it was closed; it
+            // must be re-placed before its next turn can write, or it would
+            // resume into a checkout another Session now owns.
+            let root = if root == engine_root {
+                if self
+                    .inner
+                    .store
+                    .acquire_checkout_lease(&engine_root, session)
+                    .await?
+                {
+                    root
+                } else {
+                    let checkout = crate::worktree::checkout(std::path::Path::new(&engine_root))?;
+                    let tree = Self::session_worktree(session, &checkout)?;
+                    self.inner.store.set_session_root(session, &tree).await?;
+                    tree
+                }
+            } else {
+                root
+            };
+            self.inner
+                .tools
+                .register_session_root(session, &root)
+                .await
+                .map_err(|error| Error::Invalid(error.to_string()))?;
+            return self.inner.store.initialize(session, title, &root).await;
+        }
+        let engine_root = self.inner.tools.engine_root().to_path_buf();
+        let engine_root = engine_root.to_string_lossy().to_string();
+        let checkout = match crate::worktree::checkout(std::path::Path::new(&engine_root)) {
+            Ok(checkout) => checkout,
+            // A non-git workspace has no shared HEAD to protect, so every
+            // Session stays in the directory the operator launched.
+            Err(_) => {
+                let root = engine_root.clone();
+                let value = self.inner.store.initialize(session, title, &root).await?;
+                self.inner
+                    .tools
+                    .register_session_root(session, &root)
+                    .await
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
+                return Ok(value);
+            }
+        };
+        let root = if self
+            .inner
             .store
-            .initialize(session, title, self.inner.tools.location())
-            .await
+            .acquire_checkout_lease(&engine_root, session)
+            .await?
+        {
+            engine_root.clone()
+        } else {
+            // Another Session owns this checkout. Give the new Session its own
+            // detached worktree so neither Session's HEAD or index can move
+            // under the other.
+            Self::session_worktree(session, &checkout)?
+        };
+        let result = self.inner.store.initialize(session, title, &root).await;
+        match result {
+            Ok(value) => {
+                self.inner
+                    .tools
+                    .register_session_root(session, &root)
+                    .await
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
+                Ok(value)
+            }
+            Err(error) => {
+                // The lease belongs to an identity that was never created;
+                // leaving it behind would strand the checkout forever.
+                let _ = self.inner.store.release_checkout_lease(session).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// The worktree a Session uses when the checkout is taken. A retry may
+    /// find the tree from an interrupted placement; reuse it only when it is
+    /// really a directory, never fall back to the shared checkout.
+    fn session_worktree(session: &str, checkout: &std::path::Path) -> Result<String, Error> {
+        let name = session.strip_prefix("ses_").unwrap_or(session);
+        match crate::worktree::create_detached(checkout, name) {
+            Ok(tree) => Ok(tree.path),
+            Err(error) => {
+                let path = crate::placement::canonical(
+                    &checkout.join(crate::worktree::DIRECTORY).join(name),
+                );
+                if path.is_dir() {
+                    Ok(path.display().to_string())
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     pub fn store(&self) -> &Store {
@@ -4415,6 +4550,21 @@ async fn execute(
                 ));
             }
         }
+        // The Session's files may live in a worktree while the engine still
+        // serves the checkout. Say which root this turn writes, so the model
+        // does not treat the engine's checkout as its own workspace.
+        let session_root = inner
+            .tools
+            .clone()
+            .with_read_scope(session)
+            .location()
+            .to_owned();
+        let engine_root = inner.tools.location().to_owned();
+        if session_root != engine_root {
+            tail.push_str(&format!(
+                "\n\n<worktree root=\"{session_root}\">\nThis Session works in its own git worktree. Resolve paths against this root and never run git in the checkout it was separated from ({engine_root}); that checkout belongs to another Session.\n</worktree>"
+            ));
+        }
         let mut bundle = match crate::context::assemble_for_agent(
             &inner.tools,
             &policy,
@@ -5634,9 +5784,13 @@ command: None,
                         Some(replay) => replay.read_receipt(name, &block_input).await?,
                         None => None,
                     };
+                    // Paths resolve against the Session's own root. Without
+                    // this scope a Session placed in a worktree would still
+                    // read and write the engine's checkout.
+                    let tools = inner.tools.clone().with_read_scope(session);
                     let prepared = match recorded_read {
-                        Some(read) => inner.tools.prepare_recorded_read(block_input, &read),
-                        None => inner.tools.prepare(name, block_input).await,
+                        Some(read) => tools.prepare_recorded_read(block_input, &read),
+                        None => tools.prepare(name, block_input).await,
                     };
                     match prepared {
                         Err(error) => (
@@ -10615,6 +10769,8 @@ async fn background(
     });
     let result = inner
         .tools
+        .clone()
+        .with_read_scope(session)
         .execute_background(prepared, cancel.clone(), Some(output_tx))
         .await;
     let _ = tail.await;
@@ -10688,7 +10844,13 @@ async fn execute_read_batch(
         if block["input_error"].is_string() || block["provider_executed"] == true {
             break;
         }
-        let Ok(tool) = inner.tools.prepare(name, block["input"].clone()).await else {
+        let Ok(tool) = inner
+            .tools
+            .clone()
+            .with_read_scope(session)
+            .prepare(name, block["input"].clone())
+            .await
+        else {
             break;
         };
         // Membership is declaration-driven (ADR-13): a call joins the batch

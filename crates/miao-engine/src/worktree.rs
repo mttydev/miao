@@ -63,6 +63,17 @@ pub fn main_checkout(root: &Path) -> Option<PathBuf> {
     (main != root).then_some(main)
 }
 
+/// The main checkout for any path inside a git repository. A linked worktree
+/// resolves to the checkout it was added from; the checkout itself resolves to
+/// its own top level. Placement uses this as the identity of the single
+/// writable checkout, so a worktree and its parent cannot both claim it.
+pub fn checkout(root: &Path) -> Result<PathBuf, Error> {
+    let root = canonical(root);
+    let top = git(&root, &["rev-parse", "--show-toplevel"])?;
+    let top = canonical(Path::new(top.trim()));
+    Ok(main_checkout(&top).unwrap_or(top))
+}
+
 /// Add a worktree named `name`, creating or resetting the branch of that name.
 pub fn create(root: &Path, name: &str) -> Result<Tree, Error> {
     validate(name)?;
@@ -71,12 +82,65 @@ pub fn create(root: &Path, name: &str) -> Result<Tree, Error> {
         root,
         &["worktree", "add", "-B", name, &path.display().to_string()],
     )?;
+    ensure_excluded(root);
     Ok(Tree {
         name: name.to_string(),
         path: canonical(&path).display().to_string(),
         branch: Some(name.to_string()),
         main: false,
     })
+}
+
+/// Add a detached worktree named `name`. A detached tree carries the starting
+/// commit without claiming a branch, so several Sessions can start from one
+/// HEAD without one of them moving the branch the others are based on.
+pub fn create_detached(root: &Path, name: &str) -> Result<Tree, Error> {
+    validate(name)?;
+    let path = root.join(DIRECTORY).join(name);
+    git(
+        root,
+        &["worktree", "add", "--detach", &path.display().to_string()],
+    )?;
+    ensure_excluded(root);
+    Ok(Tree {
+        name: name.to_string(),
+        path: canonical(&path).display().to_string(),
+        branch: None,
+        main: false,
+    })
+}
+
+/// Hide the worktree directory from `git status` in the checkout that owns it.
+/// The entry goes to `.git/info/exclude`, not a tracked `.gitignore`: a Session
+/// may create a worktree in a repository whose `.gitignore` it must not edit,
+/// and every Session on the checkout shares the same local ignore.
+fn ensure_excluded(root: &Path) {
+    let Ok(common) = git(root, &["rev-parse", "--git-common-dir"]) else {
+        return;
+    };
+    let common = PathBuf::from(common.trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        root.join(common)
+    };
+    let info = common.join("info");
+    if std::fs::create_dir_all(&info).is_err() {
+        return;
+    }
+    let exclude = info.join("exclude");
+    let line = format!("/{DIRECTORY}/");
+    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if current.lines().any(|entry| entry.trim() == line) {
+        return;
+    }
+    let mut text = current;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&line);
+    text.push('\n');
+    let _ = std::fs::write(exclude, text);
 }
 
 /// Remove the worktree named `name` and the branch it held.
