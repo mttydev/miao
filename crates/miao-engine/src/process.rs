@@ -27,6 +27,14 @@ pub struct Input {
     /// are merged. Requires the same platform enforcement as the sandbox.
     #[serde(default)]
     pub pty: bool,
+    /// How long the caller expects this to run, when it can estimate it.
+    ///
+    /// Display only: it never bounds the process (that is `timeout_ms`), it is
+    /// carried into the stored job input so a host can turn a bare elapsed
+    /// clock into a countdown, and it is accepted here because the admitted
+    /// input is what the execution face parses.
+    #[serde(default)]
+    pub eta_ms: Option<u64>,
 }
 /// Product parity with `packages/engine-ts/core/src/tool/bash.ts`: a foreground command
 /// defaults to two minutes and may ask for up to ten. Remote builds routinely
