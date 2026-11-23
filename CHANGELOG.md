@@ -13,6 +13,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.17] - 2026-11-23
+
+### Fixed
+- **engine**: decode GBK command output instead of flattening it (#3340) (`4233384007`)
+
 ## [0.4.16] - 2026-11-23
 
 ### Fixed
