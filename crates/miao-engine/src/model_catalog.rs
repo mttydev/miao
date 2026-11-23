@@ -124,6 +124,19 @@ fn apply_overlay(snapshot: &mut serde_json::Value) {
             "glm-5.3-flash": {
                 "cost": { "input": 0.11952, "output": 0.41831, "cache_read": 0.03436, "cache_write": 0 },
             },
+            // Live on the coding-plan endpoint, not yet in models.dev. The
+            // plan page declares a 1M window, 128K output, video/image/text/
+            // file input and tool calling.
+            "glm-5.4": {
+                "name": "GLM-5.4",
+                "release_date": "2026-11-23",
+                "attachment": true,
+                "reasoning": true,
+                "temperature": true,
+                "tool_call": true,
+                "limit": { "context": 1000000, "output": 131072 },
+                "modalities": { "input": ["text", "image", "video", "pdf"], "output": ["text"] },
+            },
         },
         "volcengine": {
             "deepseek-v4-1-flash-261017": {
@@ -692,6 +705,23 @@ mod window_tests {
             snapshot["volcengine"]["models"]["deepseek-v4-1-flash-261017"]["modalities"]["input"],
             serde_json::json!(["text", "image"]),
         );
+    }
+
+    #[test]
+    fn the_overlay_adds_glm_5_4_when_the_catalog_has_not_caught_up() {
+        let mut snapshot = serde_json::json!({
+            "zhipuai-coding-plan": { "models": {} }
+        });
+        apply_overlay(&mut snapshot);
+        let model = &snapshot["zhipuai-coding-plan"]["models"]["glm-5.4"];
+        assert_eq!(model["limit"]["context"], serde_json::json!(1000000));
+        assert_eq!(model["limit"]["output"], serde_json::json!(131072));
+        assert_eq!(
+            model["modalities"]["input"],
+            serde_json::json!(["text", "image", "video", "pdf"])
+        );
+        assert_eq!(model["tool_call"], serde_json::json!(true));
+        assert_eq!(model["attachment"], serde_json::json!(true));
     }
 
     #[test]

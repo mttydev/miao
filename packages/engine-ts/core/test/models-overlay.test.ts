@@ -58,6 +58,18 @@ describe("ModelsOverlay", () => {
     })
   })
 
+  it("adds GLM-5.4 to the coding plan when the catalog has not caught up", () => {
+    const merged = ModelsOverlay.merge({})
+    const model = merged["zhipuai-coding-plan"]?.models["glm-5.4"]
+    expect(model?.limit).toEqual({ context: 1_000_000, output: 131_072 })
+    expect(model?.modalities).toEqual({
+      input: ["text", "image", "video", "pdf"],
+      output: ["text"],
+    })
+    expect(model?.tool_call).toBe(true)
+    expect(model?.attachment).toBe(true)
+  })
+
   it("restores image input for Volcengine's dated DeepSeek V4.1 Flash", () => {
     const catalog: Record<string, ModelsCatalog.Provider> = {
       volcengine: {
