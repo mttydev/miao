@@ -3057,6 +3057,27 @@ impl Store {
         })
         .await
     }
+    /// Whether a live lease on this Session belongs to another process. The
+    /// owner is then mid-drain: taking the claim would kill its in-flight run,
+    /// so callers leave the Session — and any input waiting in the durable
+    /// inbox — to that owner, which promotes the input at its next
+    /// provider-turn boundary.
+    pub async fn foreign_lease_live(&self, session: &str) -> Result<bool, Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            let row: Option<(i64, i64, Option<u32>)> = conn
+                .query_row(
+                    "SELECT interval_ms,last_ms,owner_pid FROM engine_lease WHERE session_id=?1",
+                    [&session],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            Ok(row.is_some_and(|(interval, last, pid)| {
+                lease_live(last, interval, pid) && !pid.is_some_and(|pid| pid == std::process::id())
+            }))
+        })
+        .await
+    }
     pub async fn record(&self, session: &str, kind: &str, data: Value) -> Result<Event, Error> {
         let (session, kind) = (session.to_owned(), kind.to_owned());
         self.call(move |conn| {
@@ -3679,20 +3700,17 @@ impl Store {
     /// whose lease is still fresh belongs to another process and must not be
     /// interrupted here.
     pub async fn recover(&self) -> Result<Vec<Event>, Error> {
-        self.recover_session_inner(None, true).await
+        self.recover_session_inner(None).await
     }
 
     /// Reconcile one Session this process was driving; its own live lease must
-    /// not stop the cleanup.
+    /// not stop the cleanup, and a lease another process still holds must not
+    /// lose its run — that owner is mid-drain.
     pub async fn recover_session(&self, session: Option<&str>) -> Result<Vec<Event>, Error> {
-        self.recover_session_inner(session, false).await
+        self.recover_session_inner(session).await
     }
 
-    async fn recover_session_inner(
-        &self,
-        session: Option<&str>,
-        honor_leases: bool,
-    ) -> Result<Vec<Event>, Error> {
+    async fn recover_session_inner(&self, session: Option<&str>) -> Result<Vec<Event>, Error> {
         let session = session.map(str::to_owned);
         self.call(move |conn| {
             let tx = write_tx(conn)?;
@@ -3712,7 +3730,12 @@ impl Store {
                 rows.collect::<Result<Vec<_>, _>>()?
                     .into_iter()
                     .filter(|(_, _, last, interval, pid)| {
-                        !honor_leases || !last.is_some_and(|last| lease_live(last, interval.unwrap_or(1), *pid))
+                        // A run whose lease is dead has no owner left; a run
+                        // this process itself holds is its own stale work. A
+                        // live lease on another process means that owner is
+                        // mid-drain and keeps its run.
+                        !last.is_some_and(|last| lease_live(last, interval.unwrap_or(1), *pid))
+                            || pid.is_some_and(|pid| pid == std::process::id())
                     })
                     .map(|(run, session, _, _, _)| (run, session))
                     .collect()

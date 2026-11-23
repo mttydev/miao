@@ -20,13 +20,22 @@ async fn startup_recovery_skips_sessions_with_a_live_lease() {
         .await
         .unwrap();
     store.start_run("ses_owned", "run-live").await.unwrap();
-    store.claim_session("ses_owned", 500).await.unwrap();
-    // A fresh lease means another runtime owns this run; startup must not
-    // interrupt it.
+    store.claim_session("ses_owned", 30_000).await.unwrap();
+    // A fresh lease held by a live process means another runtime owns this
+    // run; startup must not interrupt it.
+    let foreign = Kill(Command::new("sleep").arg("6").spawn().unwrap());
+    {
+        let conn = rusqlite::Connection::open(dir.path().join("engine.db")).unwrap();
+        conn.execute(
+            "UPDATE engine_lease SET owner_pid=?1 WHERE session_id='ses_owned'",
+            rusqlite::params![foreign.0.id()],
+        )
+        .unwrap();
+    }
     assert!(store.recover().await.unwrap().is_empty());
     assert!(store.active_run("ses_owned").await.unwrap().is_some());
-    // Once the owner is gone its lease expires and adoption is correct.
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // Once the owning process is gone, adoption is correct.
+    drop(foreign);
     assert_eq!(store.recover().await.unwrap().len(), 1);
     assert!(store.active_run("ses_owned").await.unwrap().is_none());
     // Same-process reconciliation still cleans up its own run under a live lease.
