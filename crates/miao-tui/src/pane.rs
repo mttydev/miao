@@ -750,6 +750,13 @@ impl Shell {
             false => body_columns(frame.area()),
         };
         let queued_height = queued_rows(&self.transcript.pending_prompts) as u16;
+        // Held work names itself on its own row above the box. The row keys
+        // off the checklist, not the editor: typing must not shift the
+        // layout, and the state outlives one empty-input moment.
+        let hint_height = u16::from(matches!(
+            self.composer.hint,
+            ComposerHint::Waiting(_) | ComposerHint::Blocked(_)
+        ));
         let composer_constraint = Constraint::Length(composer_height(
             &self.composer,
             composer_column(conversation_area.width),
@@ -759,22 +766,32 @@ impl Shell {
         // reclaims the line for the conversation and the box keeps its bottom
         // edge. A plain terminal keeps the facts row exactly as it has always
         // been — the two layouts are deliberately different treatments.
-        let (body_area, panel_area, queued_area, composer_area, status_area) =
+        let (body_area, panel_area, queued_area, hint_area, composer_area, status_area) =
             if self.embedded_footer {
-                let [body_area, panel_area, queued_area, composer_area] = Layout::vertical([
-                    Constraint::Min(1),
-                    Constraint::Length(panel_height),
-                    Constraint::Length(queued_height),
-                    composer_constraint,
-                ])
-                .areas(conversation_area);
-                (body_area, panel_area, queued_area, composer_area, None)
-            } else {
-                let [body_area, panel_area, queued_area, composer_area, status_area] =
+                let [body_area, panel_area, queued_area, hint_area, composer_area] =
                     Layout::vertical([
                         Constraint::Min(1),
                         Constraint::Length(panel_height),
                         Constraint::Length(queued_height),
+                        Constraint::Length(hint_height),
+                        composer_constraint,
+                    ])
+                    .areas(conversation_area);
+                (
+                    body_area,
+                    panel_area,
+                    queued_area,
+                    hint_area,
+                    composer_area,
+                    None,
+                )
+            } else {
+                let [body_area, panel_area, queued_area, hint_area, composer_area, status_area] =
+                    Layout::vertical([
+                        Constraint::Min(1),
+                        Constraint::Length(panel_height),
+                        Constraint::Length(queued_height),
+                        Constraint::Length(hint_height),
                         composer_constraint,
                         Constraint::Length(1),
                     ])
@@ -783,6 +800,7 @@ impl Shell {
                     body_area,
                     panel_area,
                     queued_area,
+                    hint_area,
                     composer_area,
                     Some(status_area),
                 )
@@ -816,6 +834,7 @@ impl Shell {
             self.queued.snapshot(frame, queued_area);
             self.queued.paint(frame);
         }
+        render_hint_status(frame, hint_area, &self.composer, &self.transcript.theme);
         self.composer_text =
             render_composer(frame, composer_area, &self.composer, &self.transcript.theme);
         // The facts get their own row under the box: the state is the box's
@@ -3035,6 +3054,42 @@ fn render_queued(frame: &mut Frame, area: Rect, prompts: &[String], theme: &Them
     );
 }
 
+/// The held work a checklist names, on its own row above the box: a wait or a
+/// block used to sit in the input's first line, where a warning-coloured hint
+/// read as typed content. Waiting keeps the muted tone of a Session still
+/// moving; blocked keeps the warning tone, which is the one signal that asks
+/// for the operator.
+fn render_hint_status(frame: &mut Frame, area: Rect, composer: &Composer, theme: &Theme) {
+    if area.height == 0 {
+        return;
+    }
+    let (label, text, tone) = match &composer.hint {
+        ComposerHint::Waiting(text) => (
+            composer.lang.t("composer.waiting"),
+            text.as_str(),
+            theme.palette.text_muted,
+        ),
+        ComposerHint::Blocked(text) => (
+            composer.lang.t("composer.blocked"),
+            text.as_str(),
+            theme.palette.warning,
+        ),
+        _ => return,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {label}: "), Style::new().fg(tone)),
+            Span::styled(
+                fit(text, area.width.saturating_sub(4) as usize),
+                Style::new().fg(tone),
+            ),
+        ]))
+        .style(Style::new().bg(theme.palette.background))
+        .block(Block::new().padding(ratatui::widgets::Padding::left(2))),
+        area,
+    );
+}
+
 /// A painted band of rows a pointer can select from. Read-only text — the
 /// queued prompts above the input — has no editing model, so the cells this
 /// frame drew are both what the highlight covers and what a copy returns.
@@ -3367,7 +3422,9 @@ fn render_composer_body(
     if composer.editor.is_empty() && composer.completion.items.is_empty() {
         // The work the finished turn left behind outranks the rotating example:
         // it is this Session's own next todo, dim until `Tab` promotes it. The
-        // `!` line runs commands, so it keeps its own examples.
+        // `!` line runs commands, so it keeps its own examples. A wait or a
+        // block is never typed, so it paints on its own row above the box
+        // instead of reading here as draft text.
         // The terminal paints its block cursor on the composer's first cell,
         // and a wide glyph there is cut in half: a CJK hint read as a different
         // word. The hint starts one cell right of the caret so the whole first
@@ -3378,7 +3435,8 @@ fn render_composer_body(
             // beside live work is an invitation to start something else.
             // codex and Claude Code paint their idle hints only while idle.
             (ComposerHint::Busy, false) => Line::default(),
-            (_, true) | (ComposerHint::None, false) => {
+            (_, true)
+            | (ComposerHint::None | ComposerHint::Waiting(_) | ComposerHint::Blocked(_), false) => {
                 // An empty composer offers the example the TS prompt cycles
                 // through: one quiet sentence, `Run a command…` on a `!` line.
                 // The pick is the stored per-mount roll, not a clock drift, so
@@ -3412,20 +3470,6 @@ fn render_composer_body(
                 ),
                 Span::styled(" (tab)", Style::new().fg(palette.text_muted).dim()),
             ]),
-            (ComposerHint::Waiting(item), false) => Line::from(Span::styled(
-                format!(
-                    " {label}: {item}",
-                    label = composer.lang.t("composer.waiting")
-                ),
-                Style::new().fg(palette.text_muted),
-            )),
-            (ComposerHint::Blocked(item), false) => Line::from(Span::styled(
-                format!(
-                    " {label}: {item}",
-                    label = composer.lang.t("composer.blocked")
-                ),
-                Style::new().fg(palette.warning),
-            )),
         };
         frame.render_widget(Paragraph::new(line), input_area);
     } else {
@@ -6872,23 +6916,19 @@ mod tests {
         assert!(!text.contains("Next: cover"), "{text}");
     }
 
-    /// A list held by a wait or a block is not an invitation to ask anything:
-    /// the composer names the reason with no `(tab)`, because there is nothing
-    /// to type until the event lands or the operator decides.
+    /// Held work no longer paints in the box: a warning-coloured hint read as
+    /// typed content, so the hint moved to its own row above the box (the
+    /// shell-level tests pin that placement) and the empty box falls back to
+    /// the rotating example.
     #[test]
-    fn a_held_list_names_its_reason_instead_of_an_unrelated_example() {
+    fn a_held_list_leaves_the_box_to_the_rotating_example() {
         let theme = home_theme();
-        for (hint, expected) in [
-            (
-                crate::editor::ComposerHint::Waiting("watch CI 45021791396".into()),
-                "Waiting: watch CI 45021791396",
-            ),
-            (
-                crate::editor::ComposerHint::Blocked("decide the pricing tier".into()),
-                "Blocked: decide the pricing tier",
-            ),
+        for hint in [
+            crate::editor::ComposerHint::Waiting("watch CI 45021791396".into()),
+            crate::editor::ComposerHint::Blocked("decide the pricing tier".into()),
         ] {
             let mut composer = crate::editor::Composer::new(Path::new("."));
+            composer.lang = crate::lang::Lang::En;
             composer.set_hint(hint);
             let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 6))
                 .expect("terminal");
@@ -6909,9 +6949,10 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol().to_string())
                 .collect::<String>();
-            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("Ask anything"), "{text}");
             assert!(!text.contains("(tab)"), "{text}");
-            assert!(!text.contains("Ask anything"), "{text}");
+            assert!(!text.contains("Waiting:"), "{text}");
+            assert!(!text.contains("Blocked:"), "{text}");
         }
     }
 
@@ -7996,6 +8037,158 @@ mod tests {
             .position(|row| row.trim_start().starts_with('┌'))
             .expect("the input is painted");
         assert!(queued < input, "the queue sits above the input");
+    }
+
+    /// Held work names itself on its own row above the box: a blocked or a
+    /// waiting checklist used to sit in the input's first line, where the
+    /// warning tone read as typed content.
+    #[test]
+    fn a_blocked_todo_names_itself_on_a_row_above_the_box() {
+        let theme = home_theme();
+        let palette = theme.palette;
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.composer.lang = crate::lang::Lang::En;
+        shell
+            .composer
+            .set_hint(ComposerHint::Blocked("decide the pricing tier".into()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(120)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let status = rows
+            .iter()
+            .position(|row| row.contains("Blocked: decide the pricing tier"))
+            .expect("the blocked item is painted");
+        let input = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with('┌'))
+            .expect("the input is painted");
+        assert!(status < input, "the blocked row sits above the box");
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("Blocked:")).count(),
+            1,
+            "the hint paints once, never as draft text in the box"
+        );
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell(ratatui::prelude::Position::new(2, status as u16))
+            .expect("the status row's first cell");
+        assert_eq!(cell.fg, palette.warning, "blocked is the asking tone");
+    }
+
+    #[test]
+    fn a_waiting_todo_names_itself_muted_above_the_box() {
+        let theme = home_theme();
+        let palette = theme.palette;
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.composer.lang = crate::lang::Lang::En;
+        shell
+            .composer
+            .set_hint(ComposerHint::Waiting("land the release".into()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(120)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let status = rows
+            .iter()
+            .position(|row| row.contains("Waiting: land the release"))
+            .expect("the waiting item is painted");
+        let input = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with('┌'))
+            .expect("the input is painted");
+        assert!(status < input, "the waiting row sits above the box");
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell(ratatui::prelude::Position::new(2, status as u16))
+            .expect("the status row's first cell");
+        assert_eq!(
+            cell.fg, palette.text_muted,
+            "a wait is a Session still moving, not an alarm"
+        );
+    }
+
+    #[test]
+    fn typing_leaves_the_status_row_and_its_height_alone() {
+        let theme = home_theme();
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.composer.lang = crate::lang::Lang::En;
+        shell
+            .composer
+            .set_hint(ComposerHint::Blocked("decide the pricing tier".into()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).expect("terminal");
+        let paint =
+            |shell: &mut Shell, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+                terminal.draw(|frame| shell.render(frame)).expect("draw");
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .chunks(120)
+                    .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                    .collect::<Vec<String>>()
+            };
+        let before = paint(&mut shell, &mut terminal);
+        let input_before = before
+            .iter()
+            .position(|row| row.trim_start().starts_with('┌'))
+            .expect("the input is painted");
+        shell.composer.editor.insert_str("a draft");
+        let after = paint(&mut shell, &mut terminal);
+        let input_after = after
+            .iter()
+            .position(|row| row.trim_start().starts_with('┌'))
+            .expect("the input is painted");
+        assert_eq!(input_before, input_after, "typing must not shift the box");
+        assert!(
+            after.iter().any(|row| row.contains("Blocked:")),
+            "the status row outlives the empty-input moment"
+        );
+        assert!(after.iter().any(|row| row.contains("a draft")));
+    }
+
+    #[test]
+    fn the_runnable_offer_stays_inside_the_box() {
+        let theme = home_theme();
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.composer.lang = crate::lang::Lang::En;
+        shell
+            .composer
+            .set_hint(ComposerHint::Next("build the map dump".into()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(120)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let offer = rows
+            .iter()
+            .position(|row| row.contains("Next: build the map dump"))
+            .expect("the runnable offer is painted");
+        let input = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with('┌'))
+            .expect("the input is painted");
+        assert!(offer > input, "the Tab-promotable offer stays in the box");
     }
 
     /// The queue, the input and the status strip belong to the conversation's
