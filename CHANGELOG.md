@@ -13,6 +13,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-23
+
+### Added
+- **engine**: place concurrent sessions in their own worktrees (#3360) (`cb544b0d5d`)
+
 ## [0.4.20] - 2026-11-23
 
 ### Added
