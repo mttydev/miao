@@ -13,6 +13,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.16] - 2026-11-23
+
+### Fixed
+- **tui**: give the context bar two inks and keep small readings visible (#3338) (`588b9b6344`)
+
 ## [0.4.15] - 2026-11-22
 
 ### Added
