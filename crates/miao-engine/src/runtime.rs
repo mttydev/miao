@@ -3752,6 +3752,12 @@ async fn drain(
         draining.insert(session.clone());
     }
     let _draining = DrainingGuard(inner.clone(), session.clone());
+    // A live lease held by another process is a peer mid-drain. Taking the
+    // claim would kill its in-flight run mid-tool, so this drain leaves the
+    // Session — and its durable inbox — to that owner instead.
+    if inner.store.foreign_lease_live(&session).await? {
+        return Ok(());
+    }
     // Cursor before the claim: a cancel request written in between still counts.
     let cursor = inner.store.latest_seq(&session).await?;
     let lease = inner

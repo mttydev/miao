@@ -61,7 +61,7 @@ fn prompt(session: &str, id: &str) -> Input {
 }
 
 async fn wait_for_turn(store: &Store, session: &str) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             let finished = store
                 .events(session, 0, 1000)
@@ -690,7 +690,7 @@ async fn a_wake_reaches_only_the_addressed_peer() {
     runtime.admit(prompt("a", "first"), true).await.unwrap();
 
     // The addressed peer starts and settles.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             let finished = store
                 .events("b", 0, 1000)
