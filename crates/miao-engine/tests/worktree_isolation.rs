@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use miao_engine::{
-    protocol::ModelRequest,
+    protocol::{Delivery, Input, ModelRequest},
     provider::{Provider, ProviderError, Reply},
     runtime::Runtime,
     store::Store,
@@ -138,5 +138,42 @@ async fn a_second_session_is_placed_in_its_own_worktree() {
     assert!(
         redirected.is_err(),
         "git redirected at the main checkout must be refused"
+    );
+}
+
+#[tokio::test]
+async fn admitting_a_prompt_keeps_a_worktree_session_on_its_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    repository(dir.path());
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(state.path().join("engine.db")).await.unwrap();
+    let tools = Tools::new(dir.path()).await.unwrap();
+    let runtime = Runtime::new(store.clone(), Arc::new(Idle), tools)
+        .await
+        .unwrap();
+
+    runtime.initialize("ses_one", "one").await.unwrap();
+    runtime.initialize("ses_two", "two").await.unwrap();
+    let second = store.session_root("ses_two").await.unwrap().unwrap();
+
+    let admitted = runtime
+        .admit(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "ses_two".into(),
+                input_id: "two-1".into(),
+                prompt: "work in the worktree".into(),
+                delivery: Delivery::Steer,
+            },
+            false,
+        )
+        .await
+        .expect("a placed Session admits at its own root");
+    assert!(!admitted.duplicate);
+    assert_eq!(
+        store.session_root("ses_two").await.unwrap(),
+        Some(second),
+        "admission must not move the Session back to the checkout"
     );
 }
