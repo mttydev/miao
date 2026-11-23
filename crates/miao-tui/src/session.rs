@@ -694,6 +694,15 @@ pub struct Transcript {
     /// Sequence of the newest projected message. Messages and events share one
     /// sequence, so it says whether a failure still trails the conversation.
     pub tail_seq: u64,
+    /// Sequence of the newest projected assistant message, `0` when the
+    /// projection carries none.
+    ///
+    /// A streamed draft retires against this sequence rather than against the
+    /// number of assistant entries: a projection is a sliding window, so one
+    /// commit can push an older entry off its front and leave the count
+    /// unchanged — which kept a completed turn painted beside the draft it had
+    /// just replaced. A sequence only grows as messages commit.
+    pub last_assistant_seq: u64,
     /// The last classified loop stop, with the sequence that reported it.
     ///
     /// The engine ends a drain for a reason — a blocked item, a list that did
@@ -836,9 +845,8 @@ impl Transcript {
     }
 
     fn push_message(&mut self, message: &Value) {
-        self.tail_seq = self
-            .tail_seq
-            .max(message.get("seq").and_then(Value::as_u64).unwrap_or(0));
+        let seq = message.get("seq").and_then(Value::as_u64).unwrap_or(0);
+        self.tail_seq = self.tail_seq.max(seq);
         let role = message
             .get("role")
             .and_then(Value::as_str)
@@ -850,7 +858,13 @@ impl Transcript {
             .unwrap_or_default();
         match role {
             "user" => self.push_user(message, blocks),
-            "assistant" => self.push_assistant(message, blocks),
+            "assistant" => {
+                // Recorded even when the message projects no entry (a reasoning-
+                // only turn): the draft it replaces still has to retire, and
+                // the projection that carries it is the only proof it committed.
+                self.last_assistant_seq = self.last_assistant_seq.max(seq);
+                self.push_assistant(message, blocks);
+            }
             _ => {}
         }
     }

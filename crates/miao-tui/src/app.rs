@@ -364,9 +364,15 @@ impl Live {
 #[derive(Debug, Default)]
 pub struct Draft {
     run_id: String,
-    /// Assistant entries committed when the stream started. A projection that
-    /// commits one more is the message this draft was standing in for.
-    committed: usize,
+    /// Newest committed assistant sequence when the stream started. A
+    /// projection that carries a later one is the message this draft was
+    /// standing in for.
+    ///
+    /// A sequence replaces the entry count this used to compare: the projection
+    /// is a sliding window, so one commit can push an older assistant entry out
+    /// of it and leave the count unchanged, and the draft then outlived the very
+    /// message it became — the same turn painted twice.
+    committed_seq: u64,
     /// The turn's parts in the order the engine produced them. A provider turn
     /// is prose, a call, more prose, another call — interleaved, not grouped —
     /// so keeping text and calls in separate fields painted every call after
@@ -801,9 +807,9 @@ pub struct App {
     last_worked: Option<Duration>,
     /// The answer streaming in ahead of its committed message.
     draft: Option<Draft>,
-    /// Assistant entries in the last projection, so a draft can name the
-    /// projection that supersedes it.
-    committed: usize,
+    /// Newest assistant sequence in the last projection, so a draft can name
+    /// the projection that supersedes it.
+    last_assistant_seq: u64,
 }
 
 /// The tool call the current run is executing, with the phase clock that goes
@@ -944,7 +950,7 @@ impl App {
             run_since: None,
             last_worked: None,
             draft: None,
-            committed: 0,
+            last_assistant_seq: 0,
         }
     }
 
@@ -1654,24 +1660,26 @@ impl App {
                 }) {
                     self.retire_live();
                 }
-                let committed = transcript
-                    .entries
-                    .iter()
-                    .filter(|entry| matches!(entry, Entry::Assistant { .. }))
-                    .count();
+                let committed = transcript.last_assistant_seq;
                 // The draft is provisional. Only the projection that commits the
                 // next assistant message replaces it — an unrelated projection
                 // in the middle of the stream must not blank the text the user
                 // is reading. A run that is no longer active never commits one.
+                //
+                // The newest assistant sequence, not the number of assistant
+                // entries: the projection is a sliding window, so a commit can
+                // leave the count where it was while the entry it added is on
+                // screen. Comparing counts there kept the draft alive beside
+                // the message it had already become.
                 if self.draft.as_ref().is_some_and(|draft| {
-                    committed > draft.committed || self.state.active_run.is_none()
+                    committed > draft.committed_seq || self.state.active_run.is_none()
                 }) {
                     self.draft = None;
                     self.shell.set_draft(&[]);
                     self.shell.set_running_tool(None);
                     self.shell.set_running_compaction(None);
                 }
-                self.committed = committed;
+                self.last_assistant_seq = committed;
                 // The sidebar's Context section and hourly strip are painted
                 // from billed usage, and the status dialog used to be their
                 // only caller: a Session screen read "no usage yet" until
@@ -4936,7 +4944,7 @@ impl App {
         {
             self.draft = Some(Draft {
                 run_id: run_id.to_string(),
-                committed: self.committed,
+                committed_seq: self.last_assistant_seq,
                 ..Draft::default()
             });
         }
@@ -6245,7 +6253,7 @@ impl App {
         self.live = None;
         self.last_timings = None;
         self.draft = None;
-        self.committed = 0;
+        self.last_assistant_seq = 0;
         self.shell.set_draft(&[]);
         self.refresh_suggestion();
         self.usage = None;
@@ -10963,10 +10971,47 @@ mod tests {
             .is_some_and(|draft| draft.text() == "Hello"));
         assert!(drafted(&mut app).contains("Hello"));
         let committed = Transcript::from_snapshot(&serde_json::json!({
-            "messages": [{"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}],
+            "messages": [{"seq": 2, "role": "assistant", "content": [{"type": "text", "text": "Hello"}]}],
         }));
         app.handle(opened(committed, Some("run-1")));
         assert!(app.draft.is_none());
+        assert!(app.shell.draft().is_empty());
+    }
+
+    /// A projection carries a sliding window of messages, so a commit can leave
+    /// the number of assistant entries where it was: the new message at the
+    /// tail replaces one that fell off the head. Retiring the draft by count
+    /// then never fires, and the finished turn stays painted beside the draft
+    /// it became — the same turn shown twice. The newest assistant sequence is
+    /// what actually moves.
+    #[test]
+    fn a_commit_behind_a_sliding_window_retires_the_draft() {
+        let mut app = running_app("run-1");
+        let window = |messages: serde_json::Value| {
+            Transcript::from_snapshot(&serde_json::json!({ "messages": messages }))
+        };
+        app.handle(opened(
+            window(serde_json::json!([
+                {"seq": 10, "role": "assistant", "content": [{"type": "text", "text": "earlier"}]},
+                {"seq": 11, "role": "user", "content": [{"type": "text", "text": "go on"}]},
+            ])),
+            Some("run-1"),
+        ));
+        app.handle(delta_frame("run-1", "text.delta", "Hello"));
+        assert!(app.draft.is_some(), "the answer streams before it commits");
+        // One assistant entry before and after: seq 10 slid off the window and
+        // seq 12 arrived, so a count can only say "nothing happened".
+        app.handle(opened(
+            window(serde_json::json!([
+                {"seq": 11, "role": "user", "content": [{"type": "text", "text": "go on"}]},
+                {"seq": 12, "role": "assistant", "content": [{"type": "text", "text": "Hello"}]},
+            ])),
+            Some("run-1"),
+        ));
+        assert!(
+            app.draft.is_none(),
+            "the draft outlived the message it stood in for"
+        );
         assert!(app.shell.draft().is_empty());
     }
 
@@ -11030,7 +11075,7 @@ mod tests {
             .as_ref()
             .is_some_and(|draft| draft.text() == "Hello"));
         let committed = Transcript::from_snapshot(&serde_json::json!({
-            "messages": [{"role": "assistant", "content": [
+            "messages": [{"seq": 1, "role": "assistant", "content": [
                 {"type": "reasoning", "text": "weighing"},
                 {"type": "text", "text": "Hello"},
             ]}],
