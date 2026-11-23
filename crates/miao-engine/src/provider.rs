@@ -291,6 +291,18 @@ const RETRY_AFTER_MAX: Duration = Duration::from_secs(15 * 60);
 /// dispatch of the replay it earns. A window shorter than that can never observe
 /// the failure it was armed for.
 const WATCHDOG_WINDOW: Duration = Duration::from_secs(240);
+
+/// The retry window, overridable so a test can observe the schedule without
+/// waiting out a watchdog period. An unreadable or zero value keeps the
+/// default, since a window of zero would refuse every retry.
+fn retry_window() -> Duration {
+    std::env::var("MIAO_LLM_RETRY_WINDOW_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .and_then(|value| Duration::try_from_secs_f64(value / 1000.0).ok())
+        .unwrap_or(WATCHDOG_WINDOW)
+}
 const VENDOR_WAITS_PER_TURN: usize = 2;
 const VENDOR_WAIT_TOTAL: Duration = Duration::from_secs(90);
 
@@ -342,7 +354,7 @@ impl Budget {
         // that took longer than a minute to detect was returned to the operator
         // instead of being retried. The window starts at the first failure, so
         // this is one watchdog period plus room for the replay's own dispatch.
-        Self::with_deadline(WATCHDOG_WINDOW)
+        Self::with_deadline(retry_window())
     }
     /// One provider turn's retry window. Tests build a shorter one so the
     /// schedule can be observed without waiting out the real budget.
@@ -2889,11 +2901,23 @@ async fn read_stream_with_budget<P: Parser>(
         for frame in decoder.push(&chunk)? {
             input_budget.frame(&frame)?;
             parser.frame(&frame)?;
-            if match &frame {
+            // Two facts, two questions. A canonical event — including the
+            // `message_start` a gateway opens with — re-arms the event deadline
+            // so a healthy turn's clock keeps rolling. Only real content marks
+            // the reply as started, which is what decides whether a later
+            // silence is replayable (Transport) or terminal (Stream): a gateway
+            // that says "here comes a message" and then goes quiet has
+            // produced nothing, and its silence must be retried.
+            let canonical = match &frame {
                 Frame::Done => true,
                 Frame::Json(event) => crate::first_event::semantic_event(event),
-            } {
-                received_event = true;
+            };
+            if let Frame::Json(event) = &frame {
+                if crate::first_event::content(event) {
+                    received_event = true;
+                }
+            }
+            if canonical {
                 event = watchdogs.next_event_deadline();
             }
             // Publish a normalized delta alongside the raw frame. The engine's

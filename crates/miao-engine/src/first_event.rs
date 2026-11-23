@@ -114,12 +114,25 @@ pub(crate) fn semantic_event(event: &Value) -> bool {
     if event["type"] == "ping" {
         return false;
     }
-    content(event)
+    // Releasing the event deadline is a different question from proving the
+    // reply started: `message_start` (and its siblings) is a canonical event,
+    // so it keeps a healthy turn's clock rolling, while only real content can
+    // make a later silence terminal. See `content` and `provider::read_stream`.
+    content(event) || lifecycle(event)
+}
+
+/// A frame that declares a reply has begun. Canonical, so it re-arms the event
+/// deadline, but it carries no output.
+pub(crate) fn lifecycle(event: &Value) -> bool {
+    matches!(
+        event["type"].as_str(),
+        Some("message_start" | "response.created" | "content_block_start" | "message_delta")
+    )
 }
 
 /// A frame whose only payload is framing: the assistant role, an empty delta,
 /// a finish marker, or a usage block with no content beside it.
-fn content(event: &Value) -> bool {
+pub(crate) fn content(event: &Value) -> bool {
     if !crate::delta::normalize(event).is_empty() {
         return true;
     }
@@ -139,7 +152,7 @@ fn content(event: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::semantic_event;
+    use super::{content, semantic_event};
     use serde_json::json;
 
     /// A frame that names the assistant role, or carries only a usage block,
@@ -160,9 +173,6 @@ mod tests {
             // of these before the answer starts.
             json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":0}}),
             json!({"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":{"prompt_tokens":10}}),
-            // Anthropic lifecycle frames that carry no text.
-            json!({"type":"message_start","message":{"usage":{"input_tokens":9}}}),
-            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}),
         ];
         for frame in &silence_only {
@@ -170,6 +180,27 @@ mod tests {
                 !semantic_event(frame),
                 "framing must not count as output: {frame}"
             );
+        }
+    }
+
+    /// A lifecycle frame releases the event deadline but is not output.
+    ///
+    /// The two questions are separate: `message_start` keeps a healthy turn's
+    /// clock rolling, while a gateway that sends it and then goes quiet has
+    /// produced nothing — so its silence stays replayable instead of becoming a
+    /// terminal stalled stream.
+    #[test]
+    fn a_lifecycle_frame_releases_the_deadline_without_counting_as_output() {
+        for frame in [
+            json!({"type":"message_start","message":{"usage":{"input_tokens":9}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"response.created"}),
+        ] {
+            assert!(
+                super::semantic_event(&frame),
+                "a canonical event re-arms the deadline: {frame}"
+            );
+            assert!(!super::content(&frame), "but it carries no output: {frame}");
         }
     }
 
