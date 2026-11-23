@@ -43,7 +43,7 @@ impl Provider for Base {
     }
 }
 
-async fn host() -> (miao_engine::host::Host, std::path::PathBuf) {
+async fn host() -> (miao_engine::host::Host, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Runtime::with_policy(
         Store::open(dir.path().join("engine.db")).await.unwrap(),
@@ -53,10 +53,7 @@ async fn host() -> (miao_engine::host::Host, std::path::PathBuf) {
     )
     .await
     .unwrap();
-    (
-        miao_engine::host::Host::new(runtime),
-        dir.path().to_path_buf(),
-    )
+    (miao_engine::host::Host::new(runtime), dir)
 }
 
 fn initialize(protocol: u32) -> Command {
@@ -109,7 +106,7 @@ async fn an_unannounced_protocol_is_refused_without_creating_the_session() {
 
 #[tokio::test]
 async fn an_older_protocol_is_refused_and_names_both_sides() {
-    let (mut host, _) = host().await;
+    let (mut host, _dir) = host().await;
     let error = host
         .dispatch(initialize(1))
         .await
@@ -125,7 +122,7 @@ async fn an_older_protocol_is_refused_and_names_both_sides() {
 
 #[tokio::test]
 async fn the_current_protocol_is_served() {
-    let (mut host, _) = host().await;
+    let (mut host, _dir) = host().await;
     host.dispatch(initialize(miao_engine::PROTOCOL))
         .await
         .expect("the engine's own protocol negotiates");
