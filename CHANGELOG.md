@@ -13,6 +13,19 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.4.20] - 2026-11-23
+
+### Added
+- **tui**: render the landing with the Session's own chrome (#3354) (`c3e0783cc6`)
+- **tui**: pin the landing prompt and name build, model and workspace in a header (#3352) (`ceedaa228c`)
+- **auth**: sign in to ChatGPT with the device code grant (#3348) (`33423d91d5`)
+
+### Fixed
+- **tui**: paint held work on its own row above the box (#3356) (`2185ba22bf`)
+- **tui**: retire a streamed draft by assistant sequence (#3355) (`e98d88ca73`)
+- **tui**: drop the failed stream when a provider retry starts (#3353) (`f164e7e453`)
+- **cli**: stamp ledger freshness with SQLite's change counter (#3351) (`6740a57032`)
+
 ## [0.4.19] - 2026-11-23
 
 ### Fixed
