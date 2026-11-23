@@ -41,6 +41,20 @@ export const providers: Record<string, ProviderPatch> = {
       "glm-5.3-flash": {
         cost: { input: 0.11952, output: 0.41831, cache_read: 0.03436, cache_write: 0 },
       },
+      // GLM-5.4 is live on the coding-plan endpoint (checked against
+      // /api/coding/paas/v4/models) but models.dev has not added it yet. The
+      // plan page declares a 1M window, 128K output, video/image/text/file
+      // input and tool calling: docs.bigmodel.cn/cn/guide/models/glm-5.4.
+      "glm-5.4": {
+        name: "GLM-5.4",
+        release_date: "2026-11-23",
+        attachment: true,
+        reasoning: true,
+        temperature: true,
+        tool_call: true,
+        limit: { context: 1_000_000, output: 131_072 },
+        modalities: { input: ["text", "image", "video", "pdf"], output: ["text"] },
+      },
     },
   },
   /**
