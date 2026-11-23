@@ -16,8 +16,43 @@ pub fn report(path: Option<&Path>) -> Result<Value, Error> {
         "sandbox":{"available":crate::process::enforced()},
         "provider_transports":["anthropic","openai-chat","openai-responses","subscription-responses","gemini","amazon-bedrock"],
         "database":database,
+        "leftovers":leftovers(),
         "scope":"local diagnostics; network, credential validity and task quality are not probed",
     }))
+}
+
+/// Files that look like a ledger but are not one.
+///
+/// `~/.miao/` is the install directory (binaries under `bin/`), never a data
+/// directory, but an early TypeScript build left `~/.miao/miao.db` there. It is
+/// zero bytes, no code reads it, and an operator — or a model looking for its
+/// own history — reads the name and the location as authoritative. Reporting it
+/// explains the empty answer instead of leaving it to be discovered.
+fn leftovers() -> Vec<Value> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    leftovers_beside(std::path::Path::new(&home))
+}
+
+/// The check itself, against an explicit home, so a test never has to move the
+/// process-global `HOME` out from under other tests in this crate.
+fn leftovers_beside(home: &Path) -> Vec<Value> {
+    let candidate = home.join(".miao").join("miao.db");
+    let Ok(metadata) = std::fs::metadata(&candidate) else {
+        return Vec::new();
+    };
+    let size = metadata.len();
+    // A real ledger has content; only an empty shell is called out, so an
+    // operator who deliberately keeps a database there is not nagged.
+    if size > 0 {
+        return Vec::new();
+    }
+    vec![json!({
+        "path":candidate.display().to_string(),
+        "bytes":size,
+        "note":"empty file from an early install; the product ledger is ~/.local/share/miao/miao.db and each workspace's sessions live under ~/.local/share/miao-engine/storage/ — delete it"
+    })]
 }
 fn inspect(path: &Path) -> Result<Value, Error> {
     let mut connection = Connection::open_with_flags(
@@ -206,7 +241,7 @@ fn collect_blobs(value: &Value, found: &mut impl FnMut(String)) {
 
 #[cfg(test)]
 mod tests {
-    use super::report;
+    use super::{leftovers_beside, report};
     use serde_json::Value;
 
     #[test]
@@ -352,5 +387,30 @@ mod tests {
             .expect("blob block");
         assert_eq!(blobs.get("ok").and_then(Value::as_bool), Some(true));
         assert_eq!(blobs.get("references").and_then(Value::as_u64), Some(0));
+    }
+
+    /// An empty `~/.miao/miao.db` is reported, because its name and location
+    /// read as the ledger while no code writes it. A real file there is left
+    /// alone: only the empty shell is called a leftover.
+    #[test]
+    fn an_empty_install_directory_ledger_is_reported_as_a_leftover() {
+        let home = tempfile::tempdir().expect("temp home");
+        let install = home.path().join(".miao");
+        std::fs::create_dir_all(&install).expect("install dir");
+        std::fs::write(install.join("miao.db"), b"").expect("empty ledger");
+        let reported = leftovers_beside(home.path());
+        assert_eq!(reported.len(), 1, "the empty shell must be reported");
+        assert_eq!(reported[0].get("bytes").and_then(Value::as_u64), Some(0));
+    }
+
+    /// A populated file in the install directory is not called a leftover.
+    #[test]
+    fn a_ledger_with_content_in_the_install_directory_is_left_alone() {
+        let home = tempfile::tempdir().expect("temp home");
+        let install = home.path().join(".miao");
+        std::fs::create_dir_all(&install).expect("install dir");
+        std::fs::write(install.join("miao.db"), b"not a real ledger, but not empty")
+            .expect("ledger");
+        assert!(leftovers_beside(home.path()).is_empty());
     }
 }

@@ -463,12 +463,19 @@ fn sessions(
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
+    // The engine explains an empty answer (`note`): peers are limited to this
+    // workspace, so "none here" must not read as "your history is gone".
+    let note = result
+        .and_then(|value| value.get("note"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let summary = match rows {
+        [] if !note.is_empty() => compact(note),
         [] => "no peer sessions".to_string(),
         [only] => peer_line(only),
         rows => format!("{} sessions: {}", rows.len(), peer_line(&rows[0])),
     };
-    out.push(header(tool, "sessions", &compact(&summary), theme));
+    out.push(header(tool, "sessions", &summary, theme));
     let limit = fold.limit(TOOL_PREVIEW_LINES);
     let body = rows.iter().map(peer_line).collect::<Vec<_>>().join("\n");
     if !body.is_empty() {
@@ -1686,7 +1693,9 @@ fn session_state(
         .and_then(|value| value.get("goal"))
         .and_then(|value| value.get("value"));
     let summary = match (todos, goal) {
-        (None, None) => "no durable state".to_string(),
+        // This tool reads only the calling Session's own state; another
+        // Session's checklist lives in `session_state` of that Session.
+        (None, None) => "no durable state (this session only)".to_string(),
         (Some(todos), _) => format!("{} todos", todos.len()),
         (_, Some(_)) => "goal active".to_string(),
     };

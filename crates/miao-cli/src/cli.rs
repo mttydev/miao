@@ -185,6 +185,38 @@ fn launch(args: impl Iterator<Item = String>) -> Result<miao_tui::Launch, String
     // The TUI refuses to start without an engine database; every other
     // subcommand defaults one beside the workspace, so do the same here.
     let db = db.or_else(|| Some(default_db(&workspace)));
+    // A Session ID says nothing about which workspace's ledger holds it, and
+    // the default ledger only covers this directory. When the requested
+    // Session is not here but another ledger owns it, follow that ledger
+    // instead of failing or opening an unrelated one; an explicit --db still
+    // wins, because the operator named that file themselves.
+    let adopted = match (&session, &db) {
+        (Some(id), Some(current)) if !session_known(current, id) => {
+            match crate::locate::locate(id)? {
+                // Opening the wrong Session is worse than asking for a longer
+                // prefix, so an ambiguous answer stops here.
+                Some(found) if found.ambiguous => {
+                    return Err(format!(
+                        "{id} matches more than one session; pass a longer prefix \
+                         (miao session find {id})"
+                    ))
+                }
+                Some(found) => Some(found),
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    let (db, workspace) = match adopted {
+        Some(found) => (
+            Some(found.entry.database.clone()),
+            // The ledger's own workspace, so the resumed Session runs where its
+            // files are rather than in whatever directory happened to be
+            // current.
+            PathBuf::from(&found.entry.root),
+        ),
+        None => (db, workspace),
+    };
     Ok(miao_tui::Launch {
         workspace,
         db,
@@ -4038,6 +4070,25 @@ fn doctor(rest: &[String]) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    // A file that looks like a ledger but is not one sends an operator (or a
+    // model looking for its own history) to an empty answer. Naming it here is
+    // the only place the mistake becomes visible.
+    let leftovers = miao_engine::doctor::report(None)
+        .ok()
+        .and_then(|report| report.get("leftovers").cloned())
+        .unwrap_or_default();
+    for leftover in leftovers.as_array().into_iter().flatten() {
+        let path = leftover
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let note = leftover
+            .get("note")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        println!("leftover  {path}");
+        println!("          {note}");
+    }
     Ok(())
 }
 
@@ -4355,6 +4406,96 @@ fn warn_missing_sidecar(config_dir: Option<&std::path::Path>) {
 /// List the sessions the engine database holds. `sessions` is a unit command,
 /// so the frame carries no `params` at all — the same shape the stdio adapter
 /// sends.
+/// Whether `db` already holds `id`.
+///
+/// A ledger that does not exist yet holds nothing: that is the common case for
+/// a workspace this binary has never started in, and it is exactly when the
+/// lookup has to continue to another ledger. A file that exists but cannot be
+/// read answers `true` instead, so a locked or corrupt ledger keeps the
+/// operator's explicit choice rather than silently opening a different
+/// Session's history.
+fn session_known(db: &std::path::Path, id: &str) -> bool {
+    if !db.exists() {
+        return false;
+    }
+    let Ok(connection) = db_read_only(db) else {
+        return true;
+    };
+    connection
+        .query_row(
+            "SELECT 1 FROM engine_session WHERE id LIKE ?1 LIMIT 1",
+            [format!("{id}%")],
+            |_| Ok(()),
+        )
+        .is_ok()
+}
+
+/// Report which workspace's ledger holds a Session, since every workspace owns
+/// its own database file and the ID alone never says which one.
+///
+/// `--open` hands the resolved ledger to the TUI, so the answer is also the way
+/// to continue that Session without re-spelling the workspace.
+fn find_session(rest: &[String]) -> Result<(), String> {
+    let open = rest.iter().any(|argument| argument == "--open");
+    let needle = rest
+        .iter()
+        .find(|argument| !argument.starts_with("--"))
+        .ok_or("usage: miao session find ID [--open]")?;
+    let Some(found) = crate::locate::locate(needle)? else {
+        return Err(format!(
+            "no ledger under {} holds {needle}; run `miao session list` in the \
+             workspace it was created in",
+            miao_engine::placement::storage_root()
+                .map(|root| root.display().to_string())
+                .unwrap_or_else(|| "the engine storage root".into())
+        ));
+    };
+    if found.ambiguous {
+        println!("{needle} matches more than one session:");
+        for entry in crate::locate::candidates(needle)? {
+            println!("  {}  {}", entry.session, workspace_label(&entry.root));
+        }
+        return Err("pass a longer prefix".into());
+    }
+    println!("{}", found.entry.session);
+    println!("  workspace · {}", workspace_label(&found.entry.root));
+    println!("  ledger    · {}", found.entry.database.display());
+    if !open {
+        println!("  continue  · miao -s {}", found.entry.session);
+        println!("            (or run it from that workspace)");
+        return Ok(());
+    }
+    // Reuse the launch path so the TUI opens exactly what `miao -s` would,
+    // reading the resolved ledger instead of the current workspace's.
+    let mut args = vec!["-s".to_string(), found.entry.session.clone()];
+    args.extend([
+        "--db".to_string(),
+        found.entry.database.display().to_string(),
+    ]);
+    if let Some(root) = found.entry.root.strip_suffix('/') {
+        args.extend(["--workspace".to_string(), root.to_string()]);
+    } else {
+        args.extend(["--workspace".to_string(), found.entry.root.clone()]);
+    }
+    match launch(args.into_iter()) {
+        Ok(mut resolved) => {
+            prepare_tui_engine(&mut resolved);
+            miao_tui::run(resolved).map_err(|error| error.to_string())
+        }
+        Err(message) => Err(message),
+    }
+}
+
+/// A workspace directory for display: the path itself, or `unknown` when the
+/// ledger recorded no location.
+fn workspace_label(root: &str) -> String {
+    if root.is_empty() {
+        "unknown (ledger records no location)".to_string()
+    } else {
+        root.to_string()
+    }
+}
+
 fn list_sessions(rest: &[String]) -> Result<(), String> {
     let mut db: Option<PathBuf> = None;
     let mut index = 0;
@@ -6000,6 +6141,13 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
         Some("session") => {
             let rest: Vec<String> = args.collect();
             match rest.first().map(String::as_str) {
+                Some("find") => match find_session(&rest[1..]) {
+                    Ok(()) => std::process::ExitCode::SUCCESS,
+                    Err(message) => {
+                        eprintln!("miao session: {message}");
+                        std::process::ExitCode::from(1)
+                    }
+                },
                 Some("list") => match list_sessions(&rest[1..]) {
                     Ok(()) => std::process::ExitCode::SUCCESS,
                     Err(message) => {
@@ -6376,11 +6524,122 @@ mod tests {
         db_file_bytes, db_read_only, db_report, db_vacuum, default_db, engine_argv_with,
         event_line, git_worktree_main_checkout, launch, lsp_servers, mcp_servers, merged_config,
         model_routes_with, parsed_session_location, plugin_entries, project_copy_apply,
-        project_copy_plan, retention_plan, serve_database, settle_primary, strip_comments,
-        tree_bytes, uninstall_targets, worktree_remove_apply, worktree_remove_plan,
+        project_copy_plan, retention_plan, serve_database, session_known, settle_primary,
+        strip_comments, tree_bytes, uninstall_targets, worktree_remove_apply, worktree_remove_plan,
         write_routes_manifest,
     };
     use std::sync::{Mutex, MutexGuard};
+
+    /// `-s <id>` must look past the current workspace's ledger, because a
+    /// Session ID never says which workspace owns it.
+    #[test]
+    fn a_session_in_another_ledger_is_adopted_by_launch() {
+        let guard = env_guard();
+        let root = std::env::temp_dir().join(format!("miao-launch-adopt-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let ledger = miao_engine::placement::database_for(&root, &elsewhere).unwrap();
+        let connection = rusqlite::Connection::open(&ledger).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_session (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '');
+                 CREATE TABLE engine_location (session_id TEXT PRIMARY KEY, root TEXT NOT NULL);",
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO engine_session(id) VALUES('ses_other')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO engine_location(session_id, root) VALUES('ses_other', ?1)",
+                [elsewhere.display().to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        // The current directory's ledger is a different, empty one.
+        let here = root.join("here");
+        std::fs::create_dir_all(&here).unwrap();
+        std::env::set_var("MIAO_ENGINE_STORAGE", &root);
+        let resolved = launch(
+            [
+                "-s".to_string(),
+                "ses_other".to_string(),
+                "--workspace".to_string(),
+                here.display().to_string(),
+                "--db".to_string(),
+                default_db(&here).display().to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("a session in another ledger resolves");
+
+        assert_eq!(
+            resolved.db.as_deref(),
+            Some(ledger.as_path()),
+            "launch must follow the ledger that owns the session"
+        );
+        assert_eq!(
+            resolved.workspace, elsewhere,
+            "the resumed session runs in its own workspace, not the current directory"
+        );
+
+        std::env::remove_var("MIAO_ENGINE_STORAGE");
+        drop(guard);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// An ID the current ledger does not know and no other ledger owns must not
+    /// silently open the current, unrelated ledger's Session.
+    #[test]
+    fn an_unknown_session_id_leaves_the_current_ledger_alone() {
+        let guard = env_guard();
+        let root = std::env::temp_dir().join(format!("miao-launch-unknown-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let here = root.join("here");
+        std::fs::create_dir_all(&here).unwrap();
+        let current = miao_engine::placement::database_for(&root, &here).unwrap();
+        let connection = rusqlite::Connection::open(&current).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE engine_session (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '');
+                 CREATE TABLE engine_location (session_id TEXT PRIMARY KEY, root TEXT NOT NULL);",
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO engine_session(id) VALUES('ses_here')", [])
+            .unwrap();
+        drop(connection);
+
+        assert!(session_known(&current, "ses_here"));
+        assert!(!session_known(&current, "ses_absent"));
+
+        std::env::set_var("MIAO_ENGINE_STORAGE", &root);
+        let resolved = launch(
+            [
+                "-s".to_string(),
+                "ses_absent".to_string(),
+                "--workspace".to_string(),
+                here.display().to_string(),
+                "--db".to_string(),
+                current.display().to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("launch still resolves");
+        assert_eq!(
+            resolved.db.as_deref(),
+            Some(current.as_path()),
+            "no ledger owns the id, so the named ledger stays"
+        );
+
+        std::env::remove_var("MIAO_ENGINE_STORAGE");
+        drop(guard);
+        std::fs::remove_dir_all(root).ok();
+    }
 
     /// 64 KiB is the ceiling for a value passed through the environment, not for
     /// the file the engine reads. Applying it to the file kept a launch with a

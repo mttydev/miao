@@ -8264,7 +8264,19 @@ async fn list_peer_sessions(
         })
     });
     peers.truncate(PEER_LIMIT);
-    Ok(json!({ "sessions": peers }))
+    // An empty list is not the same answer as "the store is empty": peers are
+    // deliberately limited to this Location, and a Session started elsewhere
+    // lives in another ledger file. Saying so stops the caller from concluding
+    // its own history was lost and going looking on the disk for it.
+    let note = if peers.is_empty() {
+        Some(format!(
+            "No peer sessions in this workspace ({root}). Other workspaces keep their own \
+             ledgers; `miao session find <id>` locates a session started elsewhere."
+        ))
+    } else {
+        None
+    };
+    Ok(json!({ "sessions": peers, "note": note }))
 }
 
 async fn cancel_wakeup(inner: &Inner, session: &str, id: &str) -> Result<bool, Error> {
