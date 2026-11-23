@@ -597,6 +597,15 @@
     ],
     "type": "object"
   },
+  "worktree_enter": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
   "worktree_list": {
     "additionalProperties": false,
     "properties": {},

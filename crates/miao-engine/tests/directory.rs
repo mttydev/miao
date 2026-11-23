@@ -26,6 +26,7 @@ async fn directory_catalog_and_execution_have_bounded_workspace_scope() {
             "worktree_list",
             "worktree_create",
             "worktree_remove",
+            "worktree_enter",
             // Inter-Session coordination, advertised before the product tool
             // layer because it needs nothing from the host.
             "list_sessions",
