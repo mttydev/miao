@@ -114,6 +114,19 @@ pub(crate) fn semantic_event(event: &Value) -> bool {
     if event["type"] == "ping" {
         return false;
     }
+    // A provider that speaks in the engine's own delta vocabulary has no raw
+    // frame to read, so a delta carrying payload is itself the proof. Control
+    // frames (`provider.retry`, `provider.attempt`, `provider.window`) never
+    // name a delta, and a handshake `content_start` carries none.
+    if event["kind"]
+        .as_str()
+        .is_some_and(|kind| kind.contains("delta"))
+        && ["text", "delta", "arguments"]
+            .iter()
+            .any(|field| event[*field].as_str().is_some_and(|text| !text.is_empty()))
+    {
+        return true;
+    }
     // Releasing the event deadline is a different question from proving the
     // reply started: `message_start` (and its siblings) is a canonical event,
     // so it keeps a healthy turn's clock rolling, while only real content can
