@@ -18,8 +18,9 @@ if (typeof version !== "string" || !semver.valid(version)) throw new Error("Expe
 
 /**
  * The next version on this house's line: a third number never reaches 100, so
- * `0.3.99` is followed by `0.4.0` and `0.99.99` by `1.0.0`. Semantic versioning
- * would keep counting patches; capping them keeps a release line readable.
+ * `0.3.99` is followed by `0.4.0` and `0.99.99` by `1.0.0`. Capping keeps a
+ * release line readable. `--bump minor` is an explicit choice for a structural
+ * or behavioral change; 99 is the carry point, not the earliest minor.
  */
 function next(current: string, kind: string) {
   const [major, minor, patch] = current.split(".").map(Number)
