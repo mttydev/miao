@@ -23,6 +23,16 @@ there. Credentials are written to the shared credential store, which the
 A provider that
 has a key in the environment is also picked up without `login`.
 
+OpenAI can sign in with a ChatGPT account: `miao auth login openai` without a
+key opens OpenAI's official login page (or prints the address when no browser is
+available) and asks for the code the terminal shows. The password is entered
+only at `auth.openai.com`; miao stores the returned OAuth credential, and
+OpenAI models then use the ChatGPT subscription backend. To keep using an API
+key, run `miao auth login openai sk-...`. The TUI asks you to choose between
+"ChatGPT account" and "API key" when you select OpenAI. While a TUI window runs,
+miao renews the token before it expires; headless commands need a fresh login
+once it has expired.
+
 ## List and select models
 
 ```bash

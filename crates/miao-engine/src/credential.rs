@@ -26,6 +26,10 @@ pub enum Error {
     Io,
     #[error("unsupported or unavailable credential database")]
     Database,
+    #[error("account login failed or expired")]
+    LoginRejected,
+    #[error("credential is owned by the credential daemon; sign in through the daemon instead")]
+    Owned,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
@@ -514,6 +518,281 @@ pub fn remove_key(path: &Path, integration: &str, label: Option<&str>) -> Result
     Ok(removed)
 }
 
+/// One ChatGPT account login in flight, as the CLI and TUI show it: the
+/// official page to open, the code it asks for, and the poll state kept
+/// between calls. The device secret and tokens stay inside the credential
+/// crate; this handle is only what a UI needs to render the wait.
+pub struct LoginStart {
+    pub url: String,
+    pub user_code: String,
+    pub interval_ms: u64,
+    pending: miao_credential::login::Pending,
+}
+
+/// Begins OpenAI's device authorization. Login itself happens on
+/// auth.openai.com; this process only holds the opaque device handle and polls
+/// for completion, so an account password never passes through miao.
+pub async fn openai_login_start(agent: &str) -> Result<LoginStart, Error> {
+    let (pending, public) =
+        miao_credential::login::begin(&miao_credential::profile::openai(), agent)
+            .await
+            .map_err(login_error)?;
+    Ok(LoginStart {
+        url: public
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or(Error::LoginRejected)?
+            .to_string(),
+        user_code: public
+            .get("user_code")
+            .and_then(Value::as_str)
+            .ok_or(Error::LoginRejected)?
+            .to_string(),
+        interval_ms: public
+            .get("interval_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(5_000)
+            .max(1_000),
+        pending,
+    })
+}
+
+/// Polls one in-flight login. `None` means the browser has not finished yet;
+/// `Some(value)` is the OAuth credential the caller stores with `store_oauth`.
+pub async fn openai_login_poll(
+    start: &mut LoginStart,
+    agent: &str,
+) -> Result<Option<Value>, Error> {
+    miao_credential::login::poll(
+        &mut start.pending,
+        &miao_credential::profile::openai(),
+        agent,
+    )
+    .await
+    .map_err(login_error)
+}
+
+fn login_error(error: miao_credential::Error) -> Error {
+    match error {
+        miao_credential::Error::Integration => Error::Integration,
+        miao_credential::Error::Invalid => Error::Invalid,
+        miao_credential::Error::Io => Error::Io,
+        miao_credential::Error::Database => Error::Database,
+        _ => Error::LoginRejected,
+    }
+}
+
+/// Stores an OAuth credential an account login produced. Re-logging in under
+/// the same (integration, label) replaces the row in place, so the id a route
+/// or a Session's account pin names survives a renewed token.
+pub fn store_oauth(
+    path: &Path,
+    integration: &str,
+    label: &str,
+    value: &Value,
+) -> Result<Metadata, Error> {
+    if integration != "openai" {
+        return Err(Error::Integration);
+    }
+    // `parse` validates the oauth shape and its required expiry.
+    parse(value)?;
+    if value["refresh"].as_str().is_none_or(str::is_empty) {
+        return Err(Error::Invalid);
+    }
+    let label = label.trim();
+    if label.len() > 1024 {
+        return Err(Error::Invalid);
+    }
+    let label = if label.is_empty() { "default" } else { label };
+    let encoded = serde_json::to_string(value).map_err(|_| Error::Invalid)?;
+    if encoded.len() > 131_072 {
+        return Err(Error::Invalid);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| Error::Io)?;
+    }
+    let now = now_ms() as i64;
+    let connection = Connection::open(path).map_err(|_| Error::Database)?;
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS credential(id text primary key, integration_id text, label text, value text, active integer, time_created integer, time_updated integer)",
+            [],
+        )
+        .map_err(|_| Error::Database)?;
+    let existing: Option<String> = connection
+        .query_row(
+            "SELECT id FROM credential WHERE integration_id=?1 AND label=?2 LIMIT 1",
+            rusqlite::params![integration, label],
+            |row| row.get(0),
+        )
+        .ok();
+    let id = match existing {
+        Some(id) => {
+            connection
+                .execute(
+                    "UPDATE credential SET value=?2, active=1, time_updated=?3 WHERE id=?1",
+                    rusqlite::params![id, encoded, now],
+                )
+                .map_err(store_error)?;
+            id
+        }
+        None => {
+            let id = credential_id();
+            connection
+                .execute(
+                    "INSERT INTO credential(id,integration_id,label,value,active,time_created,time_updated) VALUES(?1,?2,?3,?4,1,?5,?5)",
+                    rusqlite::params![id, integration, label, encoded, now],
+                )
+                .map_err(store_error)?;
+            id
+        }
+    };
+    Ok(metadata(
+        id,
+        integration.to_string(),
+        label.to_string(),
+        value,
+    ))
+}
+
+/// Refreshes product-owned OAuth rows that are about to expire. The engine
+/// itself stays a reader; this is the host's writer, the same actor that
+/// stores keys and account logins. A daemon-owned row is left alone because
+/// the daemon already refreshes it inside the same margin.
+pub async fn refresh_due_oauth(
+    path: &Path,
+    integration: &str,
+    agent: &str,
+) -> Result<usize, Error> {
+    const MARGIN_MS: u64 = 5 * 60 * 1000;
+    let now = now_ms();
+    let due: Vec<String> = list_database(path)?
+        .into_iter()
+        .filter(|entry| {
+            entry.integration == integration
+                && entry.kind == "oauth"
+                && entry
+                    .expires_at_ms
+                    .is_some_and(|expires| expires <= now.saturating_add(MARGIN_MS))
+        })
+        .map(|entry| entry.id)
+        .collect();
+    if due.is_empty() {
+        return Ok(0);
+    }
+    let mut refreshed = 0;
+    let mut failure = None;
+    for id in due {
+        match refresh_oauth(path, integration, &id, agent).await {
+            Ok(()) => refreshed += 1,
+            // The daemon owns the row and is the one writer for it.
+            Err(Error::Owned) => {}
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(refreshed),
+    }
+}
+
+/// Refreshes one OAuth row in place. The write is compare-and-swap on the
+/// encoded value, so a concurrent writer that already rotated the row wins and
+/// this one does not overwrite the newer token.
+async fn refresh_oauth(path: &Path, integration: &str, id: &str, agent: &str) -> Result<(), Error> {
+    let profile = match integration {
+        "openai" => miao_credential::profile::openai(),
+        _ => return Err(Error::Integration),
+    };
+    let connection = Connection::open(path).map_err(|_| Error::Database)?;
+    let encoded: String = connection
+        .query_row(
+            "SELECT value FROM credential WHERE id=?1 AND integration_id=?2",
+            rusqlite::params![id, integration],
+            |row| row.get(0),
+        )
+        .map_err(|_| Error::Missing)?;
+    if encoded.len() > 131_072 {
+        return Err(Error::Invalid);
+    }
+    let value: Value = serde_json::from_str(&encoded).map_err(|_| Error::Invalid)?;
+    if value["type"].as_str() != Some("oauth") {
+        return Err(Error::RefreshRejected);
+    }
+    if value["metadata"]["miaoCredentialSocket"]
+        .as_str()
+        .is_some_and(|socket| !socket.is_empty())
+    {
+        return Err(Error::Owned);
+    }
+    let refresh = value["refresh"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .ok_or(Error::RefreshRejected)?;
+    let tokens = miao_credential::profile::refresh(&profile, refresh, agent)
+        .await
+        .map_err(refresh_error)?;
+    let mut next = value.clone();
+    miao_credential::profile::apply_tokens(&mut next, &tokens, now_ms());
+    let next_encoded = serde_json::to_string(&next).map_err(|_| Error::Invalid)?;
+    // Re-check the row under the write: another process may have rotated it
+    // while the token endpoint was answering.
+    connection
+        .execute(
+            "UPDATE credential SET value=?3, active=1, time_updated=?4 WHERE id=?1 AND value=?2",
+            rusqlite::params![id, encoded, next_encoded, now_ms() as i64],
+        )
+        .map_err(store_error)?;
+    Ok(())
+}
+
+fn refresh_error(error: miao_credential::Error) -> Error {
+    match error {
+        miao_credential::Error::RefreshRejected | miao_credential::Error::NotRefreshable => {
+            Error::RefreshRejected
+        }
+        miao_credential::Error::Invalid => Error::Invalid,
+        miao_credential::Error::Io => Error::Io,
+        miao_credential::Error::Database => Error::Database,
+        _ => Error::Io,
+    }
+}
+
+/// Hands a provider's login page to the operator's browser. A session without
+/// a browser is ordinary (SSH, CI), and the caller already printed the same
+/// URL, so a failed spawn is not an error.
+pub fn open_login_page(url: &str) {
+    #[cfg(target_os = "macos")]
+    let command = ("open", vec![url.to_string()]);
+    #[cfg(target_os = "windows")]
+    let command = (
+        "cmd",
+        vec![
+            "/C".to_string(),
+            "start".to_string(),
+            String::new(),
+            url.to_string(),
+        ],
+    );
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let command = ("xdg-open", vec![url.to_string()]);
+    let _ = std::process::Command::new(command.0)
+        .args(command.1)
+        .spawn();
+}
+
+/// A daemon-owned row is rejected by the store's trigger. The message is the
+/// only place that fact surfaces, and it is a different fix: the operator has
+/// to sign in through the daemon that owns the row, not overwrite it here.
+fn store_error(error: rusqlite::Error) -> Error {
+    match error.to_string().contains("daemon-owned") {
+        true => Error::Owned,
+        false => Error::Database,
+    }
+}
+
 /// A credential identity in the shape the store already uses.
 fn credential_id() -> String {
     const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -582,6 +861,74 @@ mod tests {
             .all(|entry| entry.integration == "commandcode"));
         assert!(store_key(&path, "bad integration", "sk", None).is_err());
         assert!(store_key(&path, "commandcode", "   ", None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An account login is stored with the shape the engine reads back, and a
+    /// re-login under the same label keeps the id its routes already name.
+    #[test]
+    fn a_stored_account_login_is_listed_and_replaced_in_place() {
+        let dir = std::env::temp_dir().join(format!("miao-oauth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("miao.db");
+        let grant = serde_json::json!({
+            "type": "oauth",
+            "access": "a1",
+            "refresh": "r1",
+            "expires": now_ms() + 3_600_000,
+            "methodID": "chatgpt-headless",
+            "metadata": {"accountID": "acct"},
+        });
+        let first = store_oauth(&path, "openai", "", &grant).expect("store");
+        assert_eq!(first.label, "default");
+        assert_eq!(first.kind, "oauth");
+        let mut renewed = grant.clone();
+        renewed["access"] = "a2".into();
+        let second = store_oauth(&path, "openai", "default", &renewed).expect("replace");
+        assert_eq!(
+            second.id, first.id,
+            "a renewed login keeps its credential id"
+        );
+        let listed = list_database(&path).expect("list");
+        assert_eq!(listed.len(), 1, "one row per (integration, label)");
+        assert_eq!(listed[0].id, first.id);
+        assert_eq!(listed[0].kind, "oauth");
+        // Only the account login transport this module knows is accepted.
+        assert!(store_oauth(&path, "anthropic", "default", &grant).is_err());
+        let missing_refresh = serde_json::json!({"type": "oauth", "access": "a", "expires": 1});
+        assert!(store_oauth(&path, "openai", "default", &missing_refresh).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A token that is not near expiry is left alone, so the product's refresh
+    /// loop does not rotate a healthy grant every time it wakes.
+    #[tokio::test]
+    async fn a_fresh_account_login_is_not_refreshed() {
+        let dir = std::env::temp_dir().join(format!("miao-oauth-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("miao.db");
+        let grant = serde_json::json!({
+            "type": "oauth",
+            "access": "a1",
+            "refresh": "r1",
+            "expires": now_ms() + 24 * 60 * 60 * 1000,
+            "methodID": "chatgpt-headless",
+        });
+        store_oauth(&path, "openai", "default", &grant).expect("store");
+        assert_eq!(
+            refresh_due_oauth(&path, "openai", "miao/test")
+                .await
+                .expect("due"),
+            0
+        );
+        assert_eq!(
+            refresh_due_oauth(&path, "anthropic", "miao/test")
+                .await
+                .expect("other"),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -1244,6 +1246,37 @@ impl App {
             }
             AppEvent::RecallFailed(message) => self.notice(&format!("recall failed: {message}")),
             AppEvent::TagFailed(message) => self.notice(&format!("tag failed: {message}")),
+            AppEvent::LoginStarted {
+                provider,
+                url,
+                user_code,
+                cancelled,
+            } => {
+                let name = self.provider_name(&provider);
+                self.open_dialog(Dialog::account_login_prompt(
+                    &provider, &name, &url, &user_code, cancelled,
+                ));
+            }
+            AppEvent::LoginFinished {
+                provider,
+                label,
+                result,
+            } => {
+                // A cancelled wait sends nothing, so a result means the box is
+                // still open for this provider.
+                if self
+                    .dialog
+                    .as_ref()
+                    .and_then(Dialog::account_login)
+                    .is_some_and(|login| login.provider == provider)
+                {
+                    self.dialog = None;
+                }
+                match result {
+                    Ok(id) => self.after_credential_stored(&provider, &label, &id, "account"),
+                    Err(error) => self.notice(&format!("could not sign in to {provider}: {error}")),
+                }
+            }
             AppEvent::Predicted { session_id, text } => {
                 if self.prediction_pending.as_deref() == Some(session_id.as_str()) {
                     self.prediction_pending = None;
@@ -2901,7 +2934,7 @@ impl App {
                             .find(|entry| entry.id == provider)
                             .map(|entry| entry.name.clone())
                             .unwrap_or_else(|| provider.to_string());
-                        self.open_dialog(Dialog::sign_in_prompt(provider, &name));
+                        self.open_sign_in(provider, &name);
                         return;
                     }
                 }
@@ -2984,12 +3017,29 @@ impl App {
                         .find(|entry| entry.id == provider)
                         .map(|entry| entry.name.clone())
                         .unwrap_or_else(|| provider.clone());
-                    self.open_dialog(Dialog::sign_in_prompt(&provider, &name));
+                    self.open_sign_in(&provider, &name);
                     return;
                 }
                 self.dialog = None;
                 self.models_filter = Some(provider);
                 self.reopen_models_dialog();
+            }
+            Some(Dialog::SignInMethod(list)) => {
+                // `account:<provider>` opens the provider's login page;
+                // `key:<provider>` keeps the pasted-key path.
+                let Some(row) = list.rows.get(index).cloned() else {
+                    return;
+                };
+                let Some((method, provider)) = row.id.split_once(':') else {
+                    return;
+                };
+                let provider = provider.to_string();
+                let name = self.provider_name(&provider);
+                if method == "account" {
+                    self.start_openai_login(&provider, &name);
+                    return;
+                }
+                self.open_dialog(Dialog::sign_in_prompt(&provider, &name));
             }
             Some(Dialog::Workspaces(_)) => {
                 let Some(directory) = self
@@ -3460,6 +3510,166 @@ impl App {
         self.open_provider_accounts();
     }
 
+    /// Sign in to a provider whose real login page is the browser. OpenAI is
+    /// the only provider with an account login here; every other path stays
+    /// the key prompt.
+    fn open_sign_in(&mut self, provider: &str, name: &str) {
+        if provider != "openai" {
+            self.open_dialog(Dialog::sign_in_prompt(provider, name));
+            return;
+        }
+        self.open_dialog(Dialog::sign_in_method(provider, name));
+    }
+
+    /// Start OpenAI's official device login off the UI thread. The browser does
+    /// the authentication; this only polls for completion and stores the
+    /// credential, reporting each step on the event bus.
+    fn start_openai_login(&mut self, provider: &str, name: &str) {
+        let Some(bus) = self.bus.clone() else {
+            self.notice("sign-in needs the running app");
+            return;
+        };
+        let Some(store) = self.credential_store.clone() else {
+            self.notice("no credential store: set MIAO_DATA_HOME, XDG_DATA_HOME or HOME");
+            return;
+        };
+        let provider = provider.to_string();
+        let label = "default".to_string();
+        self.dialog = None;
+        self.notice(&format!(
+            "opening auth.openai.com to sign in to {name} with your ChatGPT account"
+        ));
+        let flag = Arc::new(AtomicBool::new(false));
+        let cancelled = flag.clone();
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    bus.send(AppEvent::LoginFinished {
+                        provider,
+                        label,
+                        result: Err(error.to_string()),
+                    });
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let agent = format!("miao/{}", crate::VERSION);
+                let mut start = match miao_engine::credential::openai_login_start(&agent).await {
+                    Ok(start) => start,
+                    Err(error) => {
+                        bus.send(AppEvent::LoginFinished {
+                            provider,
+                            label,
+                            result: Err(error.to_string()),
+                        });
+                        return;
+                    }
+                };
+                bus.send(AppEvent::LoginStarted {
+                    provider: provider.clone(),
+                    url: start.url.clone(),
+                    user_code: start.user_code.clone(),
+                    cancelled: cancelled.clone(),
+                });
+                miao_engine::credential::open_login_page(&start.url);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+                loop {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        bus.send(AppEvent::LoginFinished {
+                            provider,
+                            label,
+                            result: Err("the OpenAI login timed out".into()),
+                        });
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(start.interval_ms)).await;
+                    match miao_engine::credential::openai_login_poll(&mut start, &agent).await {
+                        Ok(None) => {}
+                        Ok(Some(value)) => {
+                            let stored = miao_engine::credential::store_oauth(
+                                &store, "openai", &label, &value,
+                            );
+                            bus.send(AppEvent::LoginFinished {
+                                provider,
+                                label,
+                                result: stored
+                                    .map(|stored| stored.id)
+                                    .map_err(|error| error.to_string()),
+                            });
+                            return;
+                        }
+                        Err(error) => {
+                            bus.send(AppEvent::LoginFinished {
+                                provider,
+                                label,
+                                result: Err(error.to_string()),
+                            });
+                            return;
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    /// What follows a credential landing in the store: the account list that
+    /// is open has to show it, and the engine has to rebuild the routes that
+    /// named the provider. `what` keeps the notice truthful about whether an
+    /// API key or an account login was stored.
+    fn after_credential_stored(&mut self, provider: &str, label: &str, id: &str, what: &str) {
+        let Some(store) = self.credential_store.clone() else {
+            self.notice("no credential store: set MIAO_DATA_HOME, XDG_DATA_HOME or HOME");
+            return;
+        };
+        let label = format!("{label} ({id})");
+        // The list the operator typed into has to show the key they just
+        // stored: a second account is a new row, and a replaced key is the
+        // same row with the same label.
+        if self.accounts_filter.is_some() {
+            self.open_account_list();
+        }
+        let refresh = self.refresh_routes_manifest(&store);
+        if let Some(Err(error)) = &refresh {
+            // Restarting the engine would re-read a manifest that still
+            // cannot name this provider, so name the step that can.
+            self.notice(&format!(
+                "stored the {provider} {what} as {label}; its models load after restarting miao: {error}"
+            ));
+            return;
+        }
+        if !routes_need_restart(&refresh) {
+            // The manifest already serves this provider, so only the stored
+            // value changed. The engine reads the secret per request, and a
+            // restart would just cancel a running turn.
+            self.notice(&format!(
+                "stored the {provider} {what} as {label}; the next request uses it"
+            ));
+            return;
+        }
+        // The restart that makes the credential usable also stops whatever the
+        // engine is running, so a busy Session defers it instead.
+        if self.state.active_run.is_some() {
+            self.pending_routes_reload = true;
+            self.notice(&format!(
+                "stored the {provider} {what} as {label}; its models load when this turn finishes"
+            ));
+            return;
+        }
+        self.notice(&format!(
+            "stored the {provider} {what} as {label}; reloading the engine's routes"
+        ));
+        if let Some(engine) = self.engine.as_ref() {
+            engine.reload_provider_routes();
+        }
+    }
+
     /// Store the key an operator typed for a provider the engine does not serve
     /// yet, then restart the engine so its routes include that provider.
     ///
@@ -3476,48 +3686,7 @@ impl App {
             return;
         };
         match miao_engine::credential::store_key(&store, provider, key, account) {
-            Ok(stored) => {
-                let label = format!("{} ({})", stored.label, stored.id);
-                // The list the operator typed into has to show the key they just
-                // stored: a second account is a new row, and a replaced key is
-                // the same row with the same label.
-                if self.accounts_filter.is_some() {
-                    self.open_account_list();
-                }
-                let refresh = self.refresh_routes_manifest(&store);
-                if let Some(Err(error)) = &refresh {
-                    // Restarting the engine would re-read a manifest that still
-                    // cannot name this provider, so name the step that can.
-                    self.notice(&format!(
-                        "stored the {provider} key as {label}; its models load after restarting miao: {error}"
-                    ));
-                    return;
-                }
-                if !routes_need_restart(&refresh) {
-                    // The manifest already serves this provider, so only the
-                    // stored value changed. The engine reads the secret per
-                    // request, and a restart would just cancel a running turn.
-                    self.notice(&format!(
-                        "stored the {provider} key as {label}; the next request uses it"
-                    ));
-                    return;
-                }
-                // The restart that makes the key usable also stops whatever the
-                // engine is running, so a busy Session defers it instead.
-                if self.state.active_run.is_some() {
-                    self.pending_routes_reload = true;
-                    self.notice(&format!(
-                        "stored the {provider} key as {label}; its models load when this turn finishes"
-                    ));
-                    return;
-                }
-                self.notice(&format!(
-                    "stored the {provider} key as {label}; reloading the engine's routes"
-                ));
-                if let Some(engine) = self.engine.as_ref() {
-                    engine.reload_provider_routes();
-                }
-            }
+            Ok(stored) => self.after_credential_stored(provider, &stored.label, &stored.id, "key"),
             Err(error) => self.notice(&format!("could not store the {provider} key: {error}")),
         }
     }
@@ -12014,6 +12183,65 @@ mod tests {
         assert_eq!(app.models_filter.as_deref(), Some("openai"));
         assert!(list.rows.iter().any(|row| row.label.contains("gpt-5")));
         assert!(!list.rows.iter().any(|row| row.label.contains("glm-5")));
+    }
+
+    /// OpenAI's account login is a choice, not a silent default: the operator
+    /// can still paste an API key, and every other provider keeps that prompt.
+    #[test]
+    fn openai_sign_in_offers_the_account_page_beside_the_api_key() {
+        let mut app = session_app();
+        app.open_sign_in("openai", "OpenAI");
+        let list = app.dialog.as_ref().and_then(Dialog::list).expect("methods");
+        assert_eq!(list.title, "sign in");
+        let ids: Vec<&str> = list.rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, vec!["account:openai", "key:openai"]);
+        assert!(app.dialog.as_ref().and_then(Dialog::sign_in).is_none());
+    }
+
+    #[test]
+    fn a_plain_provider_keeps_the_key_prompt() {
+        let mut app = session_app();
+        app.open_sign_in("zhipu", "Zhipu");
+        let sign_in = app
+            .dialog
+            .as_ref()
+            .and_then(Dialog::sign_in)
+            .expect("key prompt");
+        assert_eq!(sign_in.provider, "zhipu");
+    }
+
+    #[test]
+    fn choosing_the_api_key_method_opens_the_key_prompt() {
+        let mut app = session_app();
+        app.open_sign_in("openai", "OpenAI");
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let sign_in = app
+            .dialog
+            .as_ref()
+            .and_then(Dialog::sign_in)
+            .expect("key prompt");
+        assert_eq!(sign_in.provider, "openai");
+    }
+
+    /// The login box names the official page and the code; the password never
+    /// reaches the TUI.
+    #[test]
+    fn an_openai_login_paints_the_official_page_and_code() {
+        let mut app = session_app();
+        app.handle(AppEvent::LoginStarted {
+            provider: "openai".into(),
+            url: "https://auth.openai.com/codex/device".into(),
+            user_code: "ABCD-EFGH".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        });
+        let login = app
+            .dialog
+            .as_ref()
+            .and_then(Dialog::account_login)
+            .expect("login box");
+        assert_eq!(login.provider, "openai");
+        assert_eq!(login.user_code, "ABCD-EFGH");
     }
 
     /// A provider the engine serves no model of opens the key prompt. Sending
