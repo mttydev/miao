@@ -937,7 +937,18 @@ impl Completion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerHint {
     /// Nothing to offer.
+    ///
+    /// This is also what an idle Session whose checklist is empty reports, so
+    /// the painter falls back to the rotating example here.
     None,
+    /// A turn is running or prompts are queued: the composer belongs to
+    /// steering the work in flight.
+    ///
+    /// It paints nothing at all. The codex and Claude Code prompts keep their
+    /// idle hints only while they are idle, and a rotating example beside a
+    /// running turn reads as an invitation to start unrelated work — while the
+    /// box title already says the run is in flight and how deep its queue is.
+    Busy,
     /// The turn the engine would pick up next. `Tab` promotes it into the
     /// draft because it is real work, not a guess.
     Next(String),

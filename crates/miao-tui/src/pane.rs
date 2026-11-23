@@ -3616,6 +3616,11 @@ fn render_composer_body(
         // word. The hint starts one cell right of the caret so the whole first
         // glyph stays visible.
         let line = match (&composer.hint, shell) {
+            // A running turn leaves the empty composer blank: the box title
+            // already carries the phase and the queue depth, and an example
+            // beside live work is an invitation to start something else.
+            // codex and Claude Code paint their idle hints only while idle.
+            (ComposerHint::Busy, false) => Line::default(),
             (_, true) | (ComposerHint::None, false) => {
                 // An empty composer offers the example the TS prompt cycles
                 // through: one quiet sentence, `Run a command…` on a `!` line.
@@ -7142,6 +7147,55 @@ mod tests {
             .collect::<String>();
         assert!(painted.contains("hello"), "{painted}");
         assert!(!painted.contains("Ask anything"), "{painted}");
+    }
+
+    /// A running turn leaves the empty composer blank.
+    ///
+    /// The idle example is an invitation to start something; beside a live run
+    /// it offered unrelated work while the box title already said the turn was
+    /// in flight and how deep its queue was. codex and Claude Code keep their
+    /// idle hints to idle only.
+    #[test]
+    fn a_running_turn_paints_no_example_in_the_empty_composer() {
+        let theme = home_theme();
+        let painted = |composer: &crate::editor::Composer| {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 6))
+                .expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = super::render_composer(
+                        frame,
+                        ratatui::layout::Rect::new(0, 0, 80, 6),
+                        composer,
+                        &theme,
+                    );
+                })
+                .expect("draw");
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol().to_string())
+                .collect::<String>()
+        };
+
+        // Idle with an empty checklist: the rotating example is the hint.
+        let idle = crate::editor::Composer::new(Path::new("."));
+        assert!(
+            painted(&idle).contains("Ask anything"),
+            "the idle box offers an example"
+        );
+
+        // A run in flight, with a prompt queued behind it: nothing at all.
+        let mut busy = crate::editor::Composer::new(Path::new("."));
+        busy.queued = 1;
+        busy.set_hint(crate::editor::ComposerHint::Busy);
+        let text = painted(&busy);
+        assert!(
+            !text.contains("Ask anything") && !text.contains("Next:"),
+            "a running turn paints no hint: {text:?}"
+        );
     }
 
     /// The terminal's block cursor owns the composer's first cell, and a wide
