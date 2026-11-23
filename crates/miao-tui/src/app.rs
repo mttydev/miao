@@ -4890,19 +4890,25 @@ impl App {
                     _ => LivePhase::Waiting,
                 }
             }
-            "provider.retry" => LivePhase::Retrying {
-                attempt: frame.get("attempt").and_then(Value::as_u64).unwrap_or(0) + 1,
-                detail: retry_detail(&frame),
-                cause: frame
-                    .get("cause")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                pause: frame
-                    .get("delay_ms")
-                    .and_then(Value::as_u64)
-                    .map(Duration::from_millis)
-                    .filter(|pause| !pause.is_zero()),
-            },
+            "provider.retry" => {
+                // A retry starts the step's stream over: the failed attempt's
+                // text and calls were never committed, so keeping them would
+                // paint the same plan twice when the retry streams it again.
+                self.discard_draft();
+                LivePhase::Retrying {
+                    attempt: frame.get("attempt").and_then(Value::as_u64).unwrap_or(0) + 1,
+                    detail: retry_detail(&frame),
+                    cause: frame
+                        .get("cause")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    pause: frame
+                        .get("delay_ms")
+                        .and_then(Value::as_u64)
+                        .map(Duration::from_millis)
+                        .filter(|pause| !pause.is_zero()),
+                }
+            }
             // The engine refused the next attempt: the pause does not fit what
             // the turn has left, so no retry happens and the failure that ends
             // the turn repeats the same sentence. Saying it here keeps an
@@ -5096,6 +5102,15 @@ impl App {
             Instant::now().duration_since(live.since),
         ));
         self.last_timings = Some(spans);
+    }
+
+    /// The provisional stream a failed attempt painted is not part of the
+    /// retry: its text and calls were never committed, so keeping it would
+    /// show the same plan twice once the retry streams it again.
+    fn discard_draft(&mut self) {
+        if self.draft.take().is_some() {
+            self.shell.set_draft(&[]);
+        }
     }
 
     /// Append one normalized provider delta to the draft the next projection
@@ -11173,6 +11188,24 @@ mod tests {
         app.handle(opened(Transcript::default(), None));
         assert!(app.draft.is_none());
         assert!(app.shell.draft().is_empty());
+    }
+
+    #[test]
+    fn a_retry_starts_the_step_over_instead_of_repeating_the_failed_attempt() {
+        let mut app = running_app("run-1");
+        app.handle(delta_frame("run-1", "reasoning.delta", "weighing"));
+        app.handle(delta_frame("run-1", "text.delta", "the same plan"));
+        app.handle(provider_frame("provider.retry"));
+        assert!(
+            app.draft.is_none(),
+            "the failed attempt's partial stream is not part of the retry"
+        );
+        assert!(app.shell.draft().is_empty());
+        app.handle(delta_frame("run-1", "reasoning.delta", "weighing"));
+        app.handle(delta_frame("run-1", "text.delta", "the same plan"));
+        let draft = app.draft.as_ref().expect("the retry's own draft");
+        assert_eq!(draft.text(), "the same plan");
+        assert_eq!(draft.reasoning(), "weighing");
     }
 
     /// The streamed tool call is the one thing a run shows before its result
