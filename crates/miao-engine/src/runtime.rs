@@ -2836,13 +2836,24 @@ impl Runtime {
             }
         }
         let session = input.session_id.clone();
+        // A Session placed in a worktree must admit there. Passing the engine
+        // checkout would make `admit_input` reject the existing placement as a
+        // Conflict. A Session with no placement yet keeps the checkout, which
+        // is the behavior every caller without an explicit initialize already
+        // relies on.
+        let location = self
+            .inner
+            .store
+            .location(&session)
+            .await?
+            .unwrap_or_else(|| self.inner.tools.location().to_owned());
         let admission = self
             .inner
             .store
             .admit_attachments_with_agent_at(
                 input,
                 attachments,
-                Some(self.inner.tools.location().to_owned()),
+                Some(location),
                 self.inner.default_agent.clone(),
             )
             .await?;
