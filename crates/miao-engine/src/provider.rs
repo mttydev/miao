@@ -284,6 +284,13 @@ const RETRY_AFTER_MAX: Duration = Duration::from_secs(15 * 60);
 /// how much wall clock they may add up to. Two of the most common
 /// `Retry-After: 30s` fit; a rate limit that keeps saying thirty seconds forever
 /// still ends the turn with the refusal naming what it asked for.
+/// How long one provider turn may keep failing before the retries stop.
+///
+/// A retryable failure is detected by a watchdog, not by an immediate error, so
+/// the window must cover the longest of them: `byte_idle` (180 s) plus the
+/// dispatch of the replay it earns. A window shorter than that can never observe
+/// the failure it was armed for.
+const WATCHDOG_WINDOW: Duration = Duration::from_secs(240);
 const VENDOR_WAITS_PER_TURN: usize = 2;
 const VENDOR_WAIT_TOTAL: Duration = Duration::from_secs(90);
 
@@ -328,7 +335,14 @@ struct Granted {
 
 impl Budget {
     pub fn new() -> Arc<Self> {
-        Self::with_deadline(Duration::from_secs(60))
+        // The window has to outlast the silence a retryable failure is measured
+        // by. `byte_idle` declares a dead connection only after 180 s of wire
+        // silence, so a 60 s window had already expired by the time the failure
+        // it exists to replay was reported: every retryable transport failure
+        // that took longer than a minute to detect was returned to the operator
+        // instead of being retried. The window starts at the first failure, so
+        // this is one watchdog period plus room for the replay's own dispatch.
+        Self::with_deadline(WATCHDOG_WINDOW)
     }
     /// One provider turn's retry window. Tests build a shorter one so the
     /// schedule can be observed without waiting out the real budget.

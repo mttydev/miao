@@ -100,60 +100,98 @@ impl Default for Watchdogs {
     }
 }
 
+/// Whether a frame proves the reply has started producing output.
+///
+/// This decides the classification of a later silence, so it has to mean
+/// "content arrived", not "a frame arrived". A gateway that opens a stream with
+/// its assistant role and a usage object and then goes quiet for three minutes
+/// has produced nothing; classifying that silence as a stalled stream made the
+/// turn terminal and unrepeatable, while the same silence before the first
+/// frame was replayed. The answer now comes from [`crate::delta::normalize`],
+/// the engine's own definition of published content, so a frame that carries no
+/// text, reasoning or tool input can never arm the terminal path.
 pub(crate) fn semantic_event(event: &Value) -> bool {
     if event["type"] == "ping" {
         return false;
     }
-    if event["choices"].as_array().is_some_and(Vec::is_empty) && event["usage"].is_null() {
-        return false;
-    }
-    if handshake(event) {
-        return false;
-    }
-    true
+    content(event)
 }
 
-/// An OpenAI-compatible gateway can open a stream by naming the assistant role
-/// in a frame of its own, well before the first token. That frame is a
-/// handshake, not output: counting it would report a zero TTFT for a turn that
-/// has produced nothing, and it would spend the pre-output replay that recovers
-/// a stream dying before its first byte of answer.
-fn handshake(event: &Value) -> bool {
-    if !event["usage"].is_null() {
-        return false;
+/// A frame whose only payload is framing: the assistant role, an empty delta,
+/// a finish marker, or a usage block with no content beside it.
+fn content(event: &Value) -> bool {
+    if !crate::delta::normalize(event).is_empty() {
+        return true;
     }
-    let Some(choices) = event["choices"]
-        .as_array()
-        .filter(|choices| !choices.is_empty())
-    else {
-        return false;
+    // Providers that announce a complete message instead of streaming it (a
+    // whole tool call, a whole reply) carry no delta at all.
+    let array = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
     };
-    choices.iter().all(|choice| {
-        let settled = choice.get("finish_reason").is_none_or(Value::is_null);
-        match choice.get("delta") {
-            Some(Value::Object(delta)) => {
-                settled
-                    && delta
-                        .iter()
-                        .all(|(key, value)| key == "role" || blank(value))
-            }
-            _ => false,
-        }
-    })
-}
-
-fn blank(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::String(text) => text.is_empty(),
-        Value::Array(items) => items.is_empty(),
-        Value::Object(fields) => fields.is_empty(),
-        Value::Bool(_) | Value::Number(_) => false,
-    }
+    array(event.get("content"))
+        || array(event.get("candidates"))
+        || array(event.get("output"))
+        || event["message"]["content"].is_array()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::semantic_event;
+    use serde_json::json;
+
+    /// A frame that names the assistant role, or carries only a usage block,
+    /// has produced nothing. Counting it as output is what turned a gateway's
+    /// silence into a terminal, unrepeatable failure while the same silence
+    /// before any frame was replayed.
+    #[test]
+    fn only_real_content_counts_as_the_first_event() {
+        let silence_only = [
+            // The role handshake an OpenAI-compatible gateway opens with.
+            json!({"choices":[{"index":0,"delta":{"role":"assistant"}}]}),
+            // The same, spelled with explicit nulls and empty fields.
+            json!({"choices":[{"index":0,"delta":{"role":"assistant","content":null,"content":"","tool_calls":[]},"finish_reason":null}]}),
+            // Keep-alives and an empty choice list.
+            json!({"type":"ping"}),
+            json!({"choices":[],"usage":null}),
+            // A usage block with no content beside it. Some gateways send one
+            // of these before the answer starts.
+            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":0}}),
+            json!({"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":{"prompt_tokens":10}}),
+            // Anthropic lifecycle frames that carry no text.
+            json!({"type":"message_start","message":{"usage":{"input_tokens":9}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}),
+        ];
+        for frame in &silence_only {
+            assert!(
+                !semantic_event(frame),
+                "framing must not count as output: {frame}"
+            );
+        }
+    }
+
+    /// Content in any of the shapes the engine publishes is output.
+    #[test]
+    fn content_in_every_protocol_counts_as_the_first_event() {
+        let output = [
+            json!({"choices":[{"index":0,"delta":{"content":"hel"}}]}),
+            json!({"choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}),
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":""}}]}}]}),
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}}]}}]}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"y"}}),
+            json!({"candidates":[{"index":0,"content":{"parts":[{"text":"z"}]}}]}),
+        ];
+        for frame in &output {
+            assert!(
+                semantic_event(frame),
+                "content must count as output: {frame}"
+            );
+        }
+    }
     use super::Watchdogs;
     use std::time::Duration;
     use tokio::time::Instant;
