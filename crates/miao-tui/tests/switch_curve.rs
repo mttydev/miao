@@ -118,12 +118,17 @@ impl Harness {
         // Compare against everything the process wrote, not only the current
         // frame: entering and leaving a Session redraws the whole window, so a
         // marker that was painted and then scrolled away is still evidence the
-        // switch happened.
+        // switch happened. Control sequences are dropped first: the backend
+        // re-places the cursor after every non-ASCII symbol, so a label such
+        // as `open · 1-9 pinned` is painted in pieces even though it reads
+        // whole on screen.
         let deadline = Instant::now() + timeout;
         loop {
-            if String::from_utf8_lossy(&self.output.lock().expect("output lock"))
-                .replace('\r', "")
-                .contains(needle)
+            if without_csi(&String::from_utf8_lossy(
+                &self.output.lock().expect("output lock"),
+            ))
+            .replace('\r', "")
+            .contains(needle)
             {
                 return true;
             }
@@ -298,4 +303,21 @@ fn a_hundred_session_switches_do_not_grow_the_process() {
         rss_recheck <= rss_peak + 1024,
         "after a hundred switches the process kept climbing at rest: checkpoint peak {rss_peak} kB, settled at {rss_recheck} kB"
     );
+}
+
+/// The written stream with every CSI sequence (`ESC [ … final`) removed, so a
+/// label split by cursor moves reads as the text the screen shows.
+fn without_csi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            chars.by_ref().find(|c| ('@'..='~').contains(c));
+        }
+    }
+    out
 }

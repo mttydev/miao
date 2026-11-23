@@ -12,7 +12,6 @@ use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 use ratatui::Terminal;
 use std::io::Write;
-use unicode_width::UnicodeWidthStr;
 
 use crate::config::{Cursor, CursorShape};
 
@@ -23,8 +22,16 @@ pub type Tui = Terminal<WidthAwareBackend<CrosstermBackend<Stdout>>>;
 /// frame every changed cell printed after it lands one column to the right —
 /// on Windows that was the gapped sidebar divider and the detached glyphs
 /// mid-transcript (#3216). The frame's changed cells are emitted in runs that
-/// end after a wide glyph; each new run makes the inner backend start with its
-/// own cursor move, which re-syncs the prediction at the true cell.
+/// end after any non-ASCII symbol; each new run makes the inner backend start
+/// with its own cursor move, which re-syncs the prediction at the true cell.
+///
+/// The split is on non-ASCII rather than on `unicode-width`'s verdict because
+/// the terminal, not the width table, decides how far the cursor moves. East
+/// Asian Ambiguous symbols the transcript prints constantly (`·`, `…`, `“`,
+/// `└`, `│`) are one column to `unicode-width` and two to a terminal running a
+/// CJK locale or ambiguous-wide setting; emoji and newer code points differ
+/// between table versions too. Trusting the table left those drifts in place,
+/// so the divider still broke and stale glyphs stayed on screen after #3219.
 pub struct WidthAwareBackend<B> {
     inner: B,
 }
@@ -50,9 +57,9 @@ impl<B: Backend> Backend for WidthAwareBackend<B> {
     {
         let mut run = Vec::new();
         for cell in content {
-            let wide = cell.2.symbol().width() > 1;
+            let resync = !cell.2.symbol().is_ascii();
             run.push(cell);
-            if wide {
+            if resync {
                 self.inner.draw(run.drain(..))?;
             }
         }
@@ -434,5 +441,35 @@ mod tests {
         assert_eq!(screen.cell(0, 1).expect("cell").contents(), "a");
         assert_eq!(screen.cell(0, 2).expect("cell").contents(), "b");
         assert_eq!(screen.cell(0, 3).expect("cell").contents(), "");
+    }
+
+    /// `·` is one column to `unicode-width` but East Asian Ambiguous, so a
+    /// terminal in a CJK locale advances two. The backend must not trust the
+    /// table: the next cell gets its own cursor move, so it lands on the column
+    /// the app set whatever width the terminal chose for the dot.
+    #[test]
+    fn the_cell_after_an_ambiguous_width_symbol_gets_its_own_cursor_move() {
+        let shared = SharedBuf::default();
+        let mut backend = WidthAwareBackend::new(CrosstermBackend::new(shared.clone()));
+        let mut cells = [Cell::default(), Cell::default(), Cell::default()];
+        cells[0].set_symbol("a");
+        cells[1].set_symbol("·");
+        cells[2].set_symbol("│");
+        let content = [
+            (4u16, 0u16, &cells[0]),
+            (5u16, 0u16, &cells[1]),
+            (6u16, 0u16, &cells[2]),
+        ];
+        backend.draw(content.into_iter()).expect("draw one row");
+        let bytes = shared.data();
+
+        assert!(
+            bytes.windows(6).any(|window| window == b"\x1b[1;7H"),
+            "the rule after an ambiguous-width dot must be placed explicitly: {bytes:?}"
+        );
+        assert!(
+            !bytes.windows(6).any(|window| window == b"\x1b[1;6H"),
+            "ASCII before the dot keeps the inner backend's implicit advance: {bytes:?}"
+        );
     }
 }
