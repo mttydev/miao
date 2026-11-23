@@ -2389,14 +2389,22 @@ async fn refresh_jobs(client: &EngineClient, bus: &Bus, session_id: &str) {
 /// line. Nothing opens: this is the read that keeps a paused Session's state
 /// moving on screen, so it stays quiet when it fails.
 async fn refresh_job_status(client: &EngineClient, bus: &Bus, session_id: &str) {
-    if let Ok(value) = client
+    // A read that fails is reported as `None`, not swallowed. Keeping the last
+    // rows would leave a finished job drawn as running for as long as the read
+    // keeps failing: the waiting clock stops only once every cached row is
+    // terminal, and a failed read never refreshes them.
+    let rows = match client
         .request("jobs", json!({ "session_id": session_id }))
         .await
     {
-        let mut rows = parse_job_rows(&value);
-        rows.extend(parse_subagent_rows(&value));
-        bus.send(AppEvent::JobStatus(rows));
-    }
+        Ok(value) => {
+            let mut rows = parse_job_rows(&value);
+            rows.extend(parse_subagent_rows(&value));
+            Some(rows)
+        }
+        Err(_) => None,
+    };
+    bus.send(AppEvent::JobStatus(rows));
 }
 
 /// Read the Session's delegated children for the sidebar's subagent block.

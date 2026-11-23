@@ -1446,7 +1446,12 @@ impl App {
             // Session paused on a job can show the job moving, and it keeps the
             // next read scheduled only while one is actually running.
             AppEvent::JobStatus(rows) => {
-                self.jobs = rows;
+                // A read that did not answer ends the wait rather than
+                // repeating the last answer. The line exists to tell someone
+                // whether a job is still moving; a row this Session can no
+                // longer observe is not evidence that it is, and leaving it up
+                // is how a finished job kept naming itself for hours.
+                self.jobs = rows.unwrap_or_default();
                 self.schedule_job_poll();
             }
             // The child list is read for the sidebar rather than for a dialog:
@@ -9319,6 +9324,28 @@ mod tests {
         app.jobs = vec![settled];
         app.tick();
         assert!(app.job_poll.is_none(), "a terminal row stops the clock");
+    }
+
+    /// A read that fails must end the wait, not repeat the previous answer.
+    /// Otherwise one failed read leaves the cached `running` row on the status
+    /// line for as long as the read keeps failing — the clock only stops once
+    /// every cached row is terminal, and a failed read refreshes nothing.
+    #[test]
+    fn a_failed_job_read_ends_the_wait() {
+        let mut app = session_app();
+        app.jobs = vec![running_job(6 * 60_000, None)];
+        assert!(
+            app.waiting_line().is_some(),
+            "the wait starts on a live row"
+        );
+
+        app.handle(AppEvent::JobStatus(None));
+        assert!(app.jobs.is_empty(), "a failed read drops the stale row");
+        assert!(
+            app.waiting_line().is_none(),
+            "the line must not keep naming a job this Session cannot observe"
+        );
+        assert!(app.job_poll.is_none(), "and the clock stops with it");
     }
 
     #[test]
