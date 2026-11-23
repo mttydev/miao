@@ -2,6 +2,7 @@ use crate::tools::ToolError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -26,14 +27,6 @@ pub struct Input {
     /// are merged. Requires the same platform enforcement as the sandbox.
     #[serde(default)]
     pub pty: bool,
-    /// How long the caller expects this to run, when it can estimate it.
-    ///
-    /// Display only: it never bounds the process (that is `timeout_ms`), it is
-    /// carried into the stored job input so a host can turn a bare elapsed
-    /// clock into a countdown, and it is accepted here because the admitted
-    /// input is what the execution face parses.
-    #[serde(default)]
-    pub eta_ms: Option<u64>,
 }
 /// Product parity with `packages/engine-ts/core/src/tool/bash.ts`: a foreground command
 /// defaults to two minutes and may ask for up to ten. Remote builds routinely
@@ -692,7 +685,7 @@ pub(crate) async fn execute_with_progress(
                             if !bytes.is_empty() {
                                 let _=progress.try_send(json!({
                                     "stream":if is_stdout{"stdout"}else{"stderr"},
-                                    "text":String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]),
+                                    "text":decode_output(&bytes[..bytes.len().min(2048)]),
                                 }));
                             }
                         }
@@ -759,8 +752,87 @@ pub(crate) async fn execute_with_progress(
     let exit_code = status.and_then(|s| s.code());
     group.armed = false;
     Ok(
-        json!({"stdout":String::from_utf8_lossy(&stdout),"stderr":String::from_utf8_lossy(&stderr),"exit_code":exit_code,"signal":signal,"pid":group.pid,"reason":reason,"output_incomplete":output_incomplete,"sandbox_profile":if sandbox{"workspace_write"}else{"off"},"enforcement_required":sandbox,"network_allowed":allow_network}),
+        json!({"stdout":decode_output(&stdout),"stderr":decode_output(&stderr),"exit_code":exit_code,"signal":signal,"pid":group.pid,"reason":reason,"output_incomplete":output_incomplete,"sandbox_profile":if sandbox{"workspace_write"}else{"off"},"enforcement_required":sandbox,"network_allowed":allow_network}),
     )
+}
+
+/// Decode command output that is not UTF-8.
+///
+/// Windows console programs write CP936/GBK whenever the console code page is
+/// the CJK default, and that happens over SSH too: `cmd`/`powershell` inherit
+/// the code page of the session even though nothing else is localized. Plain
+/// `from_utf8_lossy` turns every such byte pair into U+FFFD, so an error
+/// message from the build host reads as `����: ...` — the bytes are perfectly
+/// recoverable text, only not in UTF-8.
+///
+/// GB18030 is the strict superset of GBK, so a successful strict decode is
+/// strong evidence the bytes were GBK. Byte soup can also decode by accident,
+/// about once in four thousand random buffers, so two guards keep binary
+/// output out: a decoded control character other than tab/newline/CR, and any
+/// non-ASCII character that is not CJK text or CJK punctuation. A UTF-8 buffer
+/// is returned untouched, so a command that already speaks UTF-8 is unaffected.
+pub(crate) fn decode_output(bytes: &[u8]) -> Cow<'_, str> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Cow::Borrowed(text);
+    }
+    decode_gbk(bytes)
+        .map(|(text, _)| text)
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes))
+}
+
+/// Strictly decode `bytes` as GB18030, tolerating an incomplete trailing
+/// sequence: a 32 KiB cap or a chunk boundary can land inside one, and such a
+/// cut byte is not a character anyone can print. Returns the text and how many
+/// bytes it covers, so a streaming caller can carry the remainder into its next
+/// chunk. Only trailing bytes are candidates, so anything else yields `None`.
+fn decode_gbk(bytes: &[u8]) -> Option<(Cow<'_, str>, usize)> {
+    (0..=3).find_map(|dropped| {
+        let end = bytes.len().checked_sub(dropped)?;
+        let candidate = &bytes[..end];
+        encoding_rs::GB18030
+            .decode_without_bom_handling_and_without_replacement(candidate)
+            .filter(|text| is_gbk_text(text))
+            .map(|text| (text, end))
+    })
+}
+
+/// Whether `text` looks like GBK output rather than bytes decoded by chance.
+///
+/// Random binary output is almost never valid GB18030 at a realistic size, so
+/// the strict decode is already strong evidence; the short accidental decodes
+/// that do happen are why the text must also carry real CJK content. Two
+/// distinct CJK characters are required rather than one: the PNG magic
+/// `89 50 4e 47` happens to be a valid GBK pair followed by ASCII, which made a
+/// one-character rule accept a file header as text. Characters CP936 carries
+/// but that are not CJK (`℃`, `α`, `№`, box drawing) are ordinary message
+/// content once CJK anchors the buffer, so they are not judged one by one.
+fn is_gbk_text(text: &str) -> bool {
+    let mut distinct = Vec::new();
+    for character in text.chars() {
+        if character.is_ascii() {
+            // A stray control byte means this is not text: GBK never encodes
+            // one, because both bytes of a pair are >= 0x81.
+            if character.is_control() && !matches!(character, '\t' | '\n' | '\r') {
+                return false;
+            }
+            continue;
+        }
+        if is_cjk_character(character) && !distinct.contains(&character) {
+            distinct.push(character);
+            if distinct.len() == 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// CJK ideographs plus the CJK punctuation, fullwidth forms and general
+/// punctuation that a localized Chinese message contains.
+fn is_cjk_character(character: char) -> bool {
+    matches!(character as u32,
+        0x3000..=0x303F | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF)
 }
 
 /// Read one pipe, reporting each chunk as it arrives.
@@ -780,17 +852,26 @@ async fn read_pipe(
     const LIMIT: usize = 32769;
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 2048];
+    // Text that has not been reported yet. A chunk boundary can land inside a
+    // multi-byte character, so the completed prefix is drained and the partial
+    // tail waits for the bytes that finish it.
+    let mut pending: Vec<u8> = Vec::new();
     loop {
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
             break;
         }
         bytes.extend_from_slice(&chunk[..read]);
-        if let Some(progress) = progress.as_ref() {
-            let _ = progress.try_send(json!({
-                "stream": if is_stdout { "stdout" } else { "stderr" },
-                "text": String::from_utf8_lossy(&chunk[..read]),
-            }));
+        pending.extend_from_slice(&chunk[..read]);
+        let ready = complete_prefix(&pending);
+        if ready > 0 {
+            if let Some(progress) = progress.as_ref() {
+                let _ = progress.try_send(json!({
+                    "stream": if is_stdout { "stdout" } else { "stderr" },
+                    "text": decode_output(&pending[..ready]),
+                }));
+            }
+            pending.drain(..ready);
         }
         if bytes.len() > 32768 {
             bytes.truncate(LIMIT);
@@ -798,6 +879,29 @@ async fn read_pipe(
         }
     }
     Ok((is_stdout, bytes))
+}
+
+/// How many leading bytes of `bytes` end on a character boundary.
+///
+/// A trailing partial UTF-8 or GB18030 character is left out so a streaming
+/// caller can carry it into its next chunk. Anything that fails for another
+/// reason is not decodable text anyway, so it is reported as-is.
+fn complete_prefix(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => return bytes.len(),
+        // `error_len() == None` means the buffer ends inside a character;
+        // a definite error elsewhere is not a boundary question.
+        Err(error) if error.error_len().is_some() => {}
+        Err(error) => return error.valid_up_to(),
+    }
+    (0..=3)
+        .find_map(|dropped| {
+            let end = bytes.len().checked_sub(dropped)?;
+            encoding_rs::GB18030
+                .decode_without_bom_handling_and_without_replacement(&bytes[..end])
+                .map(|_| end)
+        })
+        .unwrap_or(bytes.len())
 }
 
 /// Cut `bytes` to at most `limit` bytes without splitting a UTF-8 character.
@@ -1046,5 +1150,103 @@ mod truncate_utf8_tests {
     fn invalid_utf8_keeps_the_plain_byte_cut() {
         let bytes = vec![0xff, 0xfe, 0xfd, 0xfc, 0xfb];
         assert_eq!(truncate_utf8(bytes.clone(), 3), &bytes[..3]);
+    }
+}
+
+#[cfg(test)]
+mod decode_output_tests {
+    use super::{complete_prefix, decode_output};
+
+    /// CP936 bytes for a localized diagnostic, as `cmd`/`powershell` emit them
+    /// over SSH when the console code page is the CJK default.
+    fn gbk(text: &str) -> Vec<u8> {
+        let (bytes, _, errors) = encoding_rs::GB18030.encode(text);
+        assert!(!errors, "test text must be representable in GB18030");
+        bytes.into_owned()
+    }
+
+    /// UTF-8 output stays byte-identical: a command that already speaks UTF-8
+    /// must never be re-decoded into something else.
+    #[test]
+    fn valid_utf8_is_returned_unchanged() {
+        let text = "中文正常输出\r\n";
+        assert_eq!(decode_output(text.as_bytes()), text);
+    }
+
+    /// The case from the build host: a GBK error message must come back as
+    /// the message, not as a run of replacement characters.
+    #[test]
+    fn gbk_console_output_is_decoded() {
+        let bytes = gbk("错误: 系统找不到指定的注册表项或值。\r\n");
+        assert_eq!(
+            decode_output(&bytes),
+            "错误: 系统找不到指定的注册表项或值。\r\n"
+        );
+    }
+
+    /// `from_utf8_lossy` used to flatten every pair into U+FFFD; the decoded
+    /// text must not contain any replacement character.
+    #[test]
+    fn gbk_output_has_no_replacement_characters() {
+        let decoded = decode_output(&gbk("地址  端口  地址  端口\r\n")).into_owned();
+        assert!(decoded.contains("地址"));
+        assert!(!decoded.contains('\u{FFFD}'));
+    }
+
+    /// Binary output must keep the old lossy behavior rather than be read as
+    /// CJK: a PNG header is not GBK text.
+    #[test]
+    fn binary_output_stays_lossy() {
+        let bytes = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe];
+        assert!(decode_output(&bytes).contains('\u{FFFD}'));
+    }
+
+    /// The PNG magic is the trap: `89 50` is a valid GBK pair and decodes to
+    /// one Han character, so a single-character rule read a file header as
+    /// text. Requiring two distinct characters keeps this binary.
+    #[test]
+    fn png_magic_is_not_read_as_text() {
+        let decoded = decode_output(b"\x89PNG\r\n\x1a\n").into_owned();
+        assert!(decoded.starts_with('\u{FFFD}'));
+    }
+
+    /// A window or a 32 KiB cut can land inside a GBK pair. The complete
+    /// prefix must still decode, and the cut byte must not poison the rest.
+    #[test]
+    fn a_cut_inside_a_gbk_pair_keeps_the_complete_prefix() {
+        let full = gbk("中文输出测试");
+        let cut = decode_output(&full[..full.len() - 1]).into_owned();
+        assert_eq!(cut, "中文输出测");
+    }
+
+    /// A streaming chunk boundary inside a character must not be reported as
+    /// text yet: the bytes that complete it belong to the next chunk.
+    #[test]
+    fn a_partial_trailing_character_is_not_reported() {
+        let full = gbk("中文");
+        assert_eq!(complete_prefix(&full[..full.len() - 1]), full.len() - 2);
+        assert_eq!(complete_prefix(&full), full.len());
+    }
+
+    /// ASCII is complete by definition, so a streaming reader reports it all.
+    #[test]
+    fn ascii_is_complete() {
+        assert_eq!(complete_prefix(b"hello\r\n"), 7);
+    }
+
+    /// CP936 also carries symbols an English message may legitimately contain;
+    /// they must not make the buffer look like binary output.
+    #[test]
+    fn gbk_symbols_are_still_text() {
+        let bytes = gbk("温度 25℃ 结论 α β №12 → 完成\r\n");
+        assert_eq!(decode_output(&bytes), "温度 25℃ 结论 α β №12 → 完成\r\n");
+    }
+
+    /// A Latin-1 accented letter cannot come from CP936, so such bytes keep the
+    /// old lossy behavior instead of turning into unrelated CJK characters.
+    #[test]
+    fn latin1_accent_is_not_read_as_cjk() {
+        let decoded = decode_output(b"caf\xe9 na\xefve\r\n").into_owned();
+        assert!(decoded.contains('\u{FFFD}'));
     }
 }
