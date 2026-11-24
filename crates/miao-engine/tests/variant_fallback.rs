@@ -93,10 +93,7 @@ async fn configured_default_and_explicit_variants_preserve_fallback_authority_an
         assert_eq!(headers["x-tier"], "high");
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["model"], "primary-model");
-        assert!(!body.to_string().contains(PNG));
-        assert!(body
-            .to_string()
-            .contains("model does not support image input"));
+        assert!(body.to_string().contains(PNG));
         let (headers, body) = requests.recv().await.unwrap();
         assert_eq!(headers["authorization"], "Bearer fallback-key");
         assert!(!headers.contains_key("x-tier"));

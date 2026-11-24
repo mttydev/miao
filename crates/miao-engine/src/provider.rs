@@ -765,6 +765,34 @@ pub trait Provider: Send + Sync {
         progress: mpsc::Sender<Value>,
         cancel: CancellationToken,
     ) -> Result<Reply, ProviderError>;
+
+    /// Send the turn, and degrade an image the endpoint refuses instead of
+    /// failing it. Every model is offered the picture: catalog modality
+    /// metadata is third-party and often stale, so only the provider's own
+    /// refusal decides that it cannot take one. A refused image is retried once
+    /// as a note naming what was dropped, which keeps the turn alive and leaves
+    /// the durable history's bytes intact.
+    async fn stream_accepting_images(
+        &self,
+        request: ModelRequest,
+        progress: mpsc::Sender<Value>,
+        cancel: CancellationToken,
+    ) -> Result<Reply, ProviderError> {
+        if !crate::media::has_images(&request) {
+            return self.stream(request, progress, cancel).await;
+        }
+        let degraded = crate::media::without_images(request.clone());
+        match self.stream(request, progress.clone(), cancel.clone()).await {
+            Err(ProviderError::Http(status, detail))
+                if matches!(status, 400 | 415 | 422)
+                    && crate::media::image_input_rejected(&detail) =>
+            {
+                let _ = progress.try_send(json!({"kind":"media.image_fallback","status":status}));
+                self.stream(degraded, progress, cancel).await
+            }
+            result => result,
+        }
+    }
 }
 
 /// Provider-native token counting for context management (§2.13 gate ②).
@@ -1616,11 +1644,17 @@ pub(crate) async fn request_with_retry(
             // deterministic, but a gateway also wraps a transient upstream
             // hiccup in one. Grant exactly one immediate replay so that class
             // recovers on its own; a real defect still fails, one request
-            // later. Mirrors the TS runner's `selfHealable`.
+            // later. Mirrors the TS runner's `selfHealable`. A refusal that
+            // names image input is not that class: replaying the same body
+            // cannot change the answer, so the media fallback resends without
+            // the image instead.
             if matches!(error, ProviderError::Http(400, _))
                 && !self_healed
                 && !overflow
                 && !binding_failure
+                && !last_failure_detail
+                    .as_deref()
+                    .is_some_and(crate::media::image_input_rejected)
             {
                 self_healed = true;
                 announce_retry(

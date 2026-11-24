@@ -21,7 +21,10 @@ pub(crate) fn validate_modalities(input: &[String]) -> Result<(), ProviderError>
 }
 
 /// Normalize a request copy, leaving the durable attachment bytes unchanged.
-/// An absent/empty host declaration is unknown, matching product behavior.
+/// The host's modality declaration gates document formats only: an image part
+/// is always offered, because the catalog is third-party data and a model it
+/// labels text-only may still describe a picture. An endpoint that refuses the
+/// image is answered by [`without_images`], not by guessing here.
 pub(crate) fn normalize(
     mut request: ModelRequest,
     protocol: &str,
@@ -79,10 +82,6 @@ fn normalize_parts(
             .as_str()
             .ok_or_else(|| ProviderError::Stream("invalid media type".into()))?;
         let name = part["metadata"]["name"].as_str().unwrap_or("attachment");
-        if image && !input.is_empty() && !input.iter().any(|item| item.starts_with("image")) {
-            *part = json!({"type":"text","text":format!("[image attachment omitted: model does not support image input: {name}]\nThe image was not sent to the model. Tell the operator that this attachment could not be delivered, and that switching to a model whose route declares image input (or adding image to the model's capabilities.input in the configuration) will deliver it.")});
-            continue;
-        }
         if mime.starts_with("text/") {
             let data = part["data"]
                 .as_str()
@@ -111,6 +110,82 @@ fn normalize_parts(
         }
     }
     Ok(())
+}
+
+/// Whether the request carries an image the provider would receive. Media
+/// inside a tool result counts: a read or screenshot tool returns its picture
+/// the same way a pasted one arrives.
+pub(crate) fn has_images(request: &ModelRequest) -> bool {
+    request.messages.iter().any(|message| {
+        message
+            .content
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(part_has_image))
+    })
+}
+
+fn part_has_image(part: &Value) -> bool {
+    if part["type"] == "image" {
+        return true;
+    }
+    part["type"] == "tool_result"
+        && part["content"]
+            .as_array()
+            .is_some_and(|content| content.iter().any(part_has_image))
+}
+
+/// The copy sent after an endpoint refuses image input: every image becomes a
+/// note naming what was dropped, so the model can still ask for the bytes with
+/// tools instead of the turn failing. The durable history keeps its bytes; only
+/// this outgoing copy is rewritten.
+pub(crate) fn without_images(mut request: ModelRequest) -> ModelRequest {
+    for message in &mut request.messages {
+        if let Some(parts) = message.content.as_array_mut() {
+            drop_images(parts);
+        }
+    }
+    request
+}
+
+fn drop_images(parts: &mut [Value]) {
+    for part in parts {
+        if part["type"] == "tool_result" {
+            if let Some(content) = part["content"].as_array_mut() {
+                drop_images(content);
+            }
+            continue;
+        }
+        if part["type"] != "image" {
+            continue;
+        }
+        let name = part["metadata"]["name"].as_str().unwrap_or("attachment");
+        *part = json!({"type":"text","text":format!("[image attachment omitted: model does not support image input: {name}]")});
+    }
+}
+
+/// Some endpoints answer an image part with a schema or capability refusal
+/// instead of accepting it. Only a body that names image input and refuses it
+/// qualifies: a transient decode failure or an oversized upload must not be
+/// mistaken for a missing capability.
+pub(crate) fn image_input_rejected(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    let names_image = ["image", "vision", "multimodal"]
+        .iter()
+        .any(|token| detail.contains(token));
+    let refuses = [
+        "n't support",
+        "not support",
+        "unsupported",
+        "only support",
+        "unknown variant",
+        "invalid content type",
+        "unable to process",
+        "cannot process",
+        "can not process",
+    ]
+    .iter()
+    .any(|phrase| detail.contains(phrase));
+    names_image && refuses
 }
 
 /// Attached text reaches the model as a file block: the TS runner gives the
@@ -319,5 +394,77 @@ mod tests {
             block.chars().filter(|character| *character == '中').count(),
             TEXT_LIMIT
         );
+    }
+
+    fn image_part(name: &str) -> Value {
+        json!({"type":"image","mime":"image/png","data":"aGk=","metadata":{"name":name}})
+    }
+
+    fn media_request(content: Value) -> ModelRequest {
+        ModelRequest {
+            system: String::new(),
+            tools: Vec::new(),
+            messages: vec![crate::protocol::Message {
+                role: "user".into(),
+                content,
+                checkpoint: None,
+                recorded_at_ms: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_model_declared_text_only_still_receives_the_picture() {
+        let request = media_request(json!([image_part("shot.png")]));
+        let normalized = normalize(request, "openai-chat", &["text".to_owned()]).unwrap();
+        assert_eq!(normalized.messages[0].content[0]["type"], "image");
+        assert_eq!(normalized.messages[0].content[0]["data"], "aGk=");
+    }
+
+    #[test]
+    fn without_images_names_each_dropped_picture_even_inside_a_tool_result() {
+        let request = media_request(json!([
+            image_part("shot.png"),
+            {"type":"tool_result","id":"call","content":[image_part("page.png")]},
+        ]));
+        assert!(has_images(&request));
+        let stripped = without_images(request.clone());
+        assert!(!has_images(&stripped));
+        assert_eq!(
+            stripped.messages[0].content[0]["text"],
+            "[image attachment omitted: model does not support image input: shot.png]"
+        );
+        assert_eq!(
+            stripped.messages[0].content[1]["content"][0]["text"],
+            "[image attachment omitted: model does not support image input: page.png]"
+        );
+        // The caller's copy is untouched, so the durable history keeps its bytes.
+        assert_eq!(request.messages[0].content[0]["type"], "image");
+    }
+
+    #[test]
+    fn text_only_requests_carry_no_images() {
+        let request = media_request(json!([{"type":"text","text":"hello"}]));
+        assert!(!has_images(&request));
+    }
+
+    #[test]
+    fn refusal_detection_reads_capability_bodies_but_not_decode_failures() {
+        for body in [
+            r#"{"error":{"message":"Invalid content type. image_url is only supported by certain models."}}"#,
+            r#"{"error":{"message":"unknown variant `image_url`, expected `text`"}}"#,
+            r#"{"error":{"message":"This model doesn't support image input"}}"#,
+            r#"{"error":{"message":"Unable to process input image"}}"#,
+        ] {
+            assert!(image_input_rejected(body), "{body}");
+        }
+        for body in [
+            r#"{"error":{"code":"1210"}}"#,
+            "image is larger than 20 MB",
+            "invalid base64 in request",
+            "messages: text content blocks must be non-empty",
+        ] {
+            assert!(!image_input_rejected(body), "{body}");
+        }
     }
 }

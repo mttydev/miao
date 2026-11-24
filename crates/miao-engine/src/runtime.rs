@@ -4916,7 +4916,7 @@ async fn execute(
                 crate::provider::scoped(
                     transport_budget.clone(),
                     3,
-                    provider.stream(request.clone(), send, cancel.child_token()),
+                    provider.stream_accepting_images(request.clone(), send, cancel.child_token()),
                 ),
             );
             tokio::pin!(response);
