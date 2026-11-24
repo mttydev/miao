@@ -4044,7 +4044,7 @@ fn promote_tx(tx: &Transaction<'_>, session: &str, idle: bool) -> Result<Vec<Eve
         }
         let content = Value::Array(parts);
         tx.execute("INSERT INTO engine_message(session_id,seq,role,content,checkpoint,recorded_at_ms,kind) VALUES(?1,?2,'user',?3,?4,?5,?6)", params![session,e.seq,serde_json::to_string(&content)?,checkpoint,e.recorded_at_ms,e.kind])?;
-        refresh_preview(&tx, &session, &content)?;
+        refresh_preview(tx, session, &content)?;
         events.push(e);
         // Preparation is a settled operator boundary. Do not promote
         // a later steer past this command before its effects settle.
