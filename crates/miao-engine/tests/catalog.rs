@@ -434,7 +434,6 @@ async fn a_catalog_preview_follows_the_newest_visible_text() {
 async fn a_revert_rewrites_the_preview_and_unrevert_restores_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("engine.db")).await.unwrap();
-    store.initialize("s", "Revert", "/work").await.unwrap();
     store
         .admit_at(
             Input {

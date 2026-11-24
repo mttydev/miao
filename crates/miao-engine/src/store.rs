@@ -400,6 +400,12 @@ impl Store {
                 }
                 // This process holds the migration lock from here; name it for
                 // a waiter that times out on the next open.
+                // Whether the preview table predates this open has to be read
+                // before the schema batch creates it below; only a store that
+                // never had one needs its lines filled.
+                let has_preview: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_preview')",
+                    [], |row| row.get(0))?;
                 record_owner(&canonical);
                 conn.execute_batch(&format!("PRAGMA application_id={APPLICATION_ID};
                     CREATE TABLE IF NOT EXISTS engine_session(id TEXT PRIMARY KEY, next_seq INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'build');
@@ -637,14 +643,9 @@ impl Store {
                 crate::permission_source::initialize(&conn)?;
                 // The catalog's one line per Session used to scan the newest
                 // messages of every Session — tens of megabytes on a cold
-                // store. A preview row written when its text commits keeps the
-                // list to the rows it shows; a store from before this column
-                // gets its rows filled once, here.
-                let has_preview: bool = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_preview')",
-                    [], |row| row.get(0))?;
+                // store. A store from before this table gets its rows filled
+                // once, here; a fresh one has no Sessions to fill.
                 if !has_preview {
-                    conn.execute("CREATE TABLE engine_preview(session_id TEXT PRIMARY KEY REFERENCES engine_session(id), text TEXT NOT NULL, truncated INTEGER NOT NULL)", [])?;
                     let sessions: Vec<String> = {
                         let mut stmt = conn.prepare("SELECT id FROM engine_session")?;
                         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
