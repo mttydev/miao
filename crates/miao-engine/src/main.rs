@@ -671,6 +671,10 @@ async fn serve(runtime: Runtime, product_tools: Option<String>) -> io::Result<()
         Some(Duration::from_secs(idle))
     };
     let mut idle_deadline = tokio::time::Instant::now() + idle.unwrap_or(Duration::from_secs(3600));
+    // Catalog reads answered off the loop below. Every request that was read
+    // still gets its reply before the stream closes, so a batch client that
+    // half-closes stdin and then reads the answers loses none.
+    let mut catalog_reads: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     let result=async {
         loop {
             tokio::select! {
@@ -703,6 +707,27 @@ async fn serve(runtime: Runtime, product_tools: Option<String>) -> io::Result<()
                         _=>{send(&output,json!({"id":null,"error":{"code":"invalid_request","message":"expected an id and a typed method/params request"}})).await?;continue;},
                     };
                     let stop=matches!(request.command,Command::Shutdown);
+                    // The catalog is one read of the whole store, seconds while
+                    // the cache is cold, and this loop reads no request and polls
+                    // no event while a command runs: a prompt queued behind it
+                    // waited for the whole list. Its reply carries its own id, so
+                    // an answer from another task still reaches its caller.
+                    if matches!(request.command, Command::SessionCatalog) {
+                        let output = output.clone();
+                        let store = runtime.store().clone();
+                        let id = request.id;
+                        catalog_reads.spawn(async move {
+                            let reply = match store.session_catalog().await {
+                                Ok(value) => json!({ "id": id, "result": value }),
+                                Err(error) => json!({
+                                    "id": id,
+                                    "error": { "code": error.code(), "message": error.to_string() },
+                                }),
+                            };
+                            let _ = send(&output, reply).await;
+                        });
+                        continue;
+                    }
                     let result:Result<Value,Error>=host.dispatch(request.command).await;
                     let response=match result {Ok(value)=>json!({"id":request.id,"result":value}),Err(error)=>json!({"id":request.id,"error":{"code":error.code(),"message":error.to_string()}})};
                     send(&output,response).await?;
@@ -748,6 +773,7 @@ async fn serve(runtime: Runtime, product_tools: Option<String>) -> io::Result<()
         }
         Ok::<_,io::Error>(())
     }.await;
+    while catalog_reads.join_next().await.is_some() {}
     writer_stop.cancel();
     drop(output);
     writer.await.map_err(io::Error::other)??;

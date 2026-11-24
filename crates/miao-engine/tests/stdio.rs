@@ -931,3 +931,63 @@ fn input_edit_is_a_wire_command_that_rewrites_a_queued_prompt() {
     // The identity, not the text, is what an unknown edit is refused on.
     assert!(reply(4)["error"].is_object(), "{:?}", reply(4));
 }
+
+/// The catalog is one read of the whole store and is answered off the request
+/// loop, so the loop keeps serving whatever was queued behind it. Its reply
+/// still carries the id that asked, and arrives before the stream closes even
+/// though the client half-closes stdin right after writing.
+#[test]
+fn session_catalog_is_answered_off_the_loop_without_losing_its_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut process = Command::new(env!("CARGO_BIN_EXE_miao-engine"))
+        .args([
+            "serve",
+            "--db",
+            dir.path().join("engine.db").to_str().unwrap(),
+            "--workspace",
+            dir.path().to_str().unwrap(),
+            "--model",
+            "fixture",
+        ])
+        .env("ANTHROPIC_API_KEY", "fixture-key")
+        .env("MIAO_WORKSPACES_JSON", "[]")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        json!({"id":1,"method":"session_catalog"}),
+        json!({"id":2,"method":"workspaces"}),
+        json!({"id":3,"method":"session_catalog"}),
+        json!({"id":4,"method":"workspaces"}),
+        json!({"id":5,"method":"shutdown"}),
+    ];
+    let mut stdin = process.stdin.take().unwrap();
+    for request in requests {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(stdin);
+    let output = process.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let result = |id: u64| {
+        replies
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no reply for {id}: {replies:?}"))["result"]
+            .clone()
+    };
+    assert!(result(1).is_array(), "{:?}", result(1));
+    assert!(result(3).is_array(), "{:?}", result(3));
+    assert_eq!(result(2), json!([]), "{:?}", result(2));
+    assert_eq!(result(4), json!([]), "{:?}", result(4));
+}
