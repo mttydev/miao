@@ -67,6 +67,21 @@ currently [Command Code](https://commandcode.ai) — merged in when the site
 deploys. miao reads only this source; there is no models.dev fallback at
 runtime. A snapshot is bundled into the build, so startup works offline.
 
+miao also fetches that catalog itself, in the background, and caches it under
+`$XDG_CACHE_HOME/miao/models.json`: a revalidation happens once a day, and an
+unchanged catalog answers `304`, so a machine that is already current transfers
+nothing. `miao models --refresh` fetches it on the spot. A machine that cannot
+reach the site keeps the snapshot the install shipped, and a body that is not a
+catalog never replaces the one on disk.
+
+Subscription plans can serve models the catalog does not list yet. For every
+OpenAI-compatible provider this machine holds a key for, miao reads the
+provider's own `/models` endpoint (once every six hours) and adds the ids the
+catalog misses, so a model live on a plan is selectable before models.dev picks
+it up. Discovery only adds ids to providers the catalog already names — it
+never invents a provider — and a discovered model carries no declared context
+window or price until the catalog has one.
+
 You can point this at a different source:
 
 | Variable | What it does |

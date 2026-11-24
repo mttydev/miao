@@ -33,7 +33,9 @@ All commands run in this process: the TUI is linked in, not spawned.
 Usage:
   miao                  start the terminal UI (same as `miao tui`)
   miao tui [options]    start the terminal UI in this process
-  miao models           list the model routes this machine can use
+  miao models [--refresh]
+                        list the model routes this machine can use; --refresh
+                        refetches the catalog from mtty.dev first
   miao auth             list stored credentials (types only, never secrets)
   miao auth login INTEGRATION [KEY]
   miao auth logout INTEGRATION
@@ -5278,6 +5280,60 @@ fn list_credentials() -> Result<(), String> {
     Ok(())
 }
 
+/// `miao models --refresh` refetches the catalog before listing it. Without the
+/// flag the command only reads the snapshot already on disk.
+fn refresh_catalog_if_asked(rest: &[String]) -> Result<(), String> {
+    if !rest.iter().any(|argument| argument == "--refresh") {
+        return Ok(());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("could not start the refresh: {error}"))?;
+    match runtime.block_on(miao_engine::model_catalog::refresh(true)) {
+        refreshed @ (miao_engine::model_catalog::Refreshed::Updated { .. }
+        | miao_engine::model_catalog::Refreshed::Current) => {
+            println!("{refreshed}");
+        }
+        miao_engine::model_catalog::Refreshed::Unavailable(reason) => {
+            return Err(format!("catalog not refreshed: {reason}"));
+        }
+    }
+    // Discovery probes the providers this machine holds keys for, so it reads
+    // whatever catalog the refresh just left behind and reports its own failure
+    // instead of failing the command.
+    if let Ok(store) = credential_db_path() {
+        match runtime.block_on(miao_engine::model_discovery::refresh(&store, true)) {
+            Ok(summary) if summary.providers > 0 => println!("{summary}"),
+            Ok(_) => println!("account discovery: no provider with a stored key answered"),
+            Err(reason) => println!("account discovery skipped: {reason}"),
+        }
+    }
+    Ok(())
+}
+
+/// Keep the fetched catalog fresh while the terminal UI runs. The refresh never
+/// blocks a start: a download that lands in time is read by the next start, and
+/// a machine that cannot reach the site keeps the snapshot it shipped with.
+fn start_catalog_refresh() {
+    std::thread::spawn(|| {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        loop {
+            let _ = runtime.block_on(miao_engine::model_catalog::refresh(false));
+            if let Ok(store) = credential_db_path() {
+                let _ = runtime.block_on(miao_engine::model_discovery::refresh(&store, false));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+        }
+    });
+}
+
 /// List the routes the engine would be given. The routes manifest is the same
 /// file the product passes as `--model-routes-config`, so this prints exactly
 /// what a turn can address rather than a separate opinion.
@@ -5796,6 +5852,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 // The Rust TUI builds its own engine argv from MIAO_ENGINE_*
                 // variables, so the routes derived here reach it exactly the way
                 // an operator-supplied manifest would.
+                start_catalog_refresh();
                 prepare_tui_engine(&mut launch);
                 match miao_tui::run(launch) {
                     Ok(()) => std::process::ExitCode::SUCCESS,
@@ -6498,13 +6555,18 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 }
             }
         }
-        Some("serve") => match serve_forever(&args.collect::<Vec<_>>()) {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(message) => {
-                eprintln!("miao serve: {message}");
-                std::process::ExitCode::from(1)
+        Some("serve") => {
+            // A resident server outlives one start, so it keeps the catalog and
+            // the account discovery fresh the way the terminal UI does.
+            start_catalog_refresh();
+            match serve_forever(&args.collect::<Vec<_>>()) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(message) => {
+                    eprintln!("miao serve: {message}");
+                    std::process::ExitCode::from(1)
+                }
             }
-        },
+        }
         Some("auth") if args.clone().count() > 0 => {
             let rest: Vec<String> = args.collect();
             match auth_write(&rest) {
@@ -6522,13 +6584,16 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
                 std::process::ExitCode::from(1)
             }
         },
-        Some("models") => match list_models() {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(message) => {
-                eprintln!("miao models: {message}");
-                std::process::ExitCode::from(1)
+        Some("models") => {
+            let rest: Vec<String> = args.collect();
+            match refresh_catalog_if_asked(&rest).and_then(|()| list_models()) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(message) => {
+                    eprintln!("miao models: {message}");
+                    std::process::ExitCode::from(1)
+                }
             }
-        },
+        }
         Some("--version" | "-v") => {
             println!("miao {VERSION}");
             std::process::ExitCode::SUCCESS
@@ -6562,6 +6627,7 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
 fn start_tui(args: impl Iterator<Item = String>) -> std::process::ExitCode {
     match launch(args) {
         Ok(mut launch) => {
+            start_catalog_refresh();
             prepare_tui_engine(&mut launch);
             if let Ok(store) = credential_db_path() {
                 start_credential_refresh(store);

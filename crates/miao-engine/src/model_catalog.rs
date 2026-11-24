@@ -28,6 +28,9 @@ pub(crate) fn models_snapshot() -> Option<serde_json::Value> {
     // the self-maintained overlay does not apply there — the same rule the TS
     // catalog service applies.
     if std::env::var_os("MIAO_MODELS_PATH").is_none() {
+        // Account discovery first: it only adds ids the catalog misses, and the
+        // overlay after it is the maintained entry that outranks a guess.
+        crate::model_discovery::merge(&mut snapshot);
         apply_overlay(&mut snapshot);
     }
     Some(snapshot)
@@ -102,6 +105,234 @@ fn newest_snapshot(candidates: Vec<PathBuf>) -> Option<serde_json::Value> {
         .map(|(_, snapshot)| snapshot)
 }
 
+/// The catalog miao fetches: models.dev with the providers miao maintains
+/// merged in, rebuilt by the `mtty.dev` deploy (a daily schedule). The site
+/// serves it at `/models/api.json`; `/models` itself is the docs page.
+pub const DEFAULT_CATALOG_URL: &str = "https://mtty.dev/models/api.json";
+
+/// How long a fetched catalog is trusted before it is revalidated. The site
+/// rebuilds once a day, so a day bounds the staleness a user sees while one
+/// revalidation per machine per day bounds the traffic.
+pub const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The largest body a refresh accepts. The catalog is ~10 MiB today; anything
+/// past this is not a catalog and must not replace the one on disk.
+const MAX_CATALOG_BYTES: usize = 64 * 1024 * 1024;
+
+/// What one refresh did, so `miao models --refresh` can say it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refreshed {
+    /// A newer catalog replaced the cache.
+    Updated { providers: usize, models: usize },
+    /// The cache is current: inside its TTL, or the source answered 304.
+    Current,
+    /// Nothing was fetched. The snapshot already on disk stays authoritative.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for Refreshed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Updated { providers, models } => {
+                write!(
+                    formatter,
+                    "catalog updated: {providers} providers, {models} models"
+                )
+            }
+            Self::Current => write!(formatter, "catalog is current"),
+            Self::Unavailable(reason) => write!(formatter, "catalog not refreshed: {reason}"),
+        }
+    }
+}
+
+/// The catalog URL this machine reads. `MIAO_MODELS_URL` pins another source.
+pub fn catalog_url() -> String {
+    std::env::var("MIAO_MODELS_URL").unwrap_or_else(|_| DEFAULT_CATALOG_URL.to_string())
+}
+
+/// Where a fetched catalog is cached — the file [`models_snapshot`] already
+/// reads, shared with the TS catalog service: `$XDG_CACHE_HOME/miao/models.json`
+/// (or `~/.cache/miao/models.json`).
+pub fn cache_file() -> Option<PathBuf> {
+    Some(cache_dir()?.join("models.json"))
+}
+
+/// The cache directory the fetched catalog and the discovery share.
+pub(crate) fn cache_dir() -> Option<PathBuf> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".cache")))?;
+    Some(cache.join("miao"))
+}
+
+/// What the cache's sidecar records about the last successful validation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CatalogMeta {
+    url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    etag: Option<String>,
+    fetched_at_ms: u64,
+}
+
+fn meta_path(cache: &Path) -> PathBuf {
+    let mut name = cache.as_os_str().to_owned();
+    name.push(".meta.json");
+    PathBuf::from(name)
+}
+
+fn read_meta(cache: &Path) -> Option<CatalogMeta> {
+    let bytes = std::fs::read(meta_path(cache)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_meta(cache: &Path, meta: &CatalogMeta) {
+    // A sidecar that cannot be written only costs a revalidation next time.
+    if let Ok(bytes) = serde_json::to_vec(meta) {
+        let _ = write_atomic(&meta_path(cache), &bytes);
+    }
+}
+
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp-{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// Providers and models a catalog body carries. `None` means the body is not a
+/// catalog: writing it would replace a working snapshot with nothing.
+fn catalog_counts(snapshot: &Value) -> Option<(usize, usize)> {
+    let providers = snapshot.as_object()?;
+    let mut counted = 0;
+    let mut models = 0;
+    for provider in providers.values() {
+        let Some(entries) = provider.get("models").and_then(Value::as_object) else {
+            continue;
+        };
+        if entries.is_empty() {
+            continue;
+        }
+        counted += 1;
+        models += entries.len();
+    }
+    (counted > 0).then_some((counted, models))
+}
+
+/// Refresh the cached catalog when it is older than [`CATALOG_TTL`], or always
+/// with `force`. Failures are values, not errors: a machine offline or behind a
+/// proxy keeps the snapshot it already has.
+pub async fn refresh(force: bool) -> Refreshed {
+    // An exact catalog was requested; fetching another one would silently
+    // override it.
+    if std::env::var_os("MIAO_MODELS_PATH").is_some() {
+        return Refreshed::Unavailable("MIAO_MODELS_PATH pins an exact catalog".into());
+    }
+    let Some(cache) = cache_file() else {
+        return Refreshed::Unavailable("no home directory for the catalog cache".into());
+    };
+    refresh_from(&catalog_url(), &cache, force, CATALOG_TTL).await
+}
+
+/// [`refresh`] with the source and cache named, so a test can drive it against
+/// a local server and a temporary directory.
+pub async fn refresh_from(
+    url: &str,
+    cache: &Path,
+    force: bool,
+    ttl: std::time::Duration,
+) -> Refreshed {
+    let meta = read_meta(cache).filter(|meta| meta.url == url);
+    if !force {
+        if let Some(meta) = &meta {
+            if now_ms().saturating_sub(meta.fetched_at_ms) < ttl.as_millis() as u64 {
+                return Refreshed::Current;
+            }
+        }
+    }
+    let agent = format!(
+        "miao/{}",
+        option_env!("MIAO_CLI_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    );
+    let client = match reqwest::Client::builder()
+        .user_agent(agent)
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return Refreshed::Unavailable(error.to_string()),
+    };
+    let mut request = client.get(url);
+    if let Some(etag) = meta.as_ref().and_then(|meta| meta.etag.clone()) {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => return Refreshed::Unavailable(error.to_string()),
+    };
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        write_meta(
+            cache,
+            &CatalogMeta {
+                url: url.to_string(),
+                etag: meta.and_then(|meta| meta.etag),
+                fetched_at_ms: now_ms(),
+            },
+        );
+        return Refreshed::Current;
+    }
+    if !response.status().is_success() {
+        return Refreshed::Unavailable(format!("HTTP {}", response.status()));
+    }
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => return Refreshed::Unavailable(error.to_string()),
+    };
+    if bytes.len() > MAX_CATALOG_BYTES {
+        return Refreshed::Unavailable(format!("{} bytes exceeds the catalog bound", bytes.len()));
+    }
+    let snapshot: Value = match serde_json::from_slice(&bytes) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Refreshed::Unavailable(format!("invalid JSON: {error}")),
+    };
+    let Some((providers, models)) = catalog_counts(&snapshot) else {
+        return Refreshed::Unavailable("body carries no provider models".into());
+    };
+    if let Err(error) = write_atomic(cache, &bytes) {
+        return Refreshed::Unavailable(error.to_string());
+    }
+    write_meta(
+        cache,
+        &CatalogMeta {
+            url: url.to_string(),
+            etag,
+            fetched_at_ms: now_ms(),
+        },
+    );
+    Refreshed::Updated { providers, models }
+}
+
 /// The model patches miao maintains itself, mirrored from
 /// `packages/engine-ts/core/src/models-overlay.ts`. The TS catalog service
 /// merges that full table (provider identity, pricing) in memory, but the
@@ -116,34 +347,7 @@ fn apply_overlay(snapshot: &mut serde_json::Value) {
     let Some(entries) = snapshot.as_object_mut() else {
         return;
     };
-    let patches = serde_json::json!({
-        "zhipuai-coding-plan": {
-            "glm-5.3": {
-                "cost": { "input": 1.19516, "output": 4.18306, "cache_read": 0.29879, "cache_write": 0 },
-            },
-            "glm-5.3-flash": {
-                "cost": { "input": 0.11952, "output": 0.41831, "cache_read": 0.03436, "cache_write": 0 },
-            },
-            // Live on the coding-plan endpoint, not yet in models.dev. The
-            // plan page declares a 1M window, 128K output, video/image/text/
-            // file input and tool calling.
-            "glm-5.4": {
-                "name": "GLM-5.4",
-                "release_date": "2026-11-23",
-                "attachment": true,
-                "reasoning": true,
-                "temperature": true,
-                "tool_call": true,
-                "limit": { "context": 1000000, "output": 131072 },
-                "modalities": { "input": ["text", "image", "video", "pdf"], "output": ["text"] },
-            },
-        },
-        "volcengine": {
-            "deepseek-v4-1-flash-261017": {
-                "modalities": { "input": ["text", "image"], "output": ["text"] },
-            },
-        },
-    });
+    let patches = overlay_patches();
     let Some(patches) = patches.as_object() else {
         return;
     };
@@ -173,6 +377,28 @@ fn apply_overlay(snapshot: &mut serde_json::Value) {
             }
         }
     }
+}
+
+/// The patch table [`apply_overlay`] merges. Exposed for the scheduled drift
+/// check, which compares every entry with the catalog the site serves today: a
+/// model upstream now carries is an entry to delete, not to keep.
+#[doc(hidden)]
+pub fn overlay_patches() -> serde_json::Value {
+    serde_json::json!({
+        "zhipuai-coding-plan": {
+            "glm-5.3": {
+                "cost": { "input": 1.19516, "output": 4.18306, "cache_read": 0.29879, "cache_write": 0 },
+            },
+            "glm-5.3-flash": {
+                "cost": { "input": 0.11952, "output": 0.41831, "cache_read": 0.03436, "cache_write": 0 },
+            },
+        },
+        "volcengine": {
+            "deepseek-v4-1-flash-261017": {
+                "modalities": { "input": ["text", "image"], "output": ["text"] },
+            },
+        },
+    })
 }
 
 /// The smallest context window each model id declares, across every provider in
@@ -707,21 +933,27 @@ mod window_tests {
         );
     }
 
+    /// The catalog carried GLM-5.4 a day after the entry was written; the
+    /// overlay must not keep rewriting what the catalog now says.
     #[test]
-    fn the_overlay_adds_glm_5_4_when_the_catalog_has_not_caught_up() {
+    fn the_overlay_leaves_glm_5_4_to_the_catalog() {
         let mut snapshot = serde_json::json!({
-            "zhipuai-coding-plan": { "models": {} }
+            "zhipuai-coding-plan": {
+                "models": {
+                    "glm-5.4": {
+                        "name": "GLM-5.4",
+                        "limit": { "context": 1000000, "output": 131072 },
+                        "modalities": { "input": ["text", "image", "video", "pdf"], "output": ["text"] },
+                    },
+                },
+            },
         });
+        let before = snapshot["zhipuai-coding-plan"]["models"]["glm-5.4"].clone();
         apply_overlay(&mut snapshot);
-        let model = &snapshot["zhipuai-coding-plan"]["models"]["glm-5.4"];
-        assert_eq!(model["limit"]["context"], serde_json::json!(1000000));
-        assert_eq!(model["limit"]["output"], serde_json::json!(131072));
         assert_eq!(
-            model["modalities"]["input"],
-            serde_json::json!(["text", "image", "video", "pdf"])
+            snapshot["zhipuai-coding-plan"]["models"]["glm-5.4"], before,
+            "an entry the catalog carries is left exactly as it was"
         );
-        assert_eq!(model["tool_call"], serde_json::json!(true));
-        assert_eq!(model["attachment"], serde_json::json!(true));
     }
 
     #[test]
