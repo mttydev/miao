@@ -8,6 +8,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -171,6 +172,31 @@ fn footer_update(last: &Option<String>, wire: Option<&[FooterWireSeg]>) -> Optio
     (last.as_deref() != Some(json.as_str())).then_some(json)
 }
 
+/// How often an unchanged footer is repeated. The host replaces the pane's
+/// entry on every write, so a report another writer overwrote, or a CLI that
+/// failed to start, would otherwise leave the row blank until the strip itself
+/// changed. Repeating on this cadence heals that without a process per frame.
+const FOOTER_HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// The report to send now: a changed strip immediately, otherwise the cached
+/// one once the heartbeat window has passed.
+fn footer_due(
+    last: &Option<String>,
+    wire: Option<&[FooterWireSeg]>,
+    sent_at: Option<Instant>,
+    now: Instant,
+) -> Option<String> {
+    if let Some(report) = footer_update(last, wire) {
+        return Some(report);
+    }
+    let stale = sent_at.is_none_or(|at| now.duration_since(at) >= FOOTER_HEARTBEAT);
+    if stale {
+        last.clone()
+    } else {
+        None
+    }
+}
+
 /// Forwards state changes to mtty, once each.
 #[derive(Debug, Default)]
 pub struct Reporter {
@@ -181,6 +207,8 @@ pub struct Reporter {
     /// The footer report the host last acknowledged, so a strip that did not
     /// change costs nothing per frame.
     last_footer: Option<String>,
+    /// When the last footer report was handed to the host, for the heartbeat.
+    last_footer_at: Option<Instant>,
     host_footer: bool,
 }
 
@@ -192,6 +220,7 @@ impl Reporter {
             context: None,
             last: None,
             last_footer: None,
+            last_footer_at: None,
             host_footer: host_footer_active(),
         }
     }
@@ -210,10 +239,13 @@ impl Reporter {
         if !self.host_footer || self.target.is_none() {
             return;
         }
-        let Some(footer) = footer_update(&self.last_footer, wire.as_deref()) else {
+        let now = Instant::now();
+        let Some(footer) = footer_due(&self.last_footer, wire.as_deref(), self.last_footer_at, now)
+        else {
             return;
         };
         self.last_footer = Some(footer.clone());
+        self.last_footer_at = Some(now);
         self.send(self.last.unwrap_or(State::Idle), Some(&footer));
     }
 
@@ -230,7 +262,11 @@ impl Reporter {
             return;
         }
         self.last = Some(state);
-        self.send(state, self.footer_rider().as_deref());
+        let footer = self.footer_rider();
+        if footer.is_some() {
+            self.last_footer_at = Some(Instant::now());
+        }
+        self.send(state, footer.as_deref());
     }
 
     /// Publish or clear the owned Runtime beside the run state. The report
@@ -238,10 +274,11 @@ impl Reporter {
     /// pane's whole entry and a stale context would point at a dead host.
     pub fn set_runtime_context(&mut self, context: Option<RuntimeContext>) {
         self.context = context;
-        self.send(
-            self.last.unwrap_or(State::Idle),
-            self.footer_rider().as_deref(),
-        );
+        let footer = self.footer_rider();
+        if footer.is_some() {
+            self.last_footer_at = Some(Instant::now());
+        }
+        self.send(self.last.unwrap_or(State::Idle), footer.as_deref());
     }
 
     /// The cached footer attached to every report. mtty replaces the pane's
@@ -255,6 +292,20 @@ impl Reporter {
         }
     }
 
+    /// How long until the merged footer should be repeated. An idle Session
+    /// paints no frames, so without this timer a report the host lost would
+    /// stay lost until the operator typed something.
+    pub fn footer_heartbeat(&self) -> Option<Duration> {
+        if !self.host_footer {
+            return None;
+        }
+        self.last_footer.as_ref()?;
+        let wait = self.last_footer_at.map_or(Duration::ZERO, |at| {
+            FOOTER_HEARTBEAT.saturating_sub(at.elapsed())
+        });
+        Some(wait.max(Duration::from_millis(1)))
+    }
+
     /// The TUI is leaving: one final report stops the tab claiming a run that
     /// ended with this process, clears the Runtime this client no longer hosts,
     /// and hides the merged footer the host would otherwise keep showing.
@@ -266,6 +317,7 @@ impl Reporter {
         // after exit.
         let footer = footer_update(&self.last_footer, None);
         self.last_footer = None;
+        self.last_footer_at = None;
         self.last = Some(State::Idle);
         self.send(State::Idle, footer.as_deref());
     }
@@ -303,7 +355,10 @@ impl Reporter {
 #[cfg(test)]
 mod tests {
     use super::{active_from_lookup, arguments, context_json, flag_from_lookup, footer_json};
-    use super::{footer_update, Reporter, RuntimeContext, State, Target};
+    use super::{
+        footer_due, footer_update, Reporter, RuntimeContext, State, Target, FOOTER_HEARTBEAT,
+    };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn state_follows_the_blocking_and_run_signals() {
@@ -522,6 +577,76 @@ mod tests {
         let hidden = footer_update(&Some(first.clone()), None).expect("hide report");
         assert!(hidden.contains(r#""visible":false"#), "{hidden}");
         assert_eq!(footer_update(&Some(hidden), None), None);
+    }
+
+    /// A host that lost the report must get it back without waiting for the
+    /// strip to change, while a changed strip still goes out immediately.
+    #[test]
+    fn an_unchanged_footer_is_repeated_on_the_heartbeat() {
+        use crate::pane::FooterWireSeg;
+        let segs = vec![FooterWireSeg {
+            id: "model",
+            text: "deepseek-v4".into(),
+            row: 0,
+            start: 0,
+            end: 0,
+            chord: None,
+            tone: Some("accent"),
+        }];
+        let first = footer_update(&None, Some(&segs)).expect("first report");
+        let now = Instant::now();
+        assert_eq!(
+            footer_due(&Some(first.clone()), Some(&segs), Some(now), now),
+            None,
+            "an unchanged strip stays silent inside the window"
+        );
+        let later = now + FOOTER_HEARTBEAT;
+        assert_eq!(
+            footer_due(&Some(first.clone()), Some(&segs), Some(now), later),
+            Some(first),
+            "the unchanged report is repeated once the window passes"
+        );
+        let other = vec![FooterWireSeg {
+            id: "model",
+            text: "other".into(),
+            row: 0,
+            start: 0,
+            end: 0,
+            chord: None,
+            tone: Some("accent"),
+        }];
+        assert!(
+            footer_due(
+                &Some(footer_json(true, &segs)),
+                Some(&other),
+                Some(now),
+                now
+            )
+            .is_some(),
+            "a changed strip still sends immediately"
+        );
+    }
+
+    /// The loop must wake for the heartbeat even when nothing else changes,
+    /// or an idle Session never repeats a report the host lost.
+    #[test]
+    fn the_footer_heartbeat_wakes_an_idle_loop() {
+        let mut reporter = Reporter::default();
+        assert_eq!(reporter.footer_heartbeat(), None);
+        reporter.host_footer = true;
+        reporter.last_footer = Some(r#"{"v":1,"visible":true}"#.into());
+        reporter.last_footer_at = Some(Instant::now());
+        let wait = reporter.footer_heartbeat().expect("a heartbeat is due");
+        assert!(
+            wait > Duration::ZERO && wait <= FOOTER_HEARTBEAT,
+            "{wait:?}"
+        );
+        reporter.last_footer_at = Some(Instant::now() - FOOTER_HEARTBEAT);
+        assert_eq!(
+            reporter.footer_heartbeat(),
+            Some(Duration::from_millis(1)),
+            "an overdue heartbeat wakes on the next turn"
+        );
     }
 
     #[test]
