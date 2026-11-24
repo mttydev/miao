@@ -2443,8 +2443,34 @@ impl App {
     }
 
     /// Back to the model picker, narrowed to the remembered provider.
+    ///
+    /// A catalog answer arrives while the picker is open (the provider tail
+    /// adds the needs-auth rows), so the rebuild keeps what the operator was
+    /// doing: the same query and the same row under the cursor. Replacing the
+    /// whole list made the answer wipe the search and jump back to the top,
+    /// which read as the picker resetting itself while it was being used.
     fn reopen_models_dialog(&mut self) {
+        let Some(Dialog::Models(previous)) = self.dialog.take() else {
+            self.open_models_dialog();
+            return;
+        };
+        let selected = previous
+            .visible
+            .get(previous.selected)
+            .and_then(|index| previous.rows.get(*index))
+            .map(|row| row.id.clone());
+        let query = previous.filter.text().to_string();
+        let armed = previous.search;
         self.open_models_dialog();
+        let Some(Dialog::Models(list)) = self.dialog.as_mut() else {
+            return;
+        };
+        list.restore_search(&query, armed);
+        if let Some(row) = selected.and_then(|id| list.rows.iter().position(|row| row.id == id)) {
+            if let Some(index) = list.visible.iter().position(|visible| *visible == row) {
+                list.selected = index;
+            }
+        }
     }
 
     /// The model picker over the current catalog, narrowed to the remembered
@@ -12318,6 +12344,79 @@ mod tests {
         assert_eq!(app.models_filter.as_deref(), Some("openai"));
         assert!(list.rows.iter().any(|row| row.label.contains("gpt-5")));
         assert!(!list.rows.iter().any(|row| row.label.contains("glm-5")));
+    }
+
+    /// A catalog answer arrives while the model picker is open (the provider
+    /// tail adds the needs-auth rows). Rebuilding the list must keep the
+    /// operator's query and the row under the cursor; replacing it wholesale
+    /// wiped the search and jumped back to the top mid-use.
+    #[test]
+    fn a_catalog_refresh_keeps_the_model_pickers_query_and_cursor() {
+        let mut app = app();
+        app.models = vec![
+            ModelInfo {
+                protocol: "openai-chat".into(),
+                model: "gpt-5".into(),
+                route_id: Some("openai/gpt-5".into()),
+                variant: None,
+                provider: Some("openai".into()),
+                account: None,
+                credential_id: None,
+            },
+            ModelInfo {
+                protocol: "openai-chat".into(),
+                model: "glm-5".into(),
+                route_id: Some("zhipu/glm-5".into()),
+                variant: None,
+                provider: Some("zhipu".into()),
+                account: None,
+                credential_id: None,
+            },
+            ModelInfo {
+                protocol: "openai-chat".into(),
+                model: "glm-5.3-flash".into(),
+                route_id: Some("zhipu/glm-5.3-flash".into()),
+                variant: None,
+                provider: Some("zhipu".into()),
+                account: None,
+                credential_id: None,
+            },
+        ];
+        app.open_models_dialog();
+        let Some(Dialog::Models(list)) = app.dialog.as_mut() else {
+            panic!("the model picker is open");
+        };
+        list.filter.set_text("glm");
+        list.refilter();
+        assert!(list.visible.len() >= 2, "both glm rows are visible");
+        // The last visible row is a model, not the provider header above it.
+        list.selected = list.visible.len() - 1;
+        let selected = list
+            .visible
+            .get(list.selected)
+            .and_then(|index| list.rows.get(*index))
+            .map(|row| row.id.clone());
+        assert!(selected.is_some(), "a row is under the cursor");
+
+        app.reopen_models_dialog();
+
+        let Some(Dialog::Models(list)) = app.dialog.as_ref() else {
+            panic!("the model picker survived the refresh");
+        };
+        assert_eq!(
+            list.filter.text(),
+            "glm",
+            "the query survives the catalog refresh"
+        );
+        let after = list
+            .visible
+            .get(list.selected)
+            .and_then(|index| list.rows.get(*index))
+            .map(|row| row.id.clone());
+        assert_eq!(
+            after, selected,
+            "the cursor stays on the row it was reading"
+        );
     }
 
     /// OpenAI's account login is a choice, not a silent default: the operator

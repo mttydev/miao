@@ -10,37 +10,93 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
+    time::SystemTime,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_ROUTES: usize = 1024;
 
+/// One candidate snapshot, identified by the metadata that decides whether a
+/// cached parse is still current.
+struct Source {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+type SourceKey = (PathBuf, Option<SystemTime>, u64);
+
+fn key_of(source: &Source) -> SourceKey {
+    (source.path.clone(), source.modified, source.len)
+}
+
+/// The parsed directory, kept for the life of the process. Startup derives
+/// routes, the picker names providers, and the compaction trigger reads a
+/// context window; all of them used to re-read and re-parse the same
+/// eight-megabyte file, and the installer, the data home and the cache can
+/// each hold a copy of it. The key is every candidate's identity plus the
+/// overlay switch, so a new install, a cache refresh, or a rewrite invalidates
+/// the parse while an unchanged set costs only a few stats.
+type SnapshotKey = (Vec<SourceKey>, bool, Option<SourceKey>);
+type Cached = Option<(SnapshotKey, Arc<Value>)>;
+static CACHED: OnceLock<Mutex<Cached>> = OnceLock::new();
+
 /// The full provider directory the install ships (`models.json`, the same
 /// file the TS catalog service reads), with the self-maintained model patches
 /// applied. An explicit path wins; otherwise the newest readable snapshot
 /// beside the engine binary, in the install directory, or in the user cache
-/// is used.
-pub(crate) fn models_snapshot() -> Option<serde_json::Value> {
-    let mut snapshot = raw_snapshot()?;
+/// is used. The parsed document is cached by the candidate set, because
+/// startup derives routes, the picker names providers, and the compaction
+/// trigger reads a window from the same file.
+pub(crate) fn models_snapshot() -> Option<Arc<Value>> {
     // MIAO_MODELS_PATH selects an exact catalog (tests, air-gapped users), so
     // the self-maintained overlay does not apply there — the same rule the TS
     // catalog service applies.
-    if std::env::var_os("MIAO_MODELS_PATH").is_none() {
+    let overlay = std::env::var_os("MIAO_MODELS_PATH").is_none();
+    let sources = snapshot_sources();
+    if sources.is_empty() {
+        return None;
+    }
+    // Discovery is a second input: a background refresh can add account
+    // models while the catalog file itself is unchanged.
+    let discovery = overlay
+        .then(crate::model_discovery::cache_file)
+        .flatten()
+        .and_then(source_at)
+        .map(|source| key_of(&source));
+    let key: SnapshotKey = (sources.iter().map(key_of).collect(), overlay, discovery);
+    let cache = CACHED.get_or_init(|| Mutex::new(None));
+    {
+        let cached = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((known, document)) = cached.as_ref() {
+            if *known == key {
+                return Some(document.clone());
+            }
+        }
+    }
+    let (_, mut document) = first_readable(sources)?;
+    if overlay {
         // Account discovery first: it only adds ids the catalog misses, and the
         // overlay after it is the maintained entry that outranks a guess.
-        crate::model_discovery::merge(&mut snapshot);
-        apply_overlay(&mut snapshot);
+        crate::model_discovery::merge(&mut document);
+        apply_overlay(&mut document);
     }
-    Some(snapshot)
+    let document = Arc::new(document);
+    *cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((key, document.clone()));
+    Some(document)
 }
 
-fn raw_snapshot() -> Option<serde_json::Value> {
+fn snapshot_sources() -> Vec<Source> {
     // An explicit path selects an exact catalog, even when it is older than
     // the cache; the operator or a test asked for that file.
     if let Some(path) = std::env::var_os("MIAO_MODELS_PATH") {
-        return read_snapshot(Path::new(&path));
+        return source_at(PathBuf::from(path)).into_iter().collect();
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(executable) = std::env::current_exe() {
@@ -61,6 +117,38 @@ fn raw_snapshot() -> Option<serde_json::Value> {
         candidates.push(cache.join("miao/models.json"));
     }
     newest_snapshot(candidates)
+}
+
+/// One candidate's identity, read without parsing the document.
+fn source_at(path: PathBuf) -> Option<Source> {
+    let metadata = std::fs::metadata(&path).ok()?;
+    Some(Source {
+        path,
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
+}
+
+/// The first candidate that actually parses. A newer file that is unreadable
+/// must not hide the readable copy behind it.
+fn first_readable(sources: Vec<Source>) -> Option<(Source, Value)> {
+    sources
+        .into_iter()
+        .find_map(|source| read_snapshot(&source.path).map(|document| (source, document)))
+}
+
+/// Pick the newest candidates without reading any of them. The installer's
+/// copy, the data home and the TS cache often hold the same eight-megabyte
+/// file; parsing every candidate to choose one made each catalog read several
+/// times slower than it needed to be.
+fn newest_snapshot(candidates: Vec<PathBuf>) -> Vec<Source> {
+    let mut sources: Vec<Source> = candidates.into_iter().filter_map(source_at).collect();
+    sources.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| b.path.cmp(&a.path))
+    });
+    sources
 }
 
 /// The home directory the product and the TS catalog service share.
@@ -87,22 +175,6 @@ fn read_snapshot(path: &Path) -> Option<serde_json::Value> {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-}
-
-/// Pick the newest readable snapshot. The installer's copy and the TS cache
-/// can both exist; whichever was written last is the one that knows the
-/// current model list.
-fn newest_snapshot(candidates: Vec<PathBuf>) -> Option<serde_json::Value> {
-    candidates
-        .into_iter()
-        .filter_map(|path| {
-            let modified = std::fs::metadata(&path)
-                .and_then(|metadata| metadata.modified())
-                .ok();
-            read_snapshot(&path).map(|snapshot| (modified, snapshot))
-        })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, snapshot)| snapshot)
 }
 
 /// The catalog miao fetches: models.dev with the providers miao maintains
@@ -443,7 +515,7 @@ fn window_index() -> &'static BTreeMap<String, u64> {
     static INDEX: std::sync::OnceLock<BTreeMap<String, u64>> = std::sync::OnceLock::new();
     INDEX.get_or_init(|| {
         models_snapshot()
-            .as_ref()
+            .as_deref()
             .map(index_windows)
             .unwrap_or_default()
     })
@@ -838,7 +910,7 @@ impl Provider for Catalog {
 
 #[cfg(test)]
 mod window_tests {
-    use super::{apply_overlay, index_windows, newest_snapshot, window_in_index};
+    use super::{apply_overlay, first_readable, index_windows, newest_snapshot, window_in_index};
 
     fn document() -> serde_json::Value {
         serde_json::json!({
@@ -979,7 +1051,32 @@ mod window_tests {
             .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
             .unwrap();
         std::fs::write(&new, r#"{"new":{}}"#).unwrap();
-        let picked = newest_snapshot(vec![old, new]).expect("snapshot");
-        assert!(picked.get("new").is_some(), "{picked}");
+        let expected = new.clone();
+        let picked = newest_snapshot(vec![old, new]);
+        assert_eq!(
+            picked.first().map(|source| source.path.as_path()),
+            Some(expected.as_path()),
+            "the newest candidate leads the list"
+        );
+    }
+
+    /// A newer file that cannot be parsed must not hide the readable copy
+    /// behind it: the walk continues in age order until one parses.
+    #[test]
+    fn an_unreadable_newest_snapshot_falls_back_to_the_next() {
+        let directory = tempfile::tempdir().unwrap();
+        let readable = directory.path().join("readable.json");
+        let broken = directory.path().join("broken.json");
+        std::fs::write(&readable, r#"{"readable":{}}"#).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&readable)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        std::fs::write(&broken, b"not json").unwrap();
+        let sources = newest_snapshot(vec![readable, broken]);
+        let (_, document) = first_readable(sources).expect("readable fallback");
+        assert!(document.get("readable").is_some(), "{document:?}");
     }
 }
