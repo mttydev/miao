@@ -157,16 +157,14 @@ impl Shell {
         self.embedded_footer = on;
     }
 
-    /// The strip facts the embedded host's footer should show now: the
     /// The facts the embedded host renders, read straight from the strip:
     /// labels only, no cells. The host's row is its own surface, and a press
     /// there arrives as the operator's own chord, so the geometry stays zero.
-    /// `None` while the leader menu owns the row.
+    /// The facts stay reported while the leader waits: the host has no menu to
+    /// paint, and clearing the wire took the state, model, provider and version
+    /// chip off screen until the next change.
     pub fn footer_wire(&self) -> Option<Vec<FooterWireSeg>> {
-        match self.leader_hint.is_some() {
-            true => None,
-            false => wire_from_status(&self.status),
-        }
+        wire_from_status(&self.status)
     }
 
     /// The strip fact a press at this position acts on, if the last paint
@@ -11535,11 +11533,12 @@ mod draft_gap_tests {
         assert_eq!(wire[0].end, 0, "{wire:?}");
     }
 
-    /// The armed leader hides the wire under an embedded host: the facts row
-    /// belongs to the conversation now, so the leader menu has no painted
-    /// surface and the host must not show facts behind it either.
+    /// The armed leader keeps the host facts. An embedded host has no menu to
+    /// paint, so clearing the wire took the whole row and the version chip away
+    /// until the next change; a plain terminal still paints the menu over its
+    /// own facts row.
     #[test]
-    fn an_armed_leader_hides_the_wire() {
+    fn an_armed_leader_keeps_the_host_facts() {
         let mut shell = Shell::new(Path::new("/tmp/pane-test"), strip_theme());
         shell.set_embedded_footer(true);
         shell.status.model = Some("deepseek-v4".into());
@@ -11558,7 +11557,10 @@ mod draft_gap_tests {
             !painted.contains("deepseek-v4"),
             "the facts leaked behind the leader menu: {painted}"
         );
-        assert_eq!(shell.footer_wire(), None);
+        let wire = shell.footer_wire().expect("the facts survive the leader");
+        let ids: Vec<&str> = wire.iter().map(|seg| seg.id).collect();
+        assert_eq!(ids, vec!["model"], "{wire:?}");
+        assert_eq!(wire[0].text, "deepseek-v4", "{wire:?}");
     }
 
     /// The landing merges the same way under an embedded host: the box pins

@@ -5402,10 +5402,10 @@ impl App {
                     .min(Duration::from_secs(1))
             })
             .min();
-        match (wait, poll) {
-            (Some(wait), Some(poll)) => Some(wait.min(poll)),
-            (wait, poll) => wait.or(poll),
-        }
+        [wait, poll, self.mtty_state.footer_heartbeat()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// The approval fact, named in the mode it is in. It stays on screen in
