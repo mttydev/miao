@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use miao_engine::{
-    protocol::{Delivery, Input, ModelRequest},
+    protocol::{Delivery, Error, Input, ModelRequest},
     provider::{Provider, ProviderError, Reply},
     runtime::Runtime,
     store::Store,
@@ -175,5 +175,36 @@ async fn admitting_a_prompt_keeps_a_worktree_session_on_its_worktree() {
         store.session_root("ses_two").await.unwrap(),
         Some(second),
         "admission must not move the Session back to the checkout"
+    );
+}
+
+#[tokio::test]
+async fn a_worktree_session_can_change_its_model_and_account() {
+    let dir = tempfile::tempdir().unwrap();
+    repository(dir.path());
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(state.path().join("engine.db")).await.unwrap();
+    let tools = Tools::new(dir.path()).await.unwrap();
+    let runtime = Runtime::new(store.clone(), Arc::new(Idle), tools)
+        .await
+        .unwrap();
+
+    runtime.initialize("ses_one", "one").await.unwrap();
+    runtime.initialize("ses_two", "two").await.unwrap();
+    let second = store.session_root("ses_two").await.unwrap().unwrap();
+    assert_ne!(
+        second,
+        canonical(dir.path()).to_string_lossy(),
+        "the second Session must be the worktree one"
+    );
+
+    runtime
+        .select_model("ses_two", None)
+        .await
+        .expect("a worktree Session selects a model at its own root");
+    let account = runtime.select_account("ses_two", None).await;
+    assert!(
+        !matches!(account, Err(Error::Conflict)),
+        "a worktree Session must reach its account selection, not be rejected by the engine root: {account:?}"
     );
 }

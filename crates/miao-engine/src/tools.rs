@@ -1623,7 +1623,30 @@ impl Tools {
             return Ok(());
         }
         let main_text = main.to_string_lossy();
-        let redirected = text.contains(main_text.as_ref())
+        // A worktree lives under `<checkout>/.miao-worktrees/`, so the session's
+        // own root contains the checkout path as a prefix. Judge a token by the
+        // path it resolves to: the checkout itself (or a path inside it that is
+        // outside this worktree) is the redirect, while the worktree is not.
+        let checkout_token = |token: &str| -> bool {
+            let token = token.trim_matches(|c| c == '\'' || c == '"');
+            let path = token
+                .strip_prefix("--git-dir=")
+                .or_else(|| token.strip_prefix("--work-tree="))
+                .or_else(|| token.strip_prefix("GIT_DIR="))
+                .or_else(|| token.strip_prefix("GIT_WORK_TREE="))
+                .unwrap_or(token);
+            if !path.contains(main_text.as_ref()) {
+                return false;
+            }
+            let candidate = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                self.root.join(path)
+            };
+            let candidate = canonical_plain(std::fs::canonicalize(&candidate).unwrap_or(candidate));
+            candidate.starts_with(main) && !candidate.starts_with(&self.root)
+        };
+        let redirected = tokens.iter().any(|token| checkout_token(token))
             || tokens.iter().any(|token| {
                 *token == "--git-dir"
                     || *token == "--work-tree"
@@ -3723,6 +3746,16 @@ mod worktree_tool_tests {
         assert!(scoped
             .deny_checkout_redirect("bash", &json!({"command": "git -C . status"}))
             .is_ok());
+        // The worktree lives under the checkout, so its path contains the
+        // checkout path. A command that stays in the worktree must not be
+        // mistaken for a redirect into the checkout.
+        let inside = format!("cd {} && git status --porcelain", tree.path);
+        assert!(
+            scoped
+                .deny_checkout_redirect("bash", &json!({ "command": inside }))
+                .is_ok(),
+            "{inside} must be allowed"
+        );
         for command in [
             format!("git -C {} checkout -- .", root.display()),
             "cd .. && git checkout -- .".to_string(),
