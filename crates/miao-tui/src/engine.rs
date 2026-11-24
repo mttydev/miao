@@ -995,56 +995,82 @@ pub fn attach(settings: &Settings, bus: Bus) -> Result<Handle, String> {
         let remote_config = settings.remote_host.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            match miao_engine::cli::configure(&argv).await {
-                Ok(configured) => {
-                    let remote = match remote_config.as_deref() {
-                        Some(config) => {
-                            start_remote_host(configured.runtime.clone(), config, &db, &bus).await
-                        }
-                        None => None,
-                    };
-                    match Connection::start_embedded(configured.runtime, REQUEST_TIMEOUT) {
-                        Ok((connection, events)) => {
-                            // Hold the sidecar and its endpoint for as long as
-                            // this window drives the engine, and withdraw the
-                            // pane's Runtime context when that window ends.
-                            let announced = remote.is_some();
-                            let quit_bus = bus.clone();
-                            {
-                                let _remote = remote;
-                                run(connection, events, rx, bus).await;
+            // A schema upgrade needs the store alone. Another miao process that
+            // still has it open makes the engine refuse; that is a wait, not a
+            // start failure, so this window keeps trying and comes up by itself
+            // once the other one closes.
+            let mut waiting = false;
+            loop {
+                match miao_engine::cli::configure(&argv).await {
+                    Ok(configured) => {
+                        let remote = match remote_config.as_deref() {
+                            Some(config) => {
+                                start_remote_host(configured.runtime.clone(), config, &db, &bus)
+                                    .await
                             }
-                            if announced {
-                                quit_bus.send(AppEvent::RuntimeContext(None));
+                            None => None,
+                        };
+                        match Connection::start_embedded(configured.runtime, REQUEST_TIMEOUT) {
+                            Ok((connection, events)) => {
+                                // Hold the sidecar and its endpoint for as long
+                                // as this window drives the engine, and withdraw
+                                // the pane's Runtime context when it ends.
+                                let announced = remote.is_some();
+                                let quit_bus = bus.clone();
+                                {
+                                    let _remote = remote;
+                                    run(connection, events, rx, bus).await;
+                                }
+                                if announced {
+                                    quit_bus.send(AppEvent::RuntimeContext(None));
+                                }
+                            }
+                            Err(error) => {
+                                drop(remote);
+                                bus.send(AppEvent::EngineFailure(format!(
+                                    "cannot start the in-process engine: {error}"
+                                )))
                             }
                         }
-                        Err(error) => {
-                            drop(remote);
-                            bus.send(AppEvent::EngineFailure(format!(
-                                "cannot start the in-process engine: {error}"
-                            )))
-                        }
+                        return;
                     }
-                }
-                // Nothing named an engine, so there is nothing to spawn: the
-                // package links this engine in and ships no separate
-                // `miao-engine`. Reporting the spawn's "program not found"
-                // instead buried the reason a Windows start without `HOME`
-                // could not resolve its model or credential.
-                Err(error) if !named => bus.send(AppEvent::EngineFailure(format!(
-                    "cannot start the engine: {error}"
-                ))),
-                Err(error) => match Connection::start(spawn, REQUEST_TIMEOUT) {
-                    Ok((connection, events)) => {
+                    Err(error) if storage_held(&error.to_string()) => {
+                        if !waiting {
+                            waiting = true;
+                            bus.send(AppEvent::Notice(
+                                "another miao window is using this workspace's storage; this window starts when it closes"
+                                    .into(),
+                            ));
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    // Nothing named an engine, so there is nothing to spawn: the
+                    // package links this engine in and ships no separate
+                    // `miao-engine`. Reporting the spawn's "program not found"
+                    // instead buried the reason a Windows start without `HOME`
+                    // could not resolve its model or credential.
+                    Err(error) if !named => {
                         bus.send(AppEvent::EngineFailure(format!(
-                            "in-process engine unavailable ({error}); using the spawned engine"
+                            "cannot start the engine: {error}"
                         )));
-                        run(connection, events, rx, bus).await
+                        return;
                     }
-                    Err(spawn_error) => bus.send(AppEvent::EngineFailure(format!(
-                        "cannot start the engine: {error}; the named miao-engine could not start either ({spawn_error})"
-                    ))),
-                },
+                    Err(error) => match Connection::start(spawn.clone(), REQUEST_TIMEOUT) {
+                        Ok((connection, events)) => {
+                            bus.send(AppEvent::EngineFailure(format!(
+                                "in-process engine unavailable ({error}); using the spawned engine"
+                            )));
+                            run(connection, events, rx, bus).await;
+                            return;
+                        }
+                        Err(spawn_error) => {
+                            bus.send(AppEvent::EngineFailure(format!(
+                                "cannot start the engine: {error}; the named miao-engine could not start either ({spawn_error})"
+                            )));
+                            return;
+                        }
+                    },
+                }
             }
         });
         return Ok(Handle { tx });
@@ -1070,46 +1096,69 @@ pub fn attach(settings: &Settings, bus: Bus) -> Result<Handle, String> {
             let remote_config = settings.remote_host.clone();
             let (tx, rx) = mpsc::unbounded_channel();
             tokio::spawn(async move {
-                match miao_engine::cli::configure(&argv).await {
-                    Ok(configured) => {
-                        let remote = match remote_config.as_deref() {
-                            Some(config) => {
-                                start_remote_host(configured.runtime.clone(), config, &db, &bus)
-                                    .await
-                            }
-                            None => None,
-                        };
-                        match Connection::start_embedded(configured.runtime, REQUEST_TIMEOUT) {
-                            Ok((connection, events)) => {
-                                let announced = remote.is_some();
-                                let quit_bus = bus.clone();
-                                bus.send(AppEvent::EngineFailure(format!(
-                                    "the named engine could not start ({error}); using the in-process engine"
-                                )));
-                                {
-                                    let _remote = remote;
-                                    run(connection, events, rx, bus).await;
+                let mut waiting = false;
+                loop {
+                    match miao_engine::cli::configure(&argv).await {
+                        Ok(configured) => {
+                            let remote = match remote_config.as_deref() {
+                                Some(config) => {
+                                    start_remote_host(configured.runtime.clone(), config, &db, &bus)
+                                        .await
                                 }
-                                if announced {
-                                    quit_bus.send(AppEvent::RuntimeContext(None));
+                                None => None,
+                            };
+                            match Connection::start_embedded(configured.runtime, REQUEST_TIMEOUT) {
+                                Ok((connection, events)) => {
+                                    let announced = remote.is_some();
+                                    let quit_bus = bus.clone();
+                                    bus.send(AppEvent::EngineFailure(format!(
+                                        "the named engine could not start ({error}); using the in-process engine"
+                                    )));
+                                    {
+                                        let _remote = remote;
+                                        run(connection, events, rx, bus).await;
+                                    }
+                                    if announced {
+                                        quit_bus.send(AppEvent::RuntimeContext(None));
+                                    }
+                                }
+                                Err(error) => {
+                                    drop(remote);
+                                    bus.send(AppEvent::EngineFailure(format!(
+                                        "cannot start the engine: {error}"
+                                    )))
                                 }
                             }
-                            Err(error) => {
-                                drop(remote);
-                                bus.send(AppEvent::EngineFailure(format!(
-                                    "cannot start the engine: {error}"
-                                )))
+                            return;
+                        }
+                        Err(error) if storage_held(&error.to_string()) => {
+                            if !waiting {
+                                waiting = true;
+                                bus.send(AppEvent::Notice(
+                                    "another miao window is using this workspace's storage; this window starts when it closes"
+                                        .into(),
+                                ));
                             }
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                        Err(error) => {
+                            bus.send(AppEvent::EngineFailure(format!(
+                                "cannot start the engine: {error}"
+                            )));
+                            return;
                         }
                     }
-                    Err(error) => bus.send(AppEvent::EngineFailure(format!(
-                        "cannot start the engine: {error}"
-                    ))),
                 }
             });
             Ok(Handle { tx })
         }
     }
+}
+
+/// The store refuses a schema upgrade while another process still has it open:
+/// that is a start that should wait for the other window, not one that failed.
+fn storage_held(message: &str) -> bool {
+    message.contains("cannot upgrade Session storage")
 }
 
 /// The Remote Control sidecar and the loopback endpoint it drives.
@@ -3488,6 +3537,27 @@ mod schedule_tests {
         assert!(matches!(
             projection_failure(&closed, false),
             AppEvent::EngineFailure(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod storage_held_tests {
+    use super::storage_held;
+
+    /// The store's upgrade refusal is the one start failure that is a wait: the
+    /// other miao window holds the store and will let go when it closes.
+    #[test]
+    fn a_store_held_by_another_process_is_a_wait_not_a_failure() {
+        assert!(storage_held(
+            "invalid request: cannot upgrade Session storage while another miao process still has it open; \
+             close these windows first: pid 69237 (still has this storage open)"
+        ));
+        assert!(!storage_held(
+            "cannot start the engine: --model is required; the separate miao-engine could not start either (program not found)"
+        ));
+        assert!(!storage_held(
+            "cannot start the engine: invalid default model route"
         ));
     }
 }
