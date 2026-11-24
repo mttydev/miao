@@ -49,7 +49,7 @@ pub fn routes(
     routes_with(
         sources,
         credential_db,
-        crate::model_catalog::models_snapshot().as_ref(),
+        crate::model_catalog::models_snapshot().as_deref(),
     )
 }
 
@@ -289,7 +289,7 @@ pub fn catalog_key_routes(
     credential_db: Option<&Path>,
 ) -> Vec<Value> {
     catalog_key_routes_with(
-        crate::model_catalog::models_snapshot().as_ref(),
+        crate::model_catalog::models_snapshot().as_deref(),
         declared,
         credential_db,
     )

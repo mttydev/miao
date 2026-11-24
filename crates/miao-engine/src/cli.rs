@@ -476,7 +476,7 @@ async fn finish_manifest(
 /// The provider catalog snapshot the product ships and caches, in the order
 /// the TS catalog service reads them: an explicit path, a snapshot beside the
 /// engine binary, the installer's shipped copy, then the user cache.
-fn models_snapshot() -> Option<serde_json::Value> {
+fn models_snapshot() -> Option<Arc<serde_json::Value>> {
     // One source for the manifest derivation and the picker's provider
     // directory, so they cannot disagree about what exists.
     crate::model_catalog::models_snapshot()
@@ -1405,7 +1405,7 @@ impl Provider for UnmodeledProvider {
                 .filter(|credential| !credential.expired)
                 .map(|credential| credential.integration)
                 .collect();
-        catalog_for(models_snapshot().as_ref(), &keyed)
+        catalog_for(models_snapshot().as_deref(), &keyed)
     }
 }
 
