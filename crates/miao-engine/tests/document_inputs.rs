@@ -40,7 +40,7 @@ fn request() -> ModelRequest {
 }
 
 #[tokio::test]
-async fn physical_adapters_lower_documents_and_normalize_declared_text_only_models() {
+async fn physical_adapters_lower_documents_and_offer_images_to_every_model() {
     let (send, mut seen) = mpsc::channel::<Value>(16);
     let router = Router::new().fallback(move |Json(body): Json<Value>| {
         let send = send.clone();
@@ -77,7 +77,7 @@ async fn physical_adapters_lower_documents_and_normalize_declared_text_only_mode
             vec!["text".to_string(), "image".to_string(), "pdf".to_string()],
             vec!["text".to_string()],
         ] {
-            let images = input.len() > 1;
+            let declares_pdf = input.iter().any(|item| item == "pdf");
             let selected = provider.with_input_modalities(input).unwrap();
             let original = request();
             let (progress, _receive) = mpsc::channel(16);
@@ -90,15 +90,14 @@ async fn physical_adapters_lower_documents_and_normalize_declared_text_only_mode
             let body = seen.recv().await.unwrap();
             let encoded = body.to_string();
             assert!(encoded.contains("attached text"));
-            assert_eq!(encoded.contains(PNG), images);
-            let pdf_sent = images && protocol != "openai-chat";
+            // Declared modalities gate documents, never pictures: only the
+            // endpoint's own refusal decides whether it can read an image.
+            assert!(encoded.contains(PNG));
+            let pdf_sent = declares_pdf && protocol != "openai-chat";
             assert_eq!(
                 encoded.contains(&base64::engine::general_purpose::STANDARD.encode(PDF)),
                 pdf_sent
             );
-            if !images {
-                assert!(encoded.contains("model does not support image input"));
-            }
             if !pdf_sent {
                 assert!(encoded.contains("attachment not sent"));
                 assert!(encoded.contains("manual.pdf"));
@@ -154,7 +153,8 @@ async fn advisory_counts_receive_the_same_normalized_media_shapes_as_generation(
             CountTokens::Counted(42)
         ));
         let body = seen.recv().await.unwrap().to_string();
-        assert!(!body.contains(PNG));
+        // Counting mirrors generation, which no longer drops the picture.
+        assert!(body.contains(PNG));
         assert!(!body.contains(&base64::engine::general_purpose::STANDARD.encode(PDF)));
         assert!(body.contains("attached text"));
     }
@@ -271,8 +271,8 @@ async fn host_route_modalities_apply_to_the_owner_default_and_explicit_route() {
             Err(ProviderError::Http(422, _))
         ));
         let body = seen.recv().await.unwrap().to_string();
-        assert!(!body.contains(PNG));
-        assert!(body.contains("model does not support image input"));
+        assert!(body.contains(PNG));
+        assert!(body.contains("attachment not sent"));
         assert!(body.contains("attached text"));
     }
     server.abort();

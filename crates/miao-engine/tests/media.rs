@@ -370,10 +370,15 @@ async fn capable_models_get_pdf_bytes_materialized_into_the_workspace_and_recove
 }
 
 #[tokio::test]
-async fn capability_mismatch_refuses_media_consistently_and_keeps_bytes_recoverable() {
+async fn a_refused_image_degrades_to_a_note_and_keeps_its_bytes_recoverable() {
     use base64::Engine;
+    // The endpoint refuses the picture the catalog already called text-only.
+    // The first request still carries it; the retry replaces it with a note.
+    let rejection =
+        json!({"error":{"message":"Invalid content type. image_url is only supported by certain models."}})
+            .to_string();
     let (url, mut requests, server) =
-        common::endpoint(vec![(200, anthropic_text("declined"))]).await;
+        common::endpoint(vec![(400, rejection), (200, anthropic_text("declined"))]).await;
     let limited: Arc<dyn Provider> = Anthropic::new(url, "fixture".into(), "fixture-model".into())
         .unwrap()
         .with_input_modalities(vec!["text".into()])
@@ -399,6 +404,8 @@ async fn capability_mismatch_refuses_media_consistently_and_keeps_bytes_recovera
         .unwrap();
     wait_runs(&store, "s", 1).await;
 
+    let offered = requests.recv().await.unwrap().to_string();
+    assert!(offered.contains(PNG), "{offered}");
     let wire = requests.recv().await.unwrap().to_string();
     assert!(
         wire.contains(

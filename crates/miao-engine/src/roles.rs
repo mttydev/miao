@@ -119,7 +119,9 @@ async fn request_summary(
             .stream_without_tools(request, tx, stop.child_token())
             .await
     } else {
-        provider.stream(request, tx, stop.child_token()).await
+        provider
+            .stream_accepting_images(request, tx, stop.child_token())
+            .await
     };
     let summary = result
         .as_ref()
