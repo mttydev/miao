@@ -4844,17 +4844,19 @@ fn store_preview(conn: &Connection, session: &str, preview: Option<&Value>) -> R
 /// row; the migration fills those once, so `None` means the Session has no
 /// readable text.
 fn stored_preview(conn: &Connection, session: &str) -> Result<Option<Value>, Error> {
-    conn.query_row(
-        "SELECT text,truncated FROM engine_preview WHERE session_id=?1",
-        [session],
-        |row| {
-            Ok(json!({
-                "text": row.get::<_, String>(0)?,
-                "truncated": row.get::<_, bool>(1)?,
-            }))
-        },
-    )
-    .optional()
+    let preview = conn
+        .query_row(
+            "SELECT text,truncated FROM engine_preview WHERE session_id=?1",
+            [session],
+            |row| {
+                Ok(json!({
+                    "text": row.get::<_, String>(0)?,
+                    "truncated": row.get::<_, bool>(1)?,
+                }))
+            },
+        )
+        .optional()?;
+    Ok(preview)
 }
 
 /// The catalog line a message just committed earns. A message without visible
