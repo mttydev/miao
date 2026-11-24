@@ -978,10 +978,14 @@ fn file(
         return;
     }
     let Some(files) = files.filter(|files| !files.is_empty()) else {
-        // A call still streaming has no recorded diff, and an engine that
-        // committed no display block leaves one behind. The input is then the
-        // only record of the change, and a row that is a bare filename tells
-        // the operator nothing about what was edited.
+        // A running call has no recorded diff yet. Painting the input now would
+        // show a different shape from the committed patch (no line numbers, no
+        // context, no summary) and then flash into it, so wait for the result.
+        // An unreturned call has no result coming, and an engine that committed
+        // no display block leaves the input as the only record of the change.
+        if tool.output.is_none() && !tool.unreturned {
+            return;
+        }
         let (rows, hidden) = input_diff(name, input, diff_limit);
         paint_diff(out, &rows, hidden, &path, theme, fold);
         return;
@@ -1954,7 +1958,7 @@ mod tests {
         let call = tool(
             "apply_patch",
             json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@ -1,2 +1,2 @@\n kept\n-gone\n+kept better and longer\n*** End Patch"}),
-            None,
+            Some(json!({})),
             false,
         );
         let rows = lines(&call, None, &theme, false, None);
@@ -2018,7 +2022,7 @@ mod tests {
         let call = tool(
             "apply_patch",
             json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@ -1,2 +1,2 @@\n kept\n-gone\n+kept better and longer\n*** End Patch"}),
-            None,
+            Some(json!({})),
             false,
         );
         let rows = lines(&call, None, &theme, false, None);
@@ -2045,7 +2049,7 @@ mod tests {
         let call = tool(
             "apply_patch",
             json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@ -1,1 +1,1 @@\n-gone\n+kept\n*** End Patch"}),
-            None,
+            Some(json!({})),
             false,
         );
         let rows = lines(&call, None, &theme, false, None);
@@ -2565,9 +2569,29 @@ mod tests {
         assert!(!rendered.iter().any(|line| line.contains("Index:")));
     }
 
-    /// A streamed call has no recorded diff yet, and a row that is a bare
-    /// filename says nothing about the edit. The input is the only record of the
-    /// change then, so the row has to paint it.
+    /// A streamed edit paints no provisional diff: the input only has the
+    /// replacement text, while the committed patch also carries line numbers and
+    /// context. Showing both in sequence made the row flash and change.
+    #[test]
+    fn a_streaming_edit_waits_for_the_committed_diff() {
+        let part = tool(
+            "edit_file",
+            json!({
+                "path": "docs/guide.zh.md",
+                "old_string": "旧的一行",
+                "new_string": "新的一行",
+                "expected_sha256": "0"
+            }),
+            None,
+            false,
+        );
+        let rendered = rendered(&lines(&part, None, &theme(), false, None));
+        assert_eq!(rendered, ["· edit  docs/guide.zh.md"]);
+    }
+
+    /// A completed call can still carry no recorded diff, and a row that is a
+    /// bare filename says nothing about the edit. The input is the only record
+    /// of the change then, so the row has to paint it.
     #[test]
     fn an_edit_without_a_recorded_diff_shows_what_it_asked_for() {
         let part = tool(
