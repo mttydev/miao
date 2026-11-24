@@ -16,6 +16,18 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-24
+
+### Added
+- **models**: keep the catalog current and discover account models (#3371) (`584803b68d`)
+
+### Fixed
+- **tui**: always name the composer's state (#3373) (`08843347ee`)
+- **tui**: wait for the committed diff before painting an edit (#3369) (`341e1657b4`)
+- **engine**: keep worktree sessions inside their own root (#3370) (`65ee2bdd1f`)
+- **tui**: keep the landing header with the first turn (#3367) (`b6af17350d`)
+- **models**: add GLM-5.4 to the coding plan catalog (#3368) (`1debcdf68e`)
+
 ## [0.5.1] - 2026-11-23
 
 ### Fixed
