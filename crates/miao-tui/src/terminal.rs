@@ -146,10 +146,22 @@ const LEAVE_ALTERNATE: &[u8] = b"\x1b[?1049l";
 /// cells did, which left a capable terminal holding an update it had been told
 /// to begin and never told to end — the screen stopped repainting while the
 /// status clock kept ticking. One handle, one order.
-pub fn draw_frame<F>(terminal: &mut Tui, render: F) -> io::Result<()>
+///
+/// The caret is hidden before the frame is painted. `ratatui` writes the diff
+/// first and only then shows the cursor at the frame's own cell, and on Windows
+/// a cursor move takes effect through the console immediately — outside the
+/// synchronized-update window. A visible composer caret therefore trailed the
+/// drawing cursor across the screen between keyframes (#3355): the white bar
+/// jumped from the sidebar to the transcript and back too fast to screenshot.
+pub fn draw_frame<W, F>(
+    terminal: &mut Terminal<WidthAwareBackend<CrosstermBackend<W>>>,
+    render: F,
+) -> io::Result<()>
 where
+    W: io::Write,
     F: FnOnce(&mut ratatui::Frame),
 {
+    terminal.backend_mut().write_all(b"\x1b[?25l")?;
     terminal.backend_mut().write_all(b"\x1b[?2026h")?;
     let drawn = terminal.draw(render);
     let result = drawn.map(|_frame| ());
@@ -471,5 +483,39 @@ mod tests {
             !bytes.windows(6).any(|window| window == b"\x1b[1;6H"),
             "ASCII before the dot keeps the inner backend's implicit advance: {bytes:?}"
         );
+    }
+
+    /// The composer's caret stayed visible while the frame's diff was painted,
+    /// so it trailed the drawing cursor across the screen and flashed in the
+    /// sidebar between keyframes (#3355). `ratatui` paints first and places the
+    /// cursor last, and a Windows cursor move applies immediately even inside a
+    /// synchronized update, so the frame must hide the caret before its cells.
+    #[test]
+    fn a_frame_hides_the_caret_before_it_paints_cells() {
+        let shared = SharedBuf::default();
+        let backend = WidthAwareBackend::new(CrosstermBackend::new(shared.clone()));
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 12, 1)),
+            },
+        )
+        .expect("a fixed viewport never queries the terminal");
+        draw_frame(&mut terminal, |frame| {
+            frame.render_widget(ratatui::widgets::Paragraph::new("paint"), frame.area());
+            frame.set_cursor_position(Position::new(2, 0));
+        })
+        .expect("draw one frame");
+        let bytes = shared.data();
+        let find = |needle: &[u8]| {
+            bytes
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .unwrap_or_else(|| panic!("missing {needle:?}: {bytes:?}"))
+        };
+        let hide = find(b"\x1b[?25l");
+        assert!(hide < find(b"\x1b[?2026h"), "{bytes:?}");
+        assert!(hide < find(b"paint"), "{bytes:?}");
+        assert!(hide < find(b"\x1b[?25h"), "{bytes:?}");
     }
 }
