@@ -95,6 +95,7 @@ impl Lang {
             "composer.next" => ("Next", "下一步"),
             "composer.waiting" => ("Waiting", "等待中"),
             "composer.blocked" => ("Blocked", "受阻"),
+            "composer.hint.continue" => ("reply to continue", "回复继续"),
             "composer.run" => ("Run a command…", "运行命令…"),
             "composer.thinking" => ("Thinking", "思考中"),
             "composer.thinking_summary" => ("Thinking · {0}", "思考中 · {0}"),

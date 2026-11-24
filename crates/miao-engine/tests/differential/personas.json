@@ -1,11 +1,11 @@
 [
   {
-    "sha256": "8cec4b3660747eb2f30facb16a41e17d7a17a3e3c0d0debbc1d3d1d3de0f728d"
+    "sha256": "1a26031134bbee8302277276c7d55442f27edb6451b7d271eae9ff59c403cad7"
   },
   {
     "providerID": "fixture",
     "modelID": "custom",
-    "sha256": "8cec4b3660747eb2f30facb16a41e17d7a17a3e3c0d0debbc1d3d1d3de0f728d"
+    "sha256": "1a26031134bbee8302277276c7d55442f27edb6451b7d271eae9ff59c403cad7"
   },
   {
     "modelID": "gpt-4.1",
@@ -86,6 +86,6 @@
   },
   {
     "modelID": "codex",
-    "sha256": "8cec4b3660747eb2f30facb16a41e17d7a17a3e3c0d0debbc1d3d1d3de0f728d"
+    "sha256": "1a26031134bbee8302277276c7d55442f27edb6451b7d271eae9ff59c403cad7"
   }
 ]
