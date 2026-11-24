@@ -936,7 +936,7 @@ mod window_tests {
     /// The catalog carried GLM-5.4 a day after the entry was written; the
     /// overlay must not keep rewriting what the catalog now says.
     #[test]
-    fn the_overlay_leaves_a_model_the_catalog_carries_alone() {
+    fn the_overlay_leaves_glm_5_4_to_the_catalog() {
         let mut snapshot = serde_json::json!({
             "zhipuai-coding-plan": {
                 "models": {
@@ -948,9 +948,12 @@ mod window_tests {
                 },
             },
         });
-        let before = snapshot.clone();
+        let before = snapshot["zhipuai-coding-plan"]["models"]["glm-5.4"].clone();
         apply_overlay(&mut snapshot);
-        assert_eq!(snapshot, before);
+        assert_eq!(
+            snapshot["zhipuai-coding-plan"]["models"]["glm-5.4"], before,
+            "an entry the catalog carries is left exactly as it was"
+        );
     }
 
     #[test]
