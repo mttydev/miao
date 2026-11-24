@@ -3480,8 +3480,16 @@ fn render_composer_body(
             // beside live work is an invitation to start something else.
             // codex and Claude Code paint their idle hints only while idle.
             (ComposerHint::Busy, false) => Line::default(),
-            (_, true)
-            | (ComposerHint::None | ComposerHint::Waiting(_) | ComposerHint::Blocked(_), false) => {
+            // A step held by a wait or a block is the operator's turn: the box
+            // asks for the answer instead of rotating an example for work the
+            // checklist says is not the next step.
+            (ComposerHint::Waiting(_) | ComposerHint::Blocked(_), false) => {
+                Line::from(Span::styled(
+                    format!(" {}", composer.lang.t("composer.reply")),
+                    Style::new().fg(palette.text_muted),
+                ))
+            }
+            (_, true) | (ComposerHint::None, false) => {
                 // An empty composer offers the example the TS prompt cycles
                 // through: one quiet sentence, `Run a command…` on a `!` line.
                 // The pick is the stored per-mount roll, not a clock drift, so
@@ -6964,10 +6972,11 @@ mod tests {
 
     /// Held work no longer paints in the box: a warning-coloured hint read as
     /// typed content, so the hint moved to its own row above the box (the
-    /// shell-level tests pin that placement) and the empty box falls back to
-    /// the rotating example.
+    /// shell-level tests pin that placement). The empty box asks for the
+    /// answer instead of rotating an example for work the list says is not
+    /// next.
     #[test]
-    fn a_held_list_leaves_the_box_to_the_rotating_example() {
+    fn a_held_list_asks_for_the_answer_in_the_box() {
         let theme = home_theme();
         for hint in [
             crate::editor::ComposerHint::Waiting("watch CI 45021791396".into()),
@@ -6995,7 +7004,8 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol().to_string())
                 .collect::<String>();
-            assert!(text.contains("Ask anything"), "{text}");
+            assert!(text.contains("Reply to continue"), "{text}");
+            assert!(!text.contains("Ask anything"), "{text}");
             assert!(!text.contains("(tab)"), "{text}");
             assert!(!text.contains("Waiting:"), "{text}");
             assert!(!text.contains("Blocked:"), "{text}");

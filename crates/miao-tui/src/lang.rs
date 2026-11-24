@@ -92,6 +92,7 @@ impl Lang {
             "changes" => ("changes", "变更"),
             "changes.row" => ("{0} {1}  +{2} −{3}", "{0} 个文件  +{2} −{3}"),
             "composer.ask" => ("Ask anything…", "随便问…"),
+            "composer.reply" => ("Reply to continue…", "回复以继续…"),
             "composer.next" => ("Next", "下一步"),
             "composer.waiting" => ("Waiting", "等待中"),
             "composer.blocked" => ("Blocked", "受阻"),
