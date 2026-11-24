@@ -1243,11 +1243,6 @@ async fn run(
     // transcript never shows that, so it is announced once per distinct
     // degradation rather than on every turn.
     let mut context_degradation: Option<String> = None;
-    crate::transport::wire_note("run", "startup refresh begin");
-    if let Ok(client) = connection.connect().await {
-        refresh_sessions(client, &bus).await;
-        crate::transport::wire_note("run", "startup refresh done");
-    }
     loop {
         let deadline = dirty.map(|start| start + REFRESH_DELAY);
         let quiet = open.is_some().then(|| last_frame + resync_backoff);

@@ -963,10 +963,15 @@ impl App {
     }
 
     /// Act on the launch flags once the engine is attached. `--session` opens
-    /// that Session directly. The catalog is requested on every launch: the
+    /// that Session directly and `--prompt` starts one, so neither needs the
+    /// Session list. The model catalog is requested on every launch: the
     /// landing strip names the next prompt's model with its provider and
-    /// account only once the catalog answers, and a plain launch used to skip
-    /// the request and keep the bare remembered id until a picker opened.
+    /// account only once it answers.
+    ///
+    /// The Session list is a second, heavier read (a cold 718-Session store
+    /// measured ~1.7s). Ask for it after the model catalog, so the landing
+    /// strip and `/model` are not queued behind it; the Sessions dialog asks
+    /// again when it opens.
     pub fn start(&mut self) {
         let Some(engine) = self.engine.clone() else {
             return;
@@ -980,12 +985,11 @@ impl App {
             }
             return;
         }
-        if self.startup.continue_last {
-            return;
-        }
         if self.startup.prompt.is_some() {
             engine.new_session();
+            return;
         }
+        engine.refresh_sessions();
     }
 
     /// The editor the drive loop should run after suspending the terminal.
@@ -7807,6 +7811,10 @@ mod tests {
         app.attach_engine(handle);
         app.start();
         assert!(matches!(requests.try_recv(), Ok(engine::Request::Catalog)));
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(engine::Request::RefreshSessions)
+        ));
         assert!(requests.try_recv().is_err(), "nothing else is requested");
     }
 
@@ -7820,6 +7828,10 @@ mod tests {
         app.attach_engine(handle);
         app.start();
         assert!(matches!(requests.try_recv(), Ok(engine::Request::Catalog)));
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(engine::Request::RefreshSessions)
+        ));
         // The engine answers the catalog most recently updated first, so the
         // newest unarchived row is the one right after the archived ones.
         app.handle(AppEvent::Catalog(vec![
@@ -7843,6 +7855,10 @@ mod tests {
         app.attach_engine(handle);
         app.start();
         assert!(matches!(requests.try_recv(), Ok(engine::Request::Catalog)));
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(engine::Request::RefreshSessions)
+        ));
         // The catalog sorts a pin first, so the pinned row leads even though the
         // other Session was touched later. Continuing is about recency: a pin is
         // a list preference, not an instruction to resume that Session.
@@ -7868,8 +7884,12 @@ mod tests {
         let (handle, mut requests) = engine::Handle::recording();
         app.attach_engine(handle);
         app.start();
+        assert!(matches!(requests.try_recv(), Ok(engine::Request::Catalog)));
+        assert!(matches!(
+            requests.try_recv(),
+            Ok(engine::Request::RefreshSessions)
+        ));
         app.handle(AppEvent::Catalog(Vec::new()));
-        assert!(requests.try_recv().is_ok(), "the catalog request");
         assert!(requests.try_recv().is_err(), "nothing is opened");
         assert_eq!(
             app.home.notice().map(str::to_string),
