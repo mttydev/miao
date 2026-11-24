@@ -788,6 +788,58 @@ async fn a_repeated_finish_reason_does_not_fail_the_turn() {
     server.await.unwrap();
 }
 
+/// Zhipu's coding-plan gateway ends a reply with `repeat` when its own
+/// repetition guard stops the text. It is a terminal stop, not a malformed
+/// stream: the answer already streamed commits normally.
+#[tokio::test]
+async fn a_repeat_finish_without_tools_completes_the_reply() {
+    let body = frames(
+        vec![chunk(json!({"content":"answer"}), json!("repeat"))],
+        true,
+    );
+    let (url, _requests, server) = common::endpoint(vec![(200, body)]).await;
+    let provider = OpenAIChat::new(url, "fixture".into(), "model".into()).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    let reply = provider
+        .stream(request(), progress, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(reply.content[0]["text"], "answer");
+    server.await.unwrap();
+}
+
+/// A `repeat` stop can carry an unfinished tool call. It must not execute:
+/// the partial text stays durable and the runtime gets the repetition signal.
+#[tokio::test]
+async fn a_repeat_finish_with_unfinished_tools_stops_without_dispatching() {
+    let body = frames(
+        vec![chunk(
+            json!({
+                "content":"partial",
+                "tool_calls":[{"index":0,"id":"call","function":{"name":"read_file","arguments":"{\"path\":"}}]
+            }),
+            json!("repeat"),
+        )],
+        true,
+    );
+    let (url, _requests, server) = common::endpoint(vec![(200, body)]).await;
+    let provider = OpenAIChat::new(url, "fixture".into(), "model".into()).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    let error = provider
+        .stream(request(), progress, CancellationToken::new())
+        .await
+        .unwrap_err();
+    match error {
+        ProviderError::Repetitive { channel, partial } => {
+            assert_eq!(channel, "text");
+            assert!(!partial.needs_tools, "an unfinished call never dispatches");
+            assert_eq!(partial.content[0]["text"], "partial");
+        }
+        other => panic!("expected a repetition stop: {other:?}"),
+    }
+    server.await.unwrap();
+}
+
 /// An invalid frame names its own shape: the durable failure record keeps the
 /// message but not the response bytes, so the excerpt is the only evidence a
 /// later investigation gets.
