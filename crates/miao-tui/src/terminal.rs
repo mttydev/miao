@@ -134,6 +134,14 @@ impl<W: io::Write> io::Write for WidthAwareBackend<CrosstermBackend<W>> {
 const ENTER_ALTERNATE: &[u8] = b"\x1b[?1049h";
 const LEAVE_ALTERNATE: &[u8] = b"\x1b[?1049l";
 
+/// Ends a synchronized update a frame may have left open.
+const CLOSE_UPDATE: &[u8] = b"\x1b[?2026l";
+
+/// Terminal state a frame can change that the shell must not inherit: colors,
+/// autowrap, the scroll region, and cursor visibility. Written on the screen
+/// the leave returns to, before the exit epilogue.
+const RESTORED: &[u8] = b"\x1b[0m\x1b[?7h\x1b[r\x1b[?25h";
+
 /// Present one frame atomically. Streaming turns repaint the transcript many
 /// times a second, and terminals that apply partial updates mid-frame show
 /// that as full-screen flicker; wrapping the frame in synchronized-update
@@ -198,10 +206,20 @@ impl RestoreGuard {
             return false;
         }
         self.handed_back = true;
+        // Close a synchronized update first: a frame that stopped between its
+        // begin and end markers would otherwise be presented after the shell's
+        // screen is already back, over its content.
+        let _ = writer.write_all(CLOSE_UPDATE);
         // Leave the screen on its own and flush it first: `execute!` stops at
         // the first failing command, so a Windows mode restore queued after the
         // leave could abort before the leave reached the terminal.
         let _ = leave_alternate(writer);
+        // The shell's screen must not inherit the frame's state: colors, a
+        // scroll region, autowrap, or a hidden cursor left behind confines or
+        // swallows everything the shell prints next, which the operator saw as
+        // a black pane with only the prompt on it.
+        let _ = writer.write_all(RESTORED);
+        let _ = writer.flush();
         let _ = execute!(
             writer,
             DisableBracketedPaste,
@@ -379,6 +397,38 @@ mod tests {
                 .count(),
             1,
             "{first:?}"
+        );
+    }
+
+    /// A frame can leave a synchronized update open (a panic or a failed draw
+    /// between the markers) and a region or colors behind. The shell must not
+    /// inherit any of it: close the update before the leave, then reset the
+    /// state on the screen the leave returns to, before the epilogue.
+    #[test]
+    fn handing_the_screen_back_closes_the_frame_and_resets_its_state() {
+        let mut guard = RestoreGuard::new();
+        let mut bytes = Vec::new();
+        assert!(guard.hand_back_to(&mut bytes));
+        let find = |needle: &[u8]| {
+            bytes
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .unwrap_or_else(|| panic!("missing {needle:?}: {bytes:?}"))
+        };
+        let close = find(CLOSE_UPDATE);
+        let leave = find(LEAVE_ALTERNATE);
+        let restored = find(RESTORED);
+        assert!(
+            close < leave,
+            "the update closes before the leave: {bytes:?}"
+        );
+        assert!(
+            leave < restored,
+            "the reset lands on the shell's screen: {bytes:?}"
+        );
+        assert!(
+            bytes.windows(6).any(|window| window == b"\x1b[?25h"),
+            "the caret comes back with the shell's screen: {bytes:?}"
         );
     }
 
