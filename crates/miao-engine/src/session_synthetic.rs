@@ -66,6 +66,7 @@ impl Store {
             // projects the synthetic event, never an operator prompt.
             let content=json!([{"type":"text","text":wrap(&source,&text)?}]);
             tx.execute("INSERT INTO engine_message(session_id,seq,role,content,recorded_at_ms,kind) VALUES(?1,?2,'user',?3,?4,?5)",params![session,event.seq,serde_json::to_string(&content)?,event.recorded_at_ms,event.kind])?;
+            crate::store::refresh_preview(&tx,&session,&content)?;
             tx.commit()?;
             Ok(json!({"seq":event.seq,"duplicate":false}))
         }).await
