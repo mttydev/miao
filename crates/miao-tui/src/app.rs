@@ -549,6 +549,29 @@ pub struct Startup {
     pub auto: bool,
 }
 
+/// A prompt the operator sent that is on screen before the engine has said
+/// anything about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Echo {
+    session_id: String,
+    input_id: String,
+    text: String,
+    /// The engine promoted the input: the projection that carries its message
+    /// is the one that drops the echo.
+    settled: bool,
+}
+
+/// The engine's own inbox preview of a prompt, 200 characters and an
+/// ellipsis, so the row does not change when the engine's list takes it over.
+fn echo_preview(text: &str) -> String {
+    let mut chars = text.chars();
+    let head = chars.by_ref().take(200).collect::<String>();
+    if chars.next().is_some() {
+        return format!("{head}…");
+    }
+    head
+}
+
 pub struct App {
     pub shell: Shell,
     pub home: Home,
@@ -767,6 +790,10 @@ pub struct App {
     /// attached pictures: the async clipboard read is still catching up, and
     /// the held prompt resends once it lands.
     held_prompt: Option<(String, Vec<Value>)>,
+    /// Prompts on screen that no projection has acknowledged yet, oldest
+    /// first. The engine's list only knows an input once it is admitted, and
+    /// a cold store can hold that back for seconds.
+    echoes: Vec<Echo>,
     /// The launch policy in force, flipped at runtime from the strip.
     approval_auto: bool,
     startup: Startup,
@@ -943,6 +970,7 @@ impl App {
             clipboard_busy: false,
             clipboard_paste: false,
             held_prompt: None,
+            echoes: Vec::new(),
             // The launch policy in force, flipped at runtime from the strip.
             approval_auto: startup.auto,
             startup,
@@ -1726,7 +1754,11 @@ impl App {
                 self.shell.set_session(self.session.as_ref());
                 self.shell.set_usage(self.usage.as_ref());
                 self.shell.set_transcript(&transcript);
-                self.shell.set_pending_prompts(&self.state.pending_prompts);
+                if let Some(session_id) = self.session.as_ref().map(|session| session.id.clone()) {
+                    let pending = self.state.pending_input_ids.clone();
+                    self.settle_echoes(&session_id, &pending);
+                }
+                self.show_queued_prompts();
                 // Opening a Session shows its newest turn: `follow` survives
                 // from whatever was scrolled before. A refresh keeps it, so a
                 // transcript scrolled into history stays there instead of
@@ -1827,8 +1859,26 @@ impl App {
             } => {
                 self.shell.composer.restore_with(&text, attachments);
                 self.shell.composer.notice = Some(message);
+                self.forget_echo(&text);
+            }
+            AppEvent::InputSettled {
+                session_id,
+                input_id,
+                cancelled,
+            } => {
+                self.echoes.retain_mut(|echo| {
+                    if echo.session_id != session_id || echo.input_id != input_id {
+                        return true;
+                    }
+                    echo.settled = true;
+                    !cancelled
+                });
+                if cancelled {
+                    self.show_queued_prompts();
+                }
             }
             AppEvent::InputRetrieved { prompt, delivery } => {
+                self.forget_echo(&prompt);
                 // The retrieved prompt is what the operator asked to edit, so a
                 // draft already in the composer is stashed rather than dropped.
                 if !self.shell.composer.editor.text().trim().is_empty() {
@@ -6250,11 +6300,51 @@ impl App {
             self.shell.composer.restore_with(&text, attachments);
             return;
         }
-        engine.prompt(&session_id, &text, attachments);
+        let input_id = engine.prompt(&session_id, &text, attachments);
+        self.echoes.push(Echo {
+            session_id: session_id.clone(),
+            input_id,
+            text: text.clone(),
+            settled: false,
+        });
+        self.show_queued_prompts();
         // The prompt left the composer, so its draft is gone too: keeping it
         // would restore text the Session already sent if the operator switched
         // away and back.
         self.drafts.remove(&session_id);
+    }
+
+    /// The queue band above the input: what the engine holds, then what was
+    /// just sent and no projection has acknowledged yet.
+    fn show_queued_prompts(&mut self) {
+        let mut prompts = self.state.pending_prompts.clone();
+        if let Some(session) = self.session.as_ref() {
+            prompts.extend(
+                self.echoes
+                    .iter()
+                    .filter(|echo| echo.session_id == session.id)
+                    .map(|echo| echo_preview(&echo.text)),
+            );
+        }
+        self.shell.set_pending_prompts(&prompts);
+    }
+
+    /// Drop the echoes this projection has answered: an input it lists as
+    /// pending is the engine's to show from now on, and one the engine already
+    /// promoted is the message this same projection carries.
+    fn settle_echoes(&mut self, session_id: &str, pending: &[String]) {
+        self.echoes.retain(|echo| {
+            echo.session_id != session_id || (!echo.settled && !pending.contains(&echo.input_id))
+        });
+    }
+
+    /// A prompt the engine handed back is in the composer again, so its echo
+    /// would show the same text twice.
+    fn forget_echo(&mut self, text: &str) {
+        if let Some(at) = self.echoes.iter().rposition(|echo| echo.text == text) {
+            self.echoes.remove(at);
+            self.show_queued_prompts();
+        }
     }
 
     /// The product creates a Session with a placeholder title and leaves the real
@@ -6458,6 +6548,7 @@ impl App {
         if let Some(engine) = self.engine.as_ref() {
             engine.refresh_sessions();
         }
+        self.show_queued_prompts();
     }
 }
 
@@ -8004,6 +8095,124 @@ mod tests {
         );
     }
 
+    /// An open Session with a recording engine attached.
+    fn recording_session(id: &str) -> (App, tokio::sync::mpsc::UnboundedReceiver<engine::Request>) {
+        let mut app = app_with(Startup::default());
+        let (handle, requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.handle(projection(id, SessionState::default()));
+        (app, requests)
+    }
+
+    /// A later projection of the same Session.
+    fn projection(id: &str, state: SessionState) -> AppEvent {
+        AppEvent::SessionOpened {
+            summary: Some(summary(id, 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(state),
+        }
+    }
+
+    /// Put `text` in the composer and press Enter; the prompt is returned with
+    /// the id it was sent under.
+    fn send(
+        app: &mut App,
+        text: &str,
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<engine::Request>,
+    ) -> String {
+        app.shell.composer.restore(text);
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let prompt = control_requests(requests)
+            .into_iter()
+            .find_map(|request| match request {
+                engine::Request::Prompt { input_id, .. } => Some(input_id),
+                _ => None,
+            });
+        prompt.expect("the prompt must be sent")
+    }
+
+    #[test]
+    fn a_sent_prompt_is_queued_on_screen_before_the_engine_admits_it() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        let input_id = send(&mut app, "fix the flaky test", &mut requests);
+        assert_eq!(app.shell.queued_prompts(), ["fix the flaky test"]);
+        // A projection that knows nothing about the input yet keeps the echo:
+        // the rename of a first prompt lands before its admission.
+        app.handle(projection("ses_a", SessionState::default()));
+        assert_eq!(app.shell.queued_prompts(), ["fix the flaky test"]);
+        // Once the engine lists the input, its row is the engine's to show.
+        let mut state = SessionState::default();
+        state.pending_prompts = vec!["fix the flaky test".into()];
+        state.pending_input_ids = vec![input_id];
+        app.handle(projection("ses_a", state));
+        assert_eq!(app.shell.queued_prompts(), ["fix the flaky test"]);
+        assert!(app.echoes.is_empty(), "the engine's row replaced the echo");
+    }
+
+    #[test]
+    fn a_promoted_prompt_leaves_the_queue_with_the_projection_of_its_message() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        let input_id = send(&mut app, "ship it", &mut requests);
+        app.handle(AppEvent::InputSettled {
+            session_id: "ses_a".into(),
+            input_id,
+            cancelled: false,
+        });
+        // The message is not on screen until the projection lands, so the
+        // echo outlives the event that promoted it.
+        assert_eq!(app.shell.queued_prompts(), ["ship it"]);
+        app.handle(projection("ses_a", SessionState::default()));
+        assert!(app.shell.queued_prompts().is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_prompt_leaves_the_queue_at_once() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        let input_id = send(&mut app, "never mind", &mut requests);
+        app.handle(AppEvent::InputSettled {
+            session_id: "ses_a".into(),
+            input_id,
+            cancelled: true,
+        });
+        assert!(app.shell.queued_prompts().is_empty());
+    }
+
+    #[test]
+    fn a_refused_prompt_leaves_the_queue_with_its_draft_restored() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        send(&mut app, "ship it", &mut requests);
+        app.handle(AppEvent::PromptFailed {
+            text: "ship it".into(),
+            attachments: Vec::new(),
+            message: "send failed: engine closed".into(),
+        });
+        assert!(app.shell.queued_prompts().is_empty());
+        assert_eq!(app.shell.composer.editor.text(), "ship it");
+    }
+
+    #[test]
+    fn an_echo_is_capped_like_the_engine_inbox_preview() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        send(&mut app, &"x".repeat(240), &mut requests);
+        assert_eq!(
+            app.shell.queued_prompts(),
+            [format!("{}…", "x".repeat(200))]
+        );
+        let (mut app, mut requests) = recording_session("ses_b");
+        send(&mut app, &"y".repeat(200), &mut requests);
+        assert_eq!(app.shell.queued_prompts(), ["y".repeat(200)]);
+    }
+
+    #[test]
+    fn an_echo_of_another_session_is_not_in_this_queue() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        send(&mut app, "for the first Session", &mut requests);
+        app.handle(projection("ses_b", SessionState::default()));
+        assert!(app.shell.queued_prompts().is_empty());
+        app.handle(projection("ses_a", SessionState::default()));
+        assert_eq!(app.shell.queued_prompts(), ["for the first Session"]);
+    }
+
     #[test]
     fn terminal_titles_follow_the_admitted_session_and_honor_disabled_preferences() {
         let mut app = app();
@@ -8748,6 +8957,7 @@ mod tests {
             active_run: None,
             pending: 0,
             pending_prompts: Vec::new(),
+            pending_input_ids: Vec::new(),
             approvals: vec![crate::session::ApprovalView {
                 request_id: "run-1/call_1".into(),
                 tool: "bash".into(),

@@ -388,6 +388,10 @@ pub struct SessionState {
     /// longer prompt keeps its ellipsis. Without this the submitted text is
     /// invisible for as long as a busy turn holds it in the queue.
     pub pending_prompts: Vec<String>,
+    /// The id under which each `pending_prompts` entry was admitted. The
+    /// composer echoes a prompt before the engine has it, and matches its echo
+    /// against these ids so one prompt is never on screen twice.
+    pub pending_input_ids: Vec<String>,
     pub approvals: Vec<ApprovalView>,
     pub questions: Vec<QuestionView>,
     /// Messages a redo would restore. The engine keeps reverted rows in its
@@ -454,6 +458,20 @@ impl SessionState {
                                     ""
                                 };
                             Some(format!("{preview}{suffix}"))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            pending_input_ids: snapshot
+                .get("pending")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("input_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
                         })
                         .collect()
                 })
@@ -1835,6 +1853,7 @@ mod tests {
         assert_eq!(state.active_run.as_deref(), Some("run-1"));
         assert_eq!(state.pending, 2);
         assert_eq!(state.pending_prompts[0], "继续");
+        assert_eq!(state.pending_input_ids, ["in_1", "in_2"]);
         assert!(
             state.pending_prompts[1].ends_with('…'),
             "a truncated preview keeps its ellipsis: {:?}",

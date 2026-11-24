@@ -374,6 +374,11 @@ impl Shell {
         self.transcript.pending_prompts = prompts.to_vec();
     }
 
+    /// What the queue band above the input shows, the engine's queue first.
+    pub fn queued_prompts(&self) -> &[String] {
+        &self.transcript.pending_prompts
+    }
+
     /// Whether a newer draft is waiting for its paint slot. The drive loop uses
     /// this to schedule the wake that `set_draft`'s throttle would otherwise
     /// leave unscheduled.
