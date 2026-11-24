@@ -25,7 +25,7 @@ pub(crate) const APPLICATION_ID: u32 = 0x4d494145;
 // a destination before its host has switched the authoritative placement.
 // 26 adds `engine_staged_revert.scope` (additive: an older engine keeps writing
 // the combined phases the default already names).
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 
 /// How long a second engine waits for whoever holds the migration lock before
 /// giving up. The host times an engine request out at 60 s, so a wait that long
@@ -403,6 +403,7 @@ impl Store {
                 record_owner(&canonical);
                 conn.execute_batch(&format!("PRAGMA application_id={APPLICATION_ID};
                     CREATE TABLE IF NOT EXISTS engine_session(id TEXT PRIMARY KEY, next_seq INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'build');
+                    CREATE TABLE IF NOT EXISTS engine_preview(session_id TEXT PRIMARY KEY REFERENCES engine_session(id), text TEXT NOT NULL, truncated INTEGER NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_event(session_id TEXT NOT NULL REFERENCES engine_session(id), seq INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(session_id,seq));
                     CREATE TABLE IF NOT EXISTS engine_retention(session_id TEXT NOT NULL REFERENCES engine_session(id), through_seq INTEGER NOT NULL, removed INTEGER NOT NULL, created_ms INTEGER NOT NULL, PRIMARY KEY(session_id, through_seq));
                     CREATE INDEX IF NOT EXISTS engine_event_kind ON engine_event(kind);
@@ -634,6 +635,25 @@ impl Store {
                     )?;
                 }
                 crate::permission_source::initialize(&conn)?;
+                // The catalog's one line per Session used to scan the newest
+                // messages of every Session — tens of megabytes on a cold
+                // store. A preview row written when its text commits keeps the
+                // list to the rows it shows; a store from before this column
+                // gets its rows filled once, here.
+                let has_preview: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_preview')",
+                    [], |row| row.get(0))?;
+                if !has_preview {
+                    conn.execute("CREATE TABLE engine_preview(session_id TEXT PRIMARY KEY REFERENCES engine_session(id), text TEXT NOT NULL, truncated INTEGER NOT NULL)", [])?;
+                    let sessions: Vec<String> = {
+                        let mut stmt = conn.prepare("SELECT id FROM engine_session")?;
+                        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                        rows.collect::<Result<Vec<_>, _>>()?
+                    };
+                    for session in sessions {
+                        recompute_preview(&conn, &session)?;
+                    }
+                }
                 conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 conn.execute_batch("COMMIT")?;
                 // The schema is current; serving is shared from here on.
@@ -1629,7 +1649,7 @@ impl Store {
                 "updated_at_ms": updated_at_ms,
                 "archived_at_ms": archived_at_ms,
                 "pinned_at_ms": pinned_at_ms,
-                "preview": metadata_preview(&tx, &session)?,
+                "preview": stored_preview(&tx, &session)?,
                 "model_selection": crate::session_model::selected(&tx, &session)?,
                 "account_selection": crate::session_account::selected_at(&tx, &session, i64::MAX as u64)?,
                 "active_run": active_run,
@@ -1769,6 +1789,7 @@ impl Store {
                 "DELETE FROM engine_lease WHERE session_id=?1",
                 "DELETE FROM engine_lineage WHERE parent_session_id=?1",
                 "DELETE FROM engine_lineage WHERE session_id=?1",
+                "DELETE FROM engine_preview WHERE session_id=?1",
                 "DELETE FROM engine_session WHERE id=?1",
             ] {
                 tx.execute(statement, [&session])?;
@@ -2305,7 +2326,7 @@ impl Store {
                 "SELECT title,tag,created_at_ms,updated_at_ms,archived_at_ms,pinned_at_ms FROM engine_session WHERE id=?1",
                 [&session],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
             )?;
-            let preview=if metadata_only { metadata_preview(&tx,&session)? } else { None };
+            let preview=if metadata_only { stored_preview(&tx,&session)? } else { None };
             let staged_revert:Option<(i64,String,String)>=tx.query_row("SELECT boundary_seq,snapshot_id,scope FROM engine_staged_revert WHERE session_id=?1",[&session],|r|Ok((r.get(0)?,crate::snapshot::id_text(r.get(1)?)?,r.get(2)?))).optional()?;
             let staged_revert=staged_revert.map(|(boundary_seq,snapshot_id,scope)|json!({"boundary_seq":boundary_seq,"snapshot_id":snapshot_id,"scope":scope}));
             let event_base:u64=tx.query_row("SELECT CASE WHEN json_extract(bundle,'$.source.engine')='rust' THEN COALESCE(json_extract(bundle,'$.source.sequence'),0) ELSE 0 END FROM engine_transfer_import WHERE session_id=?1",[&session],|row|row.get(0)).optional()?.unwrap_or(0);
@@ -2572,6 +2593,7 @@ impl Store {
             let reverted = tx.execute("UPDATE engine_message SET reverted=1 WHERE session_id=?1 AND seq>=?2 AND reverted=0",params![session,seq])?;
             tx.execute("DELETE FROM engine_compaction WHERE session_id=?1 AND through_seq>=?2",params![session,seq])?;
             append(&tx,&session,"session.reverted",json!({"checkpoint":checkpoint,"from_seq":seq,"reverted":reverted}))?;
+            recompute_preview(&tx,&session)?;
             tx.commit()?;
             Ok(json!({"checkpoint":checkpoint,"from_seq":seq,"reverted":reverted}))
         }).await
@@ -2593,6 +2615,7 @@ impl Store {
                 "session.unreverted",
                 json!({"restored":restored}),
             )?;
+            recompute_preview(&tx, &session)?;
             tx.commit()?;
             Ok(json!({"restored":restored}))
         })
@@ -2991,6 +3014,7 @@ impl Store {
                 "INSERT INTO engine_message(session_id,seq,role,content,recorded_at_ms,kind) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![session, e.seq, role, serde_json::to_string(&content)?, e.recorded_at_ms, e.kind],
             )?;
+            refresh_preview(&tx, &session, &content)?;
             tx.commit()?;
             Ok(e)
         })
@@ -4018,7 +4042,9 @@ fn promote_tx(tx: &Transaction<'_>, session: &str, idle: bool) -> Result<Vec<Eve
         if !is_command {
             parts.extend(agents.mentions.iter().map(|reference|json!({"type":"agent_reference","name":reference.name,"metadata":{"source":reference.source}})));
         }
-        tx.execute("INSERT INTO engine_message(session_id,seq,role,content,checkpoint,recorded_at_ms,kind) VALUES(?1,?2,'user',?3,?4,?5,?6)", params![session,e.seq,serde_json::to_string(&Value::Array(parts))?,checkpoint,e.recorded_at_ms,e.kind])?;
+        let content = Value::Array(parts);
+        tx.execute("INSERT INTO engine_message(session_id,seq,role,content,checkpoint,recorded_at_ms,kind) VALUES(?1,?2,'user',?3,?4,?5,?6)", params![session,e.seq,serde_json::to_string(&content)?,checkpoint,e.recorded_at_ms,e.kind])?;
+        refresh_preview(&tx, &session, &content)?;
         events.push(e);
         // Preparation is a settled operator boundary. Do not promote
         // a later steer past this command before its effects settle.
@@ -4613,6 +4639,7 @@ fn project_message_at(
             event.kind
         ],
     )?;
+    refresh_preview(tx, session, &content)?;
     Ok(event)
 }
 
@@ -4734,8 +4761,8 @@ pub(crate) fn projected(
 /// messages' text parts win; a trailing tool-only turn is skipped so the
 /// preview keeps saying what the conversation last said. The bound matches
 /// the inbox preview: 200 characters plus a truncation flag.
-fn metadata_preview(tx: &Transaction<'_>, session: &str) -> Result<Option<Value>, Error> {
-    let mut stmt = tx.prepare(
+fn metadata_preview(conn: &Connection, session: &str) -> Result<Option<Value>, Error> {
+    let mut stmt = conn.prepare(
         "SELECT m.content FROM engine_message m WHERE m.session_id=?1 AND m.reverted=0 \
          AND NOT EXISTS(SELECT 1 FROM engine_transfer_message t JOIN engine_transfer_import i ON i.id=t.import_id WHERE i.session_id=m.session_id AND t.seq=m.seq) \
          ORDER BY m.seq DESC LIMIT 20",
@@ -4746,38 +4773,110 @@ fn metadata_preview(tx: &Transaction<'_>, session: &str) -> Result<Option<Value>
         let Ok(content) = serde_json::from_str::<Value>(&content) else {
             continue;
         };
-        let parts = content.as_array().map(Vec::as_slice).unwrap_or(&[]);
-        let mut text = String::new();
-        for part in parts
-            .iter()
-            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-        {
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(part);
+        if let Some(preview) = preview_of(&content) {
+            return Ok(Some(preview));
         }
-        let mut collapsed = String::new();
-        for word in text.split_whitespace() {
-            if !collapsed.is_empty() {
-                collapsed.push(' ');
-            }
-            collapsed.push_str(word);
-        }
-        if collapsed.is_empty() {
-            continue;
-        }
-        const LIMIT: usize = 200;
-        let truncated = collapsed.chars().count() > LIMIT;
-        let preview = if truncated {
-            collapsed.chars().take(LIMIT).collect()
-        } else {
-            collapsed
-        };
-        return Ok(Some(json!({"text":preview,"truncated":truncated})));
     }
     Ok(None)
+}
+
+/// The catalog line one message's own parts earn, or `None` when it carries
+/// no visible text. Whitespace collapses so the list row stays one line, and
+/// the bound matches the inbox preview: 200 characters plus a flag.
+fn preview_of(content: &Value) -> Option<Value> {
+    let parts = content.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let mut text = String::new();
+    for part in parts
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+    {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(part);
+    }
+    let mut collapsed = String::new();
+    for word in text.split_whitespace() {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
+    if collapsed.is_empty() {
+        return None;
+    }
+    const LIMIT: usize = 200;
+    let truncated = collapsed.chars().count() > LIMIT;
+    let text: String = if truncated {
+        collapsed.chars().take(LIMIT).collect()
+    } else {
+        collapsed
+    };
+    Some(json!({"text":text,"truncated":truncated}))
+}
+
+/// Keep one Session's catalog line. The row is what every later catalog read
+/// shows, so a store whose cache is cold never scans message content again.
+fn store_preview(conn: &Connection, session: &str, preview: Option<&Value>) -> Result<(), Error> {
+    let Some(preview) = preview else {
+        conn.execute("DELETE FROM engine_preview WHERE session_id=?1", [session])?;
+        return Ok(());
+    };
+    let text = preview
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let truncated = preview
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    conn.execute(
+        "INSERT INTO engine_preview(session_id,text,truncated) VALUES(?1,?2,?3) \
+         ON CONFLICT(session_id) DO UPDATE SET text=excluded.text,truncated=excluded.truncated",
+        params![session, text, truncated],
+    )?;
+    Ok(())
+}
+
+/// The line the write path kept for one Session, which is what a list or a
+/// snapshot shows. A store written before the preview table existed has no
+/// row; the migration fills those once, so `None` means the Session has no
+/// readable text.
+fn stored_preview(conn: &Connection, session: &str) -> Result<Option<Value>, Error> {
+    conn.query_row(
+        "SELECT text,truncated FROM engine_preview WHERE session_id=?1",
+        [session],
+        |row| {
+            Ok(json!({
+                "text": row.get::<_, String>(0)?,
+                "truncated": row.get::<_, bool>(1)?,
+            }))
+        },
+    )
+    .optional()
+}
+
+/// The catalog line a message just committed earns. A message without visible
+/// text leaves the preview where it was, so a trailing tool-only turn keeps
+/// saying what the conversation last said.
+pub(crate) fn refresh_preview(
+    conn: &Connection,
+    session: &str,
+    content: &Value,
+) -> Result<(), Error> {
+    match preview_of(content) {
+        Some(preview) => store_preview(conn, session, Some(&preview)),
+        None => Ok(()),
+    }
+}
+
+/// Rewrite a Session's preview from its own history, for the paths that change
+/// which messages are visible: a revert, a cleared history, or the first read
+/// of a store written before the preview table existed.
+pub(crate) fn recompute_preview(conn: &Connection, session: &str) -> Result<(), Error> {
+    let preview = metadata_preview(conn, session)?;
+    store_preview(conn, session, preview.as_ref())
 }
 
 /// Every assistant identity in one pass, keyed by the message it belongs to.

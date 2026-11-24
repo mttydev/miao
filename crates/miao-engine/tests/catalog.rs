@@ -362,3 +362,145 @@ async fn a_catalog_row_carries_the_live_state_the_agent_view_reads() {
     assert_eq!(row["todos_open"], 1, "only the open todo counts");
     assert_eq!(row["goal_armed"], true, "the armed goal rides the row");
 }
+
+async fn stored_preview(store: &Store, session: &str) -> serde_json::Value {
+    store
+        .session_catalog()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row["session_id"] == session)
+        .expect("the Session is listed")["preview"]
+        .clone()
+}
+
+/// The list line is kept when its text commits: the catalog reads the row
+/// instead of scanning message content, so a cold store never pays for the
+/// history it does not show.
+#[tokio::test]
+async fn a_catalog_preview_follows_the_newest_visible_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("engine.db")).await.unwrap();
+    store.initialize("s", "Preview", "/work").await.unwrap();
+    store
+        .message("s", "user", json!([{"type":"text","text":"first prompt"}]))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!({"text":"first prompt","truncated":false})
+    );
+    // A tool-only turn is not what the conversation last said.
+    store
+        .message(
+            "s",
+            "assistant",
+            json!([{"type":"tool_use","id":"c1","name":"bash","input":{}}]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!({"text":"first prompt","truncated":false})
+    );
+    // Whitespace collapses so the row stays one line.
+    store
+        .message(
+            "s",
+            "assistant",
+            json!([{"type":"text","text":"  a\n b   c "}]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!({"text":"a b c","truncated":false})
+    );
+    // The line caps at the inbox preview's 200 characters.
+    store
+        .message("s", "user", json!([{"type":"text","text":"x".repeat(240)}]))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!({"text":"x".repeat(200),"truncated":true})
+    );
+    store.close().await.unwrap();
+}
+
+/// A revert hides messages without deleting them, so the kept line has to be
+/// rewritten from what is still visible; a restore puts it back.
+#[tokio::test]
+async fn a_revert_rewrites_the_preview_and_unrevert_restores_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("engine.db")).await.unwrap();
+    store.initialize("s", "Revert", "/work").await.unwrap();
+    store
+        .admit_at(
+            Input {
+                agent_references: Default::default(),
+                command: None,
+                session_id: "s".into(),
+                input_id: "one".into(),
+                prompt: "first".into(),
+                delivery: Delivery::Queue,
+            },
+            Some("workspace".into()),
+        )
+        .await
+        .unwrap();
+    let promoted = store.promote("s", true).await.unwrap();
+    let checkpoint = promoted[0].data["checkpoint"]
+        .as_str()
+        .expect("checkpoint on the promoted event")
+        .to_string();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!({"text":"first","truncated":false})
+    );
+    store.revert("s", &checkpoint).await.unwrap();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!(null),
+        "a reverted turn leaves nothing readable"
+    );
+    store.unrevert("s").await.unwrap();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!({"text":"first","truncated":false})
+    );
+    store.close().await.unwrap();
+}
+
+/// A store written before the preview table still lists its lines: the upgrade
+/// fills them once instead of leaving the catalog to scan content forever.
+#[tokio::test]
+async fn an_upgrade_fills_previews_for_a_store_written_before_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("engine.db");
+    let store = Store::open(&path).await.unwrap();
+    store.initialize("s", "Old", "/work").await.unwrap();
+    store
+        .message(
+            "s",
+            "user",
+            json!([{"type":"text","text":"written before the table"}]),
+        )
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute("DROP TABLE engine_preview", [])
+        .expect("drop the preview table");
+    connection
+        .pragma_update(None, "user_version", miao_engine::store::SCHEMA_VERSION - 1)
+        .expect("rewind the schema version");
+    drop(connection);
+    let store = Store::open(&path).await.unwrap();
+    assert_eq!(
+        stored_preview(&store, "s").await,
+        json!({"text":"written before the table","truncated":false})
+    );
+    store.close().await.unwrap();
+}
