@@ -16,6 +16,25 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-24
+
+### Fixed
+- **engine**: finish the turn on a stop reason this build does not know (#3388) (`1a14b5c395`)
+- **tui**: make a blocked step ask for the answer, and notify once (#3386) (`747a9afe76`)
+- **tui**: reset the terminal state the shell inherits on exit (#3389) (`05609127c6`)
+- **engine,tui**: read the Session list off the request loops (#3384) (`78f9b9670c`)
+- **prompt,tui**: ask the owner instead of stopping on a blocked step (#3383) (`8a91d39d4a`)
+- **tui**: show a submitted prompt before the engine acknowledges it (#3382) (`9b52303ccc`)
+- **engine**: offer images to every model and degrade only on refusal (#3380) (`0b387ad3c0`)
+- **tui**: hide the caret while a frame is painted (#3379) (`1367a0383d`)
+- **tui**: load the session list after the model catalog (#3381) (`6763966f16`)
+- **engine**: accept a repeat finish as a terminal stop (#3378) (`eee6ff1ac6`)
+- **tui**: keep the host footer's facts on screen (#3377) (`7991cf456d`)
+
+### Performance
+- **tui**: read the title's branch from HEAD instead of spawning git (#3387) (`dba10464f7`)
+- **catalog**: keep each Session's list line when its text commits (#3385) (`d9457d2195`)
+
 ## [0.5.2] - 2026-11-24
 
 ### Added
