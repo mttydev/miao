@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -1280,7 +1281,7 @@ async fn run(
                 Request::ReloadProviderRoutes => {
                     reload_provider_routes(&mut connection, &bus, &mut open).await
                 }
-                Request::RefreshSessions => refresh_sessions(client, &bus).await,
+                Request::RefreshSessions => refresh_sessions_later(client, &bus),
                 Request::Recall {
                     session_id,
                     handle,
@@ -1305,7 +1306,7 @@ async fn run(
                         // The list renders the catalog, so re-read it rather than
                         // patching one row: the tag has to come from the same
                         // place every other row field comes from.
-                        Ok(_) => refresh_sessions(client, &bus).await,
+                        Ok(_) => refresh_sessions_later(client, &bus),
                         Err(error) => bus.send(AppEvent::TagFailed(error.to_string())),
                     }
                 }
@@ -1952,7 +1953,7 @@ async fn run(
                         .await;
                     match result {
                         Ok(_) => {
-                            refresh_sessions(client, &bus).await;
+                            refresh_sessions_later(client, &bus);
                             if open.as_ref().is_some_and(|state| state.id == session_id) {
                                 dirty.get_or_insert_with(Instant::now);
                             }
@@ -1973,7 +1974,7 @@ async fn run(
                         )
                         .await;
                     match result {
-                        Ok(_) => refresh_sessions(client, &bus).await,
+                        Ok(_) => refresh_sessions_later(client, &bus),
                         Err(error) => {
                             bus.send(AppEvent::ActionFailed(format!("archive failed: {error}")))
                         }
@@ -1990,7 +1991,7 @@ async fn run(
                         )
                         .await;
                     match result {
-                        Ok(_) => refresh_sessions(client, &bus).await,
+                        Ok(_) => refresh_sessions_later(client, &bus),
                         Err(error) => {
                             bus.send(AppEvent::ActionFailed(format!("pin failed: {error}")))
                         }
@@ -2006,7 +2007,7 @@ async fn run(
                                 open = None;
                                 bus.send(AppEvent::SessionRemoved(session_id));
                             }
-                            refresh_sessions(client, &bus).await;
+                            refresh_sessions_later(client, &bus);
                         }
                         Err(error) => {
                             bus.send(AppEvent::ActionFailed(format!("delete failed: {error}")))
@@ -2791,13 +2792,36 @@ async fn republish(client: &EngineClient, bus: &Bus, open: &mut Option<Opened>) 
     if let Ok(value) = client.command("provider_catalog").await {
         bus.send(AppEvent::ProviderCatalog(value));
     }
-    refresh_sessions(client, bus).await;
+    refresh_sessions_later(client, bus);
     if let Some(state) = open.as_mut() {
         project(client, bus, state, false).await;
     }
 }
 
-async fn refresh_sessions(client: &EngineClient, bus: &Bus) {
+/// Which request for the Session list is the newest. Reads overlap once they
+/// have left the request loop, and a slower one can be older than a faster
+/// one: only the newest may publish, or a stale list would overwrite a fresh
+/// one.
+static LIST_REQUESTED: AtomicU64 = AtomicU64::new(0);
+
+/// Read the Session list off the request loop. The catalog is one read of the
+/// whole store, seconds while the cache is cold, and the loop serves one
+/// request at a time: awaited inline, the list held every prompt, approval and
+/// cancel queued behind it. The engine answers it off its own loop as well.
+fn refresh_sessions_later(client: &EngineClient, bus: &Bus) {
+    let generation = LIST_REQUESTED.fetch_add(1, Ordering::SeqCst) + 1;
+    let client = client.clone();
+    let bus = bus.clone();
+    tokio::spawn(async move {
+        if generation == LIST_REQUESTED.load(Ordering::SeqCst) {
+            refresh_sessions(&client, &bus, generation).await;
+        }
+    });
+}
+
+/// `generation` is this read's place among the list requests; see
+/// [`refresh_sessions_later`].
+async fn refresh_sessions(client: &EngineClient, bus: &Bus, generation: u64) {
     // One transaction answers the whole list. Asking for a `snapshot` per
     // Session turned a startup with a hundred Sessions into a hundred request
     // round trips and a few thousand queries before the home list could paint,
@@ -2825,6 +2849,9 @@ async fn refresh_sessions(client: &EngineClient, bus: &Bus) {
                 }
             }
         }
+    }
+    if generation != LIST_REQUESTED.load(Ordering::SeqCst) {
+        return;
     }
     let Some(rows) = rows else {
         bus.send(AppEvent::EngineFailure(

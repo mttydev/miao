@@ -121,6 +121,7 @@ type EventTx = mpsc::UnboundedSender<TransportEvent>;
 pub type EventRx = mpsc::UnboundedReceiver<TransportEvent>;
 
 /// A client whose cursors outlive it, so a respawn can replay from them.
+#[derive(Clone)]
 pub struct EngineClient {
     child: Option<Arc<Mutex<Child>>>,
     outbound: mpsc::UnboundedSender<Value>,
@@ -129,7 +130,7 @@ pub struct EngineClient {
     events: EventTx,
     failure: Shared,
     closed: Arc<AtomicBool>,
-    next_id: AtomicU64,
+    next_id: Arc<AtomicU64>,
     request_timeout: Duration,
     exited: watch::Receiver<bool>,
 }
@@ -327,7 +328,7 @@ impl EngineClient {
                 events,
                 failure,
                 closed,
-                next_id: AtomicU64::new(1),
+                next_id: Arc::new(AtomicU64::new(1)),
                 request_timeout,
                 exited: exited_rx,
             },
@@ -784,7 +785,7 @@ fn spawn_engine(
         events: events_tx,
         failure,
         closed,
-        next_id: AtomicU64::new(1),
+        next_id: Arc::new(AtomicU64::new(1)),
         request_timeout,
         exited: exited_rx,
     };
