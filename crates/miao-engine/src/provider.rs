@@ -2823,16 +2823,25 @@ impl StreamState {
         if matches!(reason, Some("max_tokens" | "pause_turn")) {
             return Err(self.interrupted());
         }
-        if !matches!(
+        let known = matches!(
             reason,
             Some("tool_use" | "end_turn" | "stop_sequence" | "refusal")
-        ) {
-            return Err(ProviderError::Stream(format!(
-                "unsupported stop reason {} with {calls} streamed tool call(s)",
-                reason.unwrap_or("missing")
-            )));
+        );
+        if !known {
+            // Vendors add stop reasons; an unknown one must not cost the
+            // operator the reply they just watched stream in. The content is
+            // complete and no call is left open, so it ends the turn the way
+            // `end_turn` does. A stream that names no reason at all, or one
+            // that left calls in it, stays an error: whether those calls may
+            // run is what the reason was there to say.
+            if reason.is_none() || needs_tools || calls > 0 {
+                return Err(ProviderError::Stream(format!(
+                    "unsupported stop reason {} with {calls} streamed tool call(s)",
+                    reason.unwrap_or("missing")
+                )));
+            }
         }
-        if needs_tools != (reason == Some("tool_use")) {
+        if known && needs_tools != (reason == Some("tool_use")) {
             return Err(ProviderError::Stream(format!(
                 "stop reason {} does not match {calls} streamed tool call(s)",
                 reason.unwrap_or("missing")
@@ -3238,5 +3247,87 @@ mod retry_status_tests {
             assert!(!retryable_status(status), "{status} must not be retried");
             assert!(!ProviderError::Http(status, String::new()).can_fallback());
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_reason_tests {
+    use super::*;
+
+    fn feed(state: &mut StreamState, event: Value) -> Result<(), ProviderError> {
+        state.frame(&Frame::Json(event))
+    }
+
+    /// Drive the Anthropic parser to a complete message carrying `reason` and,
+    /// when `call` is set, one streamed tool call.
+    fn parsed(reason: Option<&str>, call: bool) -> Result<Reply, ProviderError> {
+        let mut state = StreamState::default();
+        feed(
+            &mut state,
+            json!({"type":"message_start","message":{"usage":{"input_tokens":3}}}),
+        )?;
+        feed(
+            &mut state,
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        )?;
+        feed(
+            &mut state,
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}),
+        )?;
+        feed(&mut state, json!({"type":"content_block_stop","index":0}))?;
+        if call {
+            feed(
+                &mut state,
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"read_file","input":{}}}),
+            )?;
+            feed(
+                &mut state,
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\"}"}}),
+            )?;
+            feed(&mut state, json!({"type":"content_block_stop","index":1}))?;
+        }
+        feed(
+            &mut state,
+            json!({"type":"message_delta","delta":{"stop_reason":reason},"usage":{"output_tokens":1}}),
+        )?;
+        feed(&mut state, json!({"type":"message_stop"}))?;
+        state.finish()
+    }
+
+    /// A reason the vendor added after this build is not a broken stream: the
+    /// reply is complete and nothing is left open, so the turn ends instead of
+    /// losing the answer that just streamed in.
+    #[test]
+    fn a_future_stop_reason_ends_the_turn_like_end_turn() {
+        let reply = parsed(Some("model_context_window_exceeded"), false).expect("a complete reply");
+        assert!(!reply.needs_tools);
+        assert_eq!(reply.content[0]["text"], "hello");
+    }
+
+    /// A call the reason would have authorised is the one case an unknown value
+    /// must not guess: whether it may run is exactly what the reason says.
+    #[test]
+    fn an_unknown_stop_reason_with_a_streamed_call_stays_an_error() {
+        let error = parsed(Some("some_future_reason"), true).expect_err("a call is not guessed");
+        assert!(
+            error.to_string().contains("unsupported stop reason"),
+            "{error}"
+        );
+    }
+
+    /// A stream that names no reason lost its delta; that is not the same as a
+    /// reason this build does not know.
+    #[test]
+    fn a_missing_stop_reason_stays_an_error() {
+        let error = parsed(None, false).expect_err("a missing reason is not a close");
+        assert!(error.to_string().contains("missing"), "{error}");
+    }
+
+    /// Known reasons keep their own check: `end_turn` beside a streamed call is
+    /// still a contradiction.
+    #[test]
+    fn a_known_reason_still_has_to_match_the_calls() {
+        let error = parsed(Some("end_turn"), true).expect_err("calls contradict end_turn");
+        assert!(error.to_string().contains("does not match"), "{error}");
     }
 }
