@@ -1958,7 +1958,7 @@ mod tests {
         let call = tool(
             "apply_patch",
             json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@ -1,2 +1,2 @@\n kept\n-gone\n+kept better and longer\n*** End Patch"}),
-            None,
+            Some(json!({})),
             false,
         );
         let rows = lines(&call, None, &theme, false, None);
@@ -2022,7 +2022,7 @@ mod tests {
         let call = tool(
             "apply_patch",
             json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@ -1,2 +1,2 @@\n kept\n-gone\n+kept better and longer\n*** End Patch"}),
-            None,
+            Some(json!({})),
             false,
         );
         let rows = lines(&call, None, &theme, false, None);
@@ -2049,7 +2049,7 @@ mod tests {
         let call = tool(
             "apply_patch",
             json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@ -1,1 +1,1 @@\n-gone\n+kept\n*** End Patch"}),
-            None,
+            Some(json!({})),
             false,
         );
         let rows = lines(&call, None, &theme, false, None);
