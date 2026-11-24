@@ -2536,10 +2536,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Invalid("question Location mismatch".into()));
         }
         self.inner.store.answer_question(session, answer).await
@@ -2557,10 +2554,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Invalid("question Location mismatch".into()));
         }
         self.inner.store.reject_question(session, rejection).await
@@ -2874,10 +2868,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(parent).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(parent).await? {
             return Err(Error::Conflict);
         }
         self.inner.store.fork(parent, target, message_seq).await
@@ -2902,10 +2893,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         let receipt = self
@@ -2924,30 +2912,21 @@ impl Runtime {
     }
 
     pub async fn shell_status(&self, session: &str, call: &str) -> Result<Value, Error> {
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         self.inner.store.shell_status(session, call).await
     }
 
     pub async fn wake_pending(&self, session: &str) -> Result<(), Error> {
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         self.wake(session, false).await
     }
 
     pub async fn resume(&self, session: &str) -> Result<(), Error> {
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         if self.inner.store.migration_active(session).await? {
@@ -3054,10 +3033,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         self.inner
@@ -3071,6 +3047,20 @@ impl Runtime {
             .await
     }
 
+    /// Whether a Session is placed at the root its scoped tools resolve.
+    ///
+    /// A Session in a worktree has its own root; the runtime's base tools still
+    /// name the engine checkout. Comparing the stored Location against the base
+    /// root rejected every model/account pick for such a Session, and the
+    /// generic conflict surfaced as an unrelated "input id conflicts" error.
+    async fn session_location_matches(&self, session: &str) -> Result<bool, Error> {
+        let tools = self.inner.tools.clone().with_read_scope(session);
+        Ok(same_location(
+            self.inner.store.location(session).await?.as_deref(),
+            tools.location(),
+        ))
+    }
+
     pub async fn select_account(
         &self,
         session: &str,
@@ -3079,10 +3069,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         if credential_id
@@ -3122,10 +3109,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         let picked_account = binding
@@ -3188,10 +3172,7 @@ impl Runtime {
                 crate::budget::TURN_CEILING
             )));
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         let state = self.inner.store.state(session).await?;
@@ -3237,10 +3218,7 @@ impl Runtime {
         if self.inner.stop.is_cancelled() {
             return Err(Error::Closed);
         }
-        if !same_location(
-            self.inner.store.location(session).await?.as_deref(),
-            self.inner.tools.location(),
-        ) {
+        if !self.session_location_matches(session).await? {
             return Err(Error::Conflict);
         }
         let result = self
