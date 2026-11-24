@@ -5996,6 +5996,12 @@ impl App {
                 engine.predict(&session_id, None);
             }
         }
+        // A blocked step is the owner's turn. The row above the box says so,
+        // and a blurred window is notified once per item: a step waiting on a
+        // person must not sit silent while they look at another window.
+        if let ComposerHint::Blocked(text) = &hint {
+            self.announce(attention::Kind::Question, Some(format!("blocked:{text}")));
+        }
         self.shell.composer.set_hint(hint);
     }
 
@@ -10042,6 +10048,30 @@ mod tests {
             ComposerHint::Blocked("decide the pricing tier".into())
         );
         assert_eq!(app.shell.composer.next_offer(), None);
+    }
+
+    /// A step the checklist holds for the owner is the owner's turn: it is
+    /// announced once per item, so a window left in the background still says
+    /// somebody is waiting on them.
+    #[test]
+    fn a_blocked_step_is_announced_once_per_item() {
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            summary: None,
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(state_with(serde_json::json!([
+                {"id": "a", "content": "deploy needs your window", "status": "blocked", "priority": "high"},
+            ]))),
+        });
+        assert!(
+            app.notified
+                .contains(&"blocked:deploy needs your window".to_string()),
+            "{:?}",
+            app.notified
+        );
+        let seen = app.notified.len();
+        app.refresh_suggestion();
+        assert_eq!(app.notified.len(), seen, "the same item is announced once");
     }
 
     /// A run can be admitted and moving before any `provider.*` frame arrives.
