@@ -3113,11 +3113,14 @@ fn render_hint_status(frame: &mut Frame, area: Rect, composer: &Composer, theme:
         ),
         _ => return,
     };
+    // A held step is not a dead end: the answer goes in the box directly
+    // below, and a Session that only says what it waits for reads as stuck.
+    let text = format!("{text} · {}", composer.lang.t("composer.hint.continue"));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!(" {label}: "), Style::new().fg(tone)),
             Span::styled(
-                fit(text, area.width.saturating_sub(4) as usize),
+                fit(&text, area.width.saturating_sub(4) as usize),
                 Style::new().fg(tone),
             ),
         ]))
