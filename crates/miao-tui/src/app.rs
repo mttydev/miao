@@ -8141,9 +8141,11 @@ mod tests {
         app.handle(projection("ses_a", SessionState::default()));
         assert_eq!(app.shell.queued_prompts(), ["fix the flaky test"]);
         // Once the engine lists the input, its row is the engine's to show.
-        let mut state = SessionState::default();
-        state.pending_prompts = vec!["fix the flaky test".into()];
-        state.pending_input_ids = vec![input_id];
+        let state = SessionState {
+            pending_prompts: vec!["fix the flaky test".into()],
+            pending_input_ids: vec![input_id],
+            ..SessionState::default()
+        };
         app.handle(projection("ses_a", state));
         assert_eq!(app.shell.queued_prompts(), ["fix the flaky test"]);
         assert!(app.echoes.is_empty(), "the engine's row replaced the echo");
