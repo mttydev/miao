@@ -255,6 +255,14 @@ pub enum AppEvent {
         prompt: String,
         delivery: String,
     },
+    /// The engine promoted a submitted input into a message, or cancelled it.
+    /// The composer echoes a prompt from the moment it is sent; this is what
+    /// retires the echo, by the id the prompt was sent under.
+    InputSettled {
+        session_id: String,
+        input_id: String,
+        cancelled: bool,
+    },
     /// Nothing was cancellable: the newest input was already promoted, or the
     /// queue drained while the request was in flight. The caller may interrupt
     /// the run instead, but it must not claim the input was cancelled.
@@ -374,6 +382,7 @@ fn requires_delivery(event: &AppEvent) -> bool {
             | AppEvent::EngineFailure(_)
             | AppEvent::UpdateReady(_)
             | AppEvent::PromptFailed { .. }
+            | AppEvent::InputSettled { .. }
             | AppEvent::ActionFailed(_)
             | AppEvent::InputRetrieved { .. }
             | AppEvent::ShellFailed { .. }

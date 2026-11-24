@@ -115,11 +115,14 @@ pub enum Request {
         session_id: String,
     },
     /// Admit one prompt with its inline media attachments into a Session and
-    /// wake it.
+    /// wake it. `input_id` is minted by the caller, so the prompt is on screen
+    /// before this request leaves the queue and the engine's later events can
+    /// name it.
     Prompt {
         session_id: String,
         text: String,
         attachments: Vec<Value>,
+        input_id: String,
     },
     /// Admit a rendered template command: the engine captures the reference,
     /// prepares its placeholders after promotion, and records the command.
@@ -405,12 +408,16 @@ impl Handle {
         });
     }
 
-    pub fn prompt(&self, session_id: &str, text: &str, attachments: Vec<Value>) {
+    /// Queue one prompt and return the `input_id` it will be admitted under.
+    pub fn prompt(&self, session_id: &str, text: &str, attachments: Vec<Value>) -> String {
+        let input_id = new_id("in");
         let _ = self.tx.send(Request::Prompt {
             session_id: session_id.to_string(),
             text: text.to_string(),
             attachments,
+            input_id: input_id.clone(),
         });
+        input_id
     }
 
     pub fn command(
@@ -1339,10 +1346,11 @@ async fn run(
                     session_id,
                     text,
                     attachments,
+                    input_id,
                 } => {
                     let input = json!({
                         "session_id": session_id.clone(),
-                        "input_id": new_id("in"),
+                        "input_id": input_id,
                         "prompt": text,
                         // Steer, never queue: a message typed while the agent
                         // works is handed over as soon as the tool calls in
@@ -2105,6 +2113,21 @@ async fn run(
                 }
                 Some(TransportEvent::Event(event)) => {
                     let watched = open.as_ref().is_some_and(|state| state.id == event.session_id);
+                    // The composer shows a submitted prompt from the moment it
+                    // was sent. Only the engine can say when that echo is
+                    // superseded: by the projection that lists the input as
+                    // admitted, or by its promotion into a message. A
+                    // cancellation projects nothing, so it retires the echo
+                    // itself.
+                    if matches!(event.kind.as_str(), "input.promoted" | "input.cancelled") {
+                        if let Some(input_id) = event.data.get("input_id").and_then(Value::as_str) {
+                            bus.send(AppEvent::InputSettled {
+                                session_id: event.session_id.clone(),
+                                input_id: input_id.to_owned(),
+                                cancelled: event.kind == "input.cancelled",
+                            });
+                        }
+                    }
                     if watched && open.as_ref().is_some_and(|state| event.seq > state.live_after) {
                         // Replay stops at the snapshot cursor: only events past
                         // it describe something that just happened.
