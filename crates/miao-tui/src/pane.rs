@@ -2646,10 +2646,16 @@ fn compact(text: &str) -> String {
 /// paragraph.
 const COMPACT_CELLS: usize = 80;
 
-/// What the open Session runs on and has cost so far. The row stays empty
-/// until a Session is open, so the home list keeps its full height.
+/// What the screen is doing, what it runs on, and what it has cost so far.
+/// The row is always painted: the landing screen names `Ready` before a
+/// Session exists, and a Session names its phase.
 #[derive(Default)]
 pub struct StatusStrip {
+    /// The row's leading fact: what the screen is doing right now. It is
+    /// always set — `Ready` on the landing screen before a Session exists,
+    /// the run's phase once one is open — so the strip never paints as a
+    /// bare build marker.
+    pub state: Option<String>,
     pub model: Option<String>,
     /// The tail serving the model: the provider, its account when it is not
     /// the default, the wire protocol and the variant. It paints after the
@@ -2744,31 +2750,46 @@ fn hint_label(hint: &StatusHint) -> String {
 }
 
 /// The wire the embedded host renders, read straight from the strip in the
-/// order the row reads: the approval hint, then the model, then the provider
-/// tail that serves it. Labels only: the host's row is its own surface and a
-/// press there arrives as the operator's own chord, so the geometry stays zero
-/// and an older host that still synthesizes by cell refuses the press instead
-/// of landing it on the transcript.
+/// order the row reads: the state, the approval hint, then the model, then the
+/// provider tail that serves it. Labels only: the host's row is its own
+/// surface and a press there arrives as the operator's own chord, so the
+/// geometry stays zero and an older host that still synthesizes by cell
+/// refuses the press instead of landing it on the transcript.
 fn wire_from_status(status: &StatusStrip) -> Option<Vec<FooterWireSeg>> {
-    let mut segs: Vec<FooterWireSeg> = status
-        .hints
-        .iter()
-        .filter(|hint| hint.segment == Some(FooterSegment::ApprovalMode))
-        .map(|hint| FooterWireSeg {
-            id: FooterSegment::ApprovalMode.id(),
-            text: hint_label(hint),
+    let mut segs: Vec<FooterWireSeg> = Vec::new();
+    if let Some(state) = &status.state {
+        segs.push(FooterWireSeg {
+            id: "state",
+            text: state.clone(),
             row: 0,
             start: 0,
             end: 0,
             chord: None,
-            // The strip paints a blocking approval in the warning tone and a
-            // settled policy muted; the merged row keeps that distinction.
-            tone: Some(match hint.warning {
-                true => "warning",
-                false => "muted",
+            // The host paints an unstyled fact in its own text colour: the
+            // state is not a policy or a connection, so it owns no tone.
+            tone: None,
+        });
+    }
+    segs.extend(
+        status
+            .hints
+            .iter()
+            .filter(|hint| hint.segment == Some(FooterSegment::ApprovalMode))
+            .map(|hint| FooterWireSeg {
+                id: FooterSegment::ApprovalMode.id(),
+                text: hint_label(hint),
+                row: 0,
+                start: 0,
+                end: 0,
+                chord: None,
+                // The strip paints a blocking approval in the warning tone and
+                // a settled policy muted; the merged row keeps that distinction.
+                tone: Some(match hint.warning {
+                    true => "warning",
+                    false => "muted",
+                }),
             }),
-        })
-        .collect();
+    );
     if let Some(model) = &status.model {
         segs.push(FooterWireSeg {
             id: FooterSegment::Model.id(),
@@ -2828,15 +2849,30 @@ fn hint_spans(status: &StatusStrip, theme: &Theme) -> Vec<(Span<'static>, Option
     spans
 }
 
-/// What the composer's own facts row carries: the exceptions the title cannot
-/// — an update waiting, a transcript scrolled away, a policy in effect — then
-/// the model answering. The state is the box title and the usage already rides
-/// the sidebar, so neither is repeated on this line.
+/// What the composer's own facts row carries: what the screen is doing now,
+/// the exceptions the title cannot — an update waiting, a transcript scrolled
+/// away, a policy in effect — then the model answering. The usage already
+/// rides the sidebar.
 fn composer_status_spans(
     status: &StatusStrip,
     theme: &Theme,
 ) -> Vec<(Span<'static>, Option<FooterSegment>)> {
-    let mut pairs = hint_spans(status, theme);
+    let mut pairs: Vec<(Span<'static>, Option<FooterSegment>)> = Vec::new();
+    if let Some(state) = &status.state {
+        pairs.push((
+            Span::styled(state.clone(), Style::new().fg(theme.palette.text)),
+            None,
+        ));
+    }
+    for (span, segment) in hint_spans(status, theme) {
+        if !pairs.is_empty() {
+            pairs.push((
+                Span::styled(" · ", Style::new().fg(theme.palette.text_muted)),
+                None,
+            ));
+        }
+        pairs.push((span, segment));
+    }
     if let Some(model) = &status.model {
         if !pairs.is_empty() {
             pairs.push((
@@ -6661,6 +6697,7 @@ mod tests {
         // or in a low-colour profile. The TS order keeps the hints at the left
         // of the row, ahead of the model.
         let status = StatusStrip {
+            state: None,
             model: Some("fake/model".into()),
             provider: None,
             usage: None,
@@ -8433,6 +8470,64 @@ mod tests {
         assert!(
             !facts.contains('│'),
             "the facts row is a plain line, not the box: {facts:?}"
+        );
+    }
+
+    /// The facts row is never empty: it leads with the state the screen is in,
+    /// even when no model has resolved yet. Without it the row painted only the
+    /// build marker at its right edge, which reads as a status line that
+    /// stopped working rather than a landing screen that is ready.
+    #[test]
+    fn the_facts_row_leads_with_its_state() {
+        let theme = home_theme();
+        let mut shell = Shell::new(Path::new("/repo/landing"), theme.clone());
+        let mut home = Home::new(theme);
+        shell.status.state = Some("Ready".into());
+        shell.status.model = Some("glm-5".into());
+        shell.status.hints = vec![StatusHint {
+            text: "ask approval".into(),
+            warning: false,
+            success: false,
+            segment: Some(FooterSegment::ApprovalMode),
+        }];
+        let height = 24u16;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height))
+            .expect("terminal");
+        terminal
+            .draw(|frame| shell.render_landing(frame, &mut home))
+            .expect("draw");
+        let row = |y: u16| {
+            (0..80u16)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let facts = row(height - 1);
+        let state = facts.find("Ready").expect("the state is on the row");
+        let policy = facts
+            .find("ask approval")
+            .expect("the policy fact is on the row");
+        let model = facts.find("glm-5").expect("the model is on the row");
+        assert!(
+            state < policy && policy < model,
+            "the row reads state, policy, then model: {facts:?}"
+        );
+        // An install with nothing in the catalog still says it is ready: the
+        // state is the row's own fact, not a consequence of a model resolving.
+        shell.status.model = None;
+        shell.status.hints.clear();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height))
+            .expect("terminal");
+        terminal
+            .draw(|frame| shell.render_landing(frame, &mut home))
+            .expect("draw");
+        let bare = {
+            (0..80u16)
+                .map(|x| terminal.backend().buffer()[(x, height - 1)].symbol())
+                .collect::<String>()
+        };
+        assert!(
+            bare.contains("Ready"),
+            "the state survives an empty facts row: {bare:?}"
         );
     }
 
@@ -11506,13 +11601,15 @@ mod draft_gap_tests {
         assert_eq!(wire[1].text, "volcengine · mtp", "{wire:?}");
     }
 
-    /// The wire keeps the row's reading order: the approval hint first, then
-    /// the model, then the provider tail that serves it. The cost summary is
-    /// not a fact about what answers, so it never takes the provider slot.
+    /// The wire keeps the row's reading order: the state first, then the
+    /// approval hint, the model, and the provider tail that serves it. The
+    /// cost summary is not a fact about what answers, so it never takes the
+    /// provider slot.
     #[test]
-    fn the_wire_reads_approval_model_then_provider() {
+    fn the_wire_reads_state_approval_model_then_provider() {
         let mut shell = Shell::new(Path::new("/tmp/pane-test"), strip_theme());
         shell.status = StatusStrip {
+            state: Some("Idle".into()),
             model: Some("deepseek-v4-1-flash-261017".into()),
             provider: Some("volcengine · openai-chat".into()),
             usage: Some("4 turns · 12k in · 900 out".into()),
@@ -11528,6 +11625,7 @@ mod draft_gap_tests {
         assert_eq!(
             pairs,
             vec![
+                ("state", "Idle"),
                 ("approval", "! auto-approve"),
                 ("model", "deepseek-v4-1-flash-261017"),
                 ("provider", "volcengine · openai-chat"),

@@ -5457,9 +5457,16 @@ impl App {
                     None,
                 )
             });
+            let ready = lang.t("status.ready").to_string();
+            self.shell.status.state = Some(ready.clone());
             self.shell.status.model = Some(model);
             self.shell.status.provider = provider;
             self.shell.status.usage = None;
+            // The landing prompt has no Session and therefore no phase: name
+            // the state the screen is in anyway. Without it the strip was a
+            // bare build marker whenever the catalog was empty, and the input
+            // box carried no state at all.
+            self.shell.composer.idle = Some(ready);
             self.shell.status.hints.clear();
             // The launch policy holds before any Session opens, so the strip
             // names it on the launcher too: a person starting work under
@@ -5863,6 +5870,11 @@ impl App {
                 segment: None,
             });
         }
+        // The row's leading fact is the state the box title already names:
+        // one word an operator can read without scanning the rest of the row.
+        // The title keeps the elapsed clock and the chord; this keeps the
+        // strip from ever being facts alone.
+        self.shell.status.state = Some(phase.clone());
         self.shell.status.hints = hints;
         self.shell.title.set_status(Some(status));
     }
@@ -8988,6 +9000,42 @@ mod tests {
         assert_eq!(app.shell.status.provider, None);
     }
 
+    /// The landing strip always names a state. Before a Session exists there
+    /// is no phase to borrow, so the row used to fall back to the build marker
+    /// alone once no model resolved — the input box read as broken rather than
+    /// ready.
+    #[test]
+    fn the_landing_strip_is_ready_even_without_a_catalog() {
+        let mut app = app();
+        app.models.clear();
+        app.catalog.clear();
+        app.remembered_model = None;
+        app.update_status();
+        assert_eq!(
+            app.shell.status.state.as_deref(),
+            Some("Ready"),
+            "the landing names its state before any Session exists"
+        );
+        assert_eq!(
+            app.shell.composer.idle.as_deref(),
+            Some("Ready"),
+            "the input box carries the same state as its strip"
+        );
+        assert!(
+            !app.shell.status.hints.is_empty(),
+            "the policy fact survives an empty catalog"
+        );
+        assert!(
+            app.shell
+                .status
+                .model
+                .as_deref()
+                .is_some_and(|model| !model.is_empty() && model.contains("no model")),
+            "an unrouted install still says how to pick a model: {:?}",
+            app.shell.status.model
+        );
+    }
+
     /// The landing screen has no Session pin and no assistant message, so the
     /// strip under its prompt used to name nothing at all. It now names the
     /// model the operator last chose, with the provider and protocol beside it.
@@ -9522,9 +9570,10 @@ mod tests {
     }
 
     /// The state is the box's own title: an idle Session names itself there, a
-    /// run names its phase and interrupt chord, and the facts row below keeps
-    /// only the model and any exception. A blank row is what a TUI that stopped
-    /// painting looks like, so the model keeps it occupied.
+    /// run names its phase and interrupt chord, and the facts row below leads
+    /// with the same state before the model and any exception. A blank row is
+    /// what a TUI that stopped painting looks like, so the state keeps it
+    /// occupied even when no model resolves.
     #[test]
     fn the_composer_title_names_the_state_instead_of_going_blank() {
         let mut app = session_app();
@@ -9535,6 +9584,11 @@ mod tests {
             "the approval fact is the only row item while idle"
         );
         assert_eq!(app.shell.composer.idle.as_deref(), Some("Idle"));
+        assert_eq!(
+            app.shell.status.state.as_deref(),
+            Some("Idle"),
+            "the facts row leads with the idle state"
+        );
 
         app.state.active_run = Some("run-1".into());
         app.update_status();
@@ -9544,6 +9598,11 @@ mod tests {
             "the approval fact stays while a run is in flight"
         );
         assert_eq!(app.shell.composer.phase.as_deref(), Some("Working"));
+        assert_eq!(
+            app.shell.status.state.as_deref(),
+            Some("Working"),
+            "the facts row follows the run's phase"
+        );
         assert_eq!(
             app.shell.composer.phase_action.as_deref(),
             Some("Esc interrupt")
@@ -9569,6 +9628,11 @@ mod tests {
         assert_eq!(
             app.shell.composer.phase.as_deref(),
             Some("needs approval · bash")
+        );
+        assert_eq!(
+            app.shell.status.state.as_deref(),
+            Some("needs approval · bash"),
+            "a blocking call is the state the row leads with"
         );
     }
 
@@ -11633,11 +11697,14 @@ mod tests {
     }
 
     /// The host's row is fed by this wire: each fact carries the chord the
-    /// keymap spells, so a press lands on the handler the label promises.
+    /// keymap spells, so a press lands on the handler the label promises. The
+    /// state leads the row as a label only — nothing acts on it — so the host
+    /// shows what the screen is doing before the facts that have actions.
     #[test]
     fn the_host_footer_wire_carries_each_fact_and_its_chord() {
         let mut app = app();
         app.shell.status = crate::pane::StatusStrip {
+            state: Some("Idle".into()),
             model: Some("deepseek-v4-1-flash-261017".into()),
             provider: Some("volcengine · openai-chat".into()),
             usage: None,
@@ -11656,6 +11723,7 @@ mod tests {
         assert_eq!(
             pairs,
             vec![
+                ("state", None, None),
                 ("approval", Some("ctrl+x f"), Some("warning")),
                 ("model", Some("ctrl+x m"), Some("accent")),
                 ("provider", Some("ctrl+x m"), Some("success")),
