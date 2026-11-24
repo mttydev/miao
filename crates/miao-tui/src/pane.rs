@@ -923,14 +923,37 @@ impl TitlePane {
 }
 
 fn git_branch(workspace: &Path) -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(workspace)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_else(|| "no git".to_string())
+    // `git rev-parse --abbrev-ref HEAD` costs a process at startup; the answer
+    // is one file read. A linked worktree keeps `.git` as a file that names
+    // its gitdir, so both shapes are read here.
+    let dot_git = workspace.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        std::fs::read_to_string(&dot_git)
+            .ok()
+            .and_then(|line| {
+                let path = Path::new(line.trim().strip_prefix("gitdir: ")?);
+                Some(if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    workspace.join(path)
+                })
+            })
+            .unwrap_or(dot_git)
+    };
+    let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD")) else {
+        return "no git".to_string();
+    };
+    // A detached HEAD prints "HEAD" in git's own words; the label keeps saying
+    // that instead of inventing a short id of its own.
+    match head.trim().strip_prefix("ref: ") {
+        Some(reference) => reference
+            .strip_prefix("refs/heads/")
+            .unwrap_or(reference)
+            .to_string(),
+        None => "HEAD".to_string(),
+    }
 }
 
 impl TitlePane {
@@ -11984,6 +12007,59 @@ mod final_layout_check {
                     "row {y} column {x} kept a wide glyph"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod title_branch_tests {
+    use super::git_branch;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("miao-title-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// The title is painted before anything else is read, so its branch comes
+    /// from the one file that names it: a checkout, a linked worktree that
+    /// keeps `.git` as a pointer, a detached HEAD, and a directory that is not
+    /// a repository at all.
+    #[test]
+    fn the_title_reads_the_branch_from_head_without_running_git() {
+        let checkout = scratch("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).expect("git dir");
+        std::fs::write(checkout.join(".git/HEAD"), "ref: refs/heads/feature\n").expect("head");
+        assert_eq!(git_branch(&checkout), "feature");
+
+        let workspace = scratch("worktree");
+        let git_dir = scratch("gitdir");
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/wt-branch\n").expect("head");
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .expect("pointer");
+        assert_eq!(git_branch(&workspace), "wt-branch");
+
+        std::fs::write(
+            git_dir.join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .expect("detached head");
+        assert_eq!(
+            git_branch(&workspace),
+            "HEAD",
+            "git's own word for a detached HEAD"
+        );
+
+        let plain = scratch("plain");
+        assert_eq!(git_branch(&plain), "no git");
+
+        for dir in [&checkout, &workspace, &git_dir, &plain] {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
