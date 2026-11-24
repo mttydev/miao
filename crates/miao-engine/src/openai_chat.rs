@@ -696,6 +696,34 @@ impl Parser for ChatState {
                 unexecuted_calls,
             });
         }
+        // Zhipu's coding-plan gateway ends a reply with `repeat` when its own
+        // repetition guard stops the model. The TypeScript provider maps an
+        // unknown reason to a terminal stop; rejecting it here failed the whole
+        // turn. Treat it as a completed stop unless a call is still pending: a
+        // tool call carried by `repeat` is unfinished and must not execute, so
+        // the runtime's repetition path keeps the text and stops the turn.
+        if self.finish.as_deref() == Some("repeat") && !self.calls.is_empty() {
+            let mut content = Vec::new();
+            if !self.reasoning.is_empty() {
+                content.push(json!({"type":"reasoning","text":self.reasoning}));
+            }
+            if !self.text.is_empty() {
+                content.push(json!({"type":"text","text":self.text}));
+            }
+            let channel = if self.text.is_empty() && !self.reasoning.is_empty() {
+                "reasoning"
+            } else {
+                "text"
+            };
+            return Err(ProviderError::Repetitive {
+                channel,
+                partial: Reply {
+                    content: Value::Array(content),
+                    usage: self.usage,
+                    needs_tools: false,
+                },
+            });
+        }
         // Some gateways close the stream with `[DONE]` and never send a finish
         // reason. The stream declared itself complete, so the missing reason
         // ends it naturally; truncated tool arguments still surface as their
@@ -704,6 +732,9 @@ impl Parser for ChatState {
             self.finish
                 .as_deref()
                 .unwrap_or(if needs_tools { "tool_calls" } else { "stop" });
+        // With nothing pending, `repeat` is the same terminal stop of the text
+        // it already streamed.
+        let reason = if reason == "repeat" { "stop" } else { reason };
         if reason != "tool_calls" && reason != "stop" {
             return Err(ProviderError::Stream(format!(
                 "unsupported Chat finish reason: {reason}"
