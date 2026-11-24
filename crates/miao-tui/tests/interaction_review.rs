@@ -106,42 +106,14 @@ impl Harness {
         let _ = writer.flush();
     }
 
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().expect("output lock")).into_owned()
-    }
-
-    /// The cells without terminal control: a dialog draws each span behind a
-    /// cursor move, so a row is never one contiguous substring of the stream.
+    /// The cells the terminal actually shows. Reading the raw stream lost the
+    /// spaces a differential frame skips, which split `hello from the fixture`
+    /// into `hellofromthefixture`; the vt100 screen keeps the layout.
     fn plain(&self) -> String {
-        let text = self.text();
-        let mut out = String::new();
-        let mut chars = text.chars();
-        while let Some(c) = chars.next() {
-            if c != '\x1b' {
-                if !c.is_control() {
-                    out.push(c);
-                }
-                continue;
-            }
-            match chars.next() {
-                Some('[') => {
-                    for next in chars.by_ref() {
-                        if ('@'..='~').contains(&next) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    for next in chars.by_ref() {
-                        if next == '\x07' {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        out
+        let size = self.pty.get_size().expect("pty size");
+        let mut parser = vt100::Parser::new(size.rows, size.cols, 0);
+        parser.process(&self.output.lock().expect("output lock"));
+        parser.screen().contents()
     }
 
     fn wait_for(&self, needle: &str, timeout: Duration) -> bool {
