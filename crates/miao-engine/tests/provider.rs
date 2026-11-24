@@ -560,18 +560,47 @@ async fn pause_turn_continues_the_turn() {
 
 #[tokio::test]
 async fn an_unsupported_stop_reason_names_its_value() {
-    let (url, _requests, server) = endpoint(vec![(200, stop_reason_stream("seance", false))]).await;
+    // A call the reason would have authorised is the case an unknown value
+    // must not guess, so it keeps the error — and the error still names the
+    // value it saw.
+    let (url, _requests, server) = endpoint(vec![(200, stop_reason_stream("seance", true))]).await;
     let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
     let (progress, _receive) = mpsc::channel(64);
     let outcome = provider
         .stream(history(), progress, CancellationToken::new())
         .await;
     let Err(ProviderError::Stream(message)) = outcome else {
-        panic!("an unknown stop reason must fail the stream");
+        panic!("an unknown stop reason with a streamed call must fail the stream");
     };
     assert!(
         message.contains("seance"),
         "the error must name the reason it saw: {message}"
+    );
+    server.await.unwrap();
+}
+
+/// The same unknown value without a call is a complete reply: the vendor added
+/// a reason, the content arrived, and nothing is left open, so the turn ends
+/// instead of the run failing after the operator watched the answer stream in.
+#[tokio::test]
+async fn an_unknown_stop_reason_without_a_call_finishes_the_turn() {
+    let (url, _requests, server) = endpoint(vec![(200, stop_reason_stream("seance", false))]).await;
+    let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
+    let (progress, _receive) = mpsc::channel(64);
+    let reply = provider
+        .stream(history(), progress, CancellationToken::new())
+        .await
+        .expect("a complete reply is not a broken stream");
+    assert!(!reply.needs_tools);
+    assert!(
+        reply
+            .content
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|part| part["type"] == "text" && part["text"] == "partial answer"),
+        "{:?}",
+        reply.content
     );
     server.await.unwrap();
 }
