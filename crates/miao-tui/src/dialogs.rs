@@ -889,7 +889,7 @@ impl Dialog {
         current: Option<&str>,
         provider: Option<&str>,
     ) -> Self {
-        Self::models_with_needs_auth(models, current, provider, &[], &[], &[])
+        Self::models_with_needs_auth(models, current, provider, &[], &[], &[], false)
     }
 
     /// The picker plus a tail section naming providers this engine does not
@@ -904,6 +904,9 @@ impl Dialog {
         unserved: &[(String, String, bool)],
         recents: &[String],
         favorites: &[String],
+        // The picker opened before the catalog answered: an empty list is a
+        // wait, not an install with no routes.
+        pending: bool,
     ) -> Self {
         // The picker groups by provider the way the product's does: a muted
         // header row names each provider and the models beneath it belong to
@@ -949,12 +952,22 @@ impl Dialog {
             }
             // An install holding no route at all says so, instead of opening an
             // empty box: the tail below is the way out, and the first line has
-            // to admit there is nothing else yet.
+            // to admit there is nothing else yet. A picker opened while the
+            // engine is still answering says that instead — the empty list is
+            // a wait, not an install with nothing configured.
             if models.is_empty() {
                 rows.push(Row {
                     id: "empty".into(),
-                    label: "no models yet".to_string(),
-                    detail: "store a provider key to start".to_string(),
+                    label: if pending {
+                        "loading models…".to_string()
+                    } else {
+                        "no models yet".to_string()
+                    },
+                    detail: if pending {
+                        "the engine is reading its routes".to_string()
+                    } else {
+                        "store a provider key to start".to_string()
+                    },
                 });
             }
         }
@@ -2983,7 +2996,8 @@ mod tests {
             "glm-5".to_string(),
             "haiku".to_string(),
         ];
-        let dialog = Dialog::models_with_needs_auth(&grouped(), None, None, &[], &recents, &[]);
+        let dialog =
+            Dialog::models_with_needs_auth(&grouped(), None, None, &[], &recents, &[], false);
         let list = dialog.list().expect("list");
         let labels: Vec<&str> = list.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(
@@ -2996,8 +3010,15 @@ mod tests {
         assert_eq!(labels[3], "zhipu");
         // A provider-narrowed picker has no recents section: everything in it
         // is already that provider.
-        let narrowed =
-            Dialog::models_with_needs_auth(&grouped(), None, Some("zhipu"), &[], &recents, &[]);
+        let narrowed = Dialog::models_with_needs_auth(
+            &grouped(),
+            None,
+            Some("zhipu"),
+            &[],
+            &recents,
+            &[],
+            false,
+        );
         let narrowed = narrowed.list().expect("list");
         assert!(
             narrowed
@@ -3014,8 +3035,15 @@ mod tests {
     fn favorites_lead_the_picker_before_recents() {
         let favorites = vec!["glm-5".to_string()];
         let recents = vec!["haiku".to_string()];
-        let dialog =
-            Dialog::models_with_needs_auth(&grouped(), None, None, &[], &recents, &favorites);
+        let dialog = Dialog::models_with_needs_auth(
+            &grouped(),
+            None,
+            None,
+            &[],
+            &recents,
+            &favorites,
+            false,
+        );
         let list = dialog.list().expect("list");
         let labels: Vec<&str> = list.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(
@@ -3038,7 +3066,7 @@ mod tests {
     #[test]
     fn an_empty_catalog_names_itself_and_the_way_out() {
         let unserved = vec![("anthropic".to_string(), "Anthropic".to_string(), false)];
-        let dialog = Dialog::models_with_needs_auth(&[], None, None, &unserved, &[], &[]);
+        let dialog = Dialog::models_with_needs_auth(&[], None, None, &unserved, &[], &[], false);
         let list = dialog.list().expect("list");
         let labels: Vec<&str> = list.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(
@@ -3049,6 +3077,18 @@ mod tests {
         assert_eq!(list.rows[0].detail, "store a provider key to start");
     }
 
+    /// A picker opened while the catalog is still on its way must not tell an
+    /// operator to store a key: the empty list is a wait, and saying otherwise
+    /// sends them to configure an install that is already configured.
+    #[test]
+    fn a_pending_catalog_says_it_is_loading() {
+        let dialog = Dialog::models_with_needs_auth(&[], None, None, &[], &[], &[], true);
+        let list = dialog.list().expect("list");
+        assert_eq!(list.rows[0].label, "loading models…");
+        assert_eq!(list.rows[0].detail, "the engine is reading its routes");
+        assert_eq!(list.rows.len(), 1, "nothing else is claimed yet");
+    }
+
     /// A stored key with no route behind it is a different problem from a
     /// missing key, and the picker says which one the operator has.
     #[test]
@@ -3057,7 +3097,8 @@ mod tests {
             ("anthropic".to_string(), "Anthropic".to_string(), false),
             ("mistral".to_string(), "Mistral".to_string(), true),
         ];
-        let dialog = Dialog::models_with_needs_auth(&grouped(), None, None, &unserved, &[], &[]);
+        let dialog =
+            Dialog::models_with_needs_auth(&grouped(), None, None, &unserved, &[], &[], false);
         let list = dialog.list().expect("list");
         let rows: Vec<(&str, &str)> = list
             .rows

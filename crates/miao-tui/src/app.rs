@@ -1417,11 +1417,14 @@ impl App {
             }
             AppEvent::Models(models) => {
                 self.models = models;
-                if self.pending_models {
-                    self.pending_models = false;
-                    if self.dialog.is_none() {
-                        self.open_models_dialog();
-                    }
+                // A picker opened before the first catalog answered is empty
+                // and carries `pending_models`; fill that same dialog in place.
+                // An operator who closed it is not reopened, which is why this
+                // checks the dialog rather than the flag alone.
+                if std::mem::take(&mut self.pending_models)
+                    && matches!(self.dialog, Some(Dialog::Models(_)))
+                {
+                    self.reopen_models_dialog();
                 }
             }
             AppEvent::ProviderCatalog(catalog) => {
@@ -2363,19 +2366,27 @@ impl App {
     }
 
     fn open_models(&mut self) {
-        if let Some(engine) = self.engine.as_ref() {
-            engine.catalog();
-        } else {
-            // Nothing will ever answer this request until an engine starts:
-            // keep the pending picker (the catalog may still arrive) but say
-            // what configures one instead of sitting silent.
-            self.notice(self.shell.lang().t("notice.setup_cli"));
+        match self.engine.as_ref() {
+            Some(engine) => engine.catalog(),
+            // Nothing would ever answer, so a list with no rows can only stay
+            // empty: say what configures an engine instead of opening it. Rows
+            // this launch already holds still open — the picker is local.
+            None if self.models.is_empty() => {
+                self.notice(self.shell.lang().t("notice.setup_cli"));
+                return;
+            }
+            None => {}
         }
-        if self.models.is_empty() {
-            self.pending_models = true;
-            return;
-        }
+        // Open on what this launch already holds instead of waiting for the
+        // answer. A cold engine start (store migration, route materialization)
+        // takes seconds, and blocking the command on that round trip made
+        // `/model` look stuck with no dialog at all. The empty state says it is
+        // waiting, and the answer refills this same dialog.
+        self.pending_models = self.models.is_empty();
         self.open_models_dialog();
+        // Opening clears the flag (`open_dialog`); the answer still has to fill
+        // this picker, so the wait outlives the open.
+        self.pending_models = self.models.is_empty();
     }
 
     fn open_theme(&mut self) {
@@ -2558,6 +2569,7 @@ impl App {
             .collect();
         let recents = self.recent_models();
         let favorites = self.favorites.clone();
+        let pending = self.pending_models;
         self.open_dialog(Dialog::models_with_needs_auth(
             &self.models,
             current.as_deref(),
@@ -2565,6 +2577,7 @@ impl App {
             &unserved,
             &recents,
             &favorites,
+            pending,
         ));
     }
 
@@ -13523,6 +13536,51 @@ mod tests {
             .expect("the setup guidance is on the screen");
         assert!(notice.contains("auth login"), "{notice}");
         assert!(notice.contains("/model"), "{notice}");
+    }
+
+    /// `/model` with an engine attached must not wait for the catalog: the
+    /// picker is local, so it opens on the rows this launch already holds (or
+    /// its honest empty state) and the answer refills the same dialog. Waiting
+    /// for the first `model_catalog` reply is what made the command look stuck
+    /// on a cold engine start.
+    #[test]
+    fn the_model_picker_opens_before_the_catalog_answers() {
+        let mut app = app();
+        app.attach_engine(engine::Handle::inert());
+        app.shell.composer.editor.set_text("/model");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        let list = app
+            .dialog
+            .as_ref()
+            .and_then(Dialog::list)
+            .expect("the picker opens without waiting for the engine");
+        assert!(
+            list.rows.iter().any(|row| row.id == "empty"),
+            "the empty state is honest: {:?}",
+            list.rows.iter().map(|row| &row.id).collect::<Vec<_>>()
+        );
+        assert!(app.pending_models, "the empty picker waits for the answer");
+
+        app.handle(AppEvent::Models(vec![ModelInfo {
+            protocol: "openai-chat".into(),
+            model: "gpt-5".into(),
+            route_id: Some("openai/gpt-5".into()),
+            variant: None,
+            provider: Some("openai".into()),
+            account: None,
+            credential_id: None,
+        }]));
+        let list = app
+            .dialog
+            .as_ref()
+            .and_then(Dialog::list)
+            .expect("the same picker stays open");
+        assert!(
+            list.rows.iter().any(|row| row.label.contains("gpt-5")),
+            "the answer fills the open picker: {:?}",
+            list.rows.iter().map(|row| &row.label).collect::<Vec<_>>()
+        );
+        assert!(!app.pending_models, "the answer settles the wait");
     }
 
     /// The provider list follows the same first-run truth: it is engine-fed,
