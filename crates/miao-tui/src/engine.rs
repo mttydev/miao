@@ -2596,6 +2596,7 @@ fn parse_job_rows(value: &Value) -> Vec<JobRow> {
                 command: command.to_string(),
                 started_at_ms: row.get("started_at_ms").and_then(Value::as_u64),
                 eta_ms: row.get("eta_ms").and_then(Value::as_u64),
+                timeout_ms: row.get("timeout_ms").and_then(Value::as_u64),
                 last_output_at_ms: row.get("last_output_at_ms").and_then(Value::as_u64),
                 subagent: false,
             })
@@ -2629,6 +2630,7 @@ fn parse_subagent_rows(value: &Value) -> Vec<JobRow> {
                         command: String::new(),
                         started_at_ms: None,
                         eta_ms: None,
+                        timeout_ms: None,
                         last_output_at_ms: None,
                         subagent: true,
                     })

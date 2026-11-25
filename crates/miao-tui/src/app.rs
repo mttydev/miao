@@ -105,6 +105,24 @@ fn job_finished(state: &str) -> bool {
     )
 }
 
+/// How long past its declared timeout a row may keep claiming `running`, to
+/// cover the settle write rather than the kill.
+const JOB_SETTLE_GRACE_MS: u64 = 60_000;
+
+/// A row whose declared timeout has passed cannot still be running: the engine
+/// kills the job at that deadline. A row that still says `running` after the
+/// settle margin lost its task or its owner, and keeping a clock on it claims a
+/// wait that has nothing behind it — the composer once counted a finished job
+/// for over a day.
+fn job_overdue(row: &crate::event::JobRow, now: u64) -> bool {
+    let Some(timeout) = row.timeout_ms else {
+        return false;
+    };
+    row.started_at_ms.is_some_and(|started| {
+        now.saturating_sub(started) > timeout.saturating_add(JOB_SETTLE_GRACE_MS)
+    })
+}
+
 /// One line of a job's command, short enough to sit in a composer title.
 ///
 /// The command is what tells a reader *which* of their jobs this is, so it is
@@ -5353,9 +5371,10 @@ impl App {
     /// discovers the job from, so requiring a known job would stop the line
     /// before it ever started.
     fn watching_jobs(&self) -> bool {
+        let now = crate::pane::now_ms();
         self.jobs
             .iter()
-            .any(|row| !row.subagent && !job_finished(&row.state))
+            .any(|row| !row.subagent && !job_finished(&row.state) && !job_overdue(row, now))
             || (self.jobs.is_empty() && self.paused_on_jobs())
     }
 
@@ -5411,7 +5430,11 @@ impl App {
         let running = self
             .jobs
             .iter()
-            .filter(|row| !row.subagent && !job_finished(&row.state))
+            .filter(|row| {
+                !row.subagent
+                    && !job_finished(&row.state)
+                    && !job_overdue(row, crate::pane::now_ms())
+            })
             .collect::<Vec<_>>();
         let (job, count) = (running.first()?, running.len());
         let lang = self.shell.lang();
@@ -9776,6 +9799,7 @@ mod tests {
             command: "ssh aibox2 'python3 kf_render.py'".into(),
             started_at_ms: Some(now - started_ago_ms),
             eta_ms,
+            timeout_ms: None,
             last_output_at_ms: Some(now - 2_000),
             subagent: false,
         }
@@ -9825,6 +9849,43 @@ mod tests {
         job.state = "completed".into();
         app.jobs = vec![job];
         assert!(app.waiting_line().is_none());
+    }
+
+    /// The report that started this: a Session whose job had timed out hours
+    /// ago still counted "1d 4h elapsed" beside the input, because every read
+    /// went on answering `running` for a task that no longer existed. A row
+    /// past the timeout its caller declared cannot be live - the engine kills
+    /// the job at that deadline - so the line and the clock both stop.
+    #[test]
+    fn a_job_past_its_declared_timeout_is_not_a_live_wait() {
+        let mut app = session_app();
+        let mut job = running_job(2 * 60 * 60_000, None);
+        job.timeout_ms = Some(35 * 60_000);
+        app.jobs = vec![job];
+        assert!(
+            app.waiting_line().is_none(),
+            "a job cannot outlive its own deadline"
+        );
+        app.job_poll = None;
+        app.tick();
+        assert!(
+            app.job_poll.is_none(),
+            "an overdue row stops the clock it cannot keep"
+        );
+    }
+
+    /// The grace covers the settle write, not the run: a job one second past
+    /// its deadline is still shown while the engine writes its finish.
+    #[test]
+    fn a_job_just_past_its_deadline_keeps_the_wait_during_the_settle() {
+        let mut app = session_app();
+        let mut job = running_job(35 * 60_000, None);
+        job.timeout_ms = Some(35 * 60_000 - 30_000);
+        app.jobs = vec![job];
+        assert!(
+            app.waiting_line().is_some(),
+            "the settle margin still counts as waiting"
+        );
     }
 
     #[test]
