@@ -86,6 +86,15 @@ const SUBAGENT_DISCOVER: Duration = Duration::from_secs(10);
 /// waiting line's clock changes on the second, so this is as fast as the line
 /// can visibly move, and it only runs while a job does.
 const JOB_POLL: Duration = Duration::from_secs(1);
+/// How old a job read may be before the waiting line stops trusting it.
+///
+/// The line is painted from cached rows and its clock is recomputed from the
+/// cached start every frame, so a row whose next read never arrived kept
+/// counting up as if its job were still running — a job that finished hours
+/// ago named itself in the input. The poll answers within a second, so a read
+/// this old is not evidence that anything still runs; the engine's pause is
+/// what keeps the reads (and therefore the rows) coming back.
+const JOB_READ_TTL: Duration = Duration::from_secs(10);
 
 /// Whether a job row is finished with, as the engine spells its states. A row
 /// that has settled stops the clock: nothing about it will change again.
@@ -608,6 +617,10 @@ pub struct App {
     /// and no way to tell a long build from a wedged one. These rows are the
     /// live half of that: what is running, for how long, and what it last said.
     jobs: Vec<crate::event::JobRow>,
+    /// When the engine last answered with the rows above. The rows are a
+    /// cached observation, not the state itself: one that has not been
+    /// re-read within [`JOB_READ_TTL`] stops drawing a wait.
+    jobs_read_at: Option<Instant>,
     /// When the next job read is due. `None` means nothing is paused on a job
     /// and nothing is running, so there is no clock to advance.
     job_poll: Option<Instant>,
@@ -898,6 +911,7 @@ impl App {
             subagents: Vec::new(),
             subagent_poll: None,
             jobs: Vec::new(),
+            jobs_read_at: None,
             job_poll: None,
             job_poll_pause: None,
             older: None,
@@ -1502,6 +1516,7 @@ impl App {
                 // longer observe is not evidence that it is, and leaving it up
                 // is how a finished job kept naming itself for hours.
                 self.jobs = rows.unwrap_or_default();
+                self.jobs_read_at = Some(Instant::now());
                 self.schedule_job_poll();
             }
             // The child list is read for the sidebar rather than for a dialog:
@@ -5214,6 +5229,7 @@ impl App {
         if self.screen != Screen::Session {
             return;
         }
+        self.refresh_job_wait();
         self.poll_subagents();
         self.start_job_poll_on_pause();
         self.poll_jobs();
@@ -5328,6 +5344,35 @@ impl App {
             .iter()
             .any(|row| !row.subagent && !job_finished(&row.state))
             || (self.jobs.is_empty() && self.paused_on_jobs())
+    }
+
+    /// Whether the cached job rows are recent enough to draw a wait from.
+    fn job_rows_fresh(&self) -> bool {
+        self.jobs_read_at
+            .is_none_or(|read| read.elapsed() <= JOB_READ_TTL)
+    }
+
+    /// Keep the waiting line honest and keep a running one observed.
+    ///
+    /// The line is painted from `jobs`, which only the poll refreshes, and its
+    /// clock is recomputed from each row's cached start every frame. A row
+    /// whose next read never arrived therefore kept counting up as if its job
+    /// still ran: a job that settled hours ago went on naming itself in the
+    /// input. A read older than [`JOB_READ_TTL`] is not evidence that anything
+    /// runs, so those rows go, and the engine's pause is what still brings the
+    /// reads back. A running row with no clock armed is the other half of the
+    /// same contract: it gets one, so no cached row can outlive its own last
+    /// read while it is on screen.
+    fn refresh_job_wait(&mut self) {
+        if !self.jobs.is_empty() && !self.job_rows_fresh() {
+            self.jobs.clear();
+            self.jobs_read_at = None;
+        }
+        match (self.job_poll.is_some(), self.watching_jobs()) {
+            (false, true) => self.schedule_job_poll(),
+            (true, false) => self.schedule_job_poll(),
+            _ => {}
+        }
     }
 
     /// The pause the engine raised because background work is still running.
@@ -5555,6 +5600,7 @@ impl App {
             self.mtty_state.update(crate::mtty_state::State::Idle);
             return;
         }
+        self.refresh_job_wait();
         let now = Instant::now();
         let live = self
             .live
@@ -9809,6 +9855,72 @@ mod tests {
             "the line must not keep naming a job this Session cannot observe"
         );
         assert!(app.job_poll.is_none(), "and the clock stops with it");
+    }
+
+    /// A row this window can no longer observe must not keep drawing a wait.
+    /// Its clock is a frame-time subtraction from a cached start, so leaving
+    /// the row up made a job that had settled long ago go on counting.
+    #[test]
+    fn a_row_past_its_read_window_stops_drawing_a_wait() {
+        let mut app = session_app();
+        app.jobs = vec![running_job(6 * 60_000, None)];
+        app.jobs_read_at = Some(Instant::now() - JOB_READ_TTL - Duration::from_secs(1));
+        app.job_poll = None;
+        app.update_status();
+        assert!(
+            app.jobs.is_empty(),
+            "the stale row is dropped before it can be painted"
+        );
+        assert!(app.waiting_line().is_none(), "and no line names it");
+        assert!(app.job_poll.is_none(), "nothing is left to poll");
+    }
+
+    /// The other half of the same contract: a fresh row on screen keeps its
+    /// next read armed. A row that stops being read is how the wait above got
+    /// stuck, so a painted wait is never left without a clock.
+    #[test]
+    fn a_running_row_on_screen_keeps_its_next_read_armed() {
+        let mut app = session_app();
+        app.jobs = vec![running_job(6 * 60_000, None)];
+        app.jobs_read_at = Some(Instant::now());
+        app.job_poll = None;
+        app.update_status();
+        assert!(app.job_poll.is_some(), "a painted wait is never unread");
+    }
+
+    /// A read restamps the rows, so a wait that really runs keeps drawing
+    /// after the previous window expired.
+    #[test]
+    fn a_job_read_restamps_the_wait() {
+        let mut app = session_app();
+        app.jobs = vec![running_job(6 * 60_000, None)];
+        app.jobs_read_at = Some(Instant::now() - JOB_READ_TTL - Duration::from_secs(1));
+        app.handle(AppEvent::JobStatus(Some(vec![running_job(
+            6 * 60_000,
+            None,
+        )])));
+        assert!(app.jobs_read_at.is_some(), "the answer is a fresh read");
+        assert!(app.waiting_line().is_some(), "the fresh row draws again");
+    }
+
+    /// The engine's pause is the one fact that survives a silent read: the
+    /// stale details go, but the poll keeps asking so they come back.
+    #[test]
+    fn a_waiting_pause_keeps_the_stale_rows_polling() {
+        let mut app = session_app();
+        app.shell.set_transcript(&Transcript {
+            paused: Some((7, "waiting on background work".into())),
+            ..Transcript::default()
+        });
+        app.jobs = vec![running_job(6 * 60_000, None)];
+        app.jobs_read_at = Some(Instant::now() - JOB_READ_TTL - Duration::from_secs(1));
+        app.job_poll = None;
+        app.update_status();
+        assert!(app.jobs.is_empty(), "the stale details are gone");
+        assert!(
+            app.job_poll.is_some(),
+            "but a paused Session keeps asking, so the line returns with the read"
+        );
     }
 
     #[test]
