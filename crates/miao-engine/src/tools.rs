@@ -37,7 +37,7 @@ pub enum ToolError {
     External(String),
     #[error("context exceeds 64 KiB budget")]
     ContextBudget,
-    #[error("path is outside the configured workspace")]
+    #[error("path is outside the configured workspace; copy the file into the workspace, or have the host grant it as a read-only reference")]
     OutsideWorkspace,
     #[error("file must be regular UTF-8 text of at most 32768 bytes")]
     InvalidFile,
@@ -2767,7 +2767,7 @@ impl Tools {
     fn all_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions=vec![ToolDefinition {
             name:"read_file".into(),
-            description:"Read a UTF-8 file or PDF under the configured workspace. Text reads are limited to 32768 bytes; larger files return the first window (truncated, with total_lines and a note) — pass a 1-based line offset and a line limit (up to 2000 lines) to read further windows. PDF reads return page text and page images; pass pages such as 1-3,5 (at most 20 pages) to select pages.".into(),
+            description:"Read a UTF-8 file or PDF under the configured workspace or a host-granted read-only reference. Text reads are limited to 32768 bytes; larger files return the first window (truncated, with total_lines and a note) — pass a 1-based line offset and a line limit (up to 2000 lines) to read further windows. PDF reads return page text and page images; pass pages such as 1-3,5 (at most 20 pages) to select pages.".into(),
             input_schema:json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":2000},"pages":{"type":"string"}},"required":["path"],"additionalProperties":false}),
         },ToolDefinition {
             name:"list_files".into(),
@@ -2899,8 +2899,8 @@ impl Tools {
             }
         }
         if self.process_enabled() {
-            definitions.push(ToolDefinition{name:"run_command".into(),description:format!("Run an explicit argv in a workspace-write sandbox. Timeout 1..{} ms; stdout/stderr bounded to 32768 bytes each. No implicit shell and no background lifetime. pty merges stdout/stderr behind a terminal. Requires process permission.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":128},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["argv"],"additionalProperties":false})});
-            definitions.push(ToolDefinition{name:"bash".into(),description:format!("Run a shell command line (bash -c) in a workspace-write sandbox. Timeout 1..{} ms; output bounded to 32768 bytes. pty merges stdout/stderr behind a terminal. Requires process permission.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"command":{"type":"string","minLength":1},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["command"],"additionalProperties":false})});
+            definitions.push(ToolDefinition{name:"run_command".into(),description:format!("Run an explicit argv in a workspace-write sandbox. Timeout 1..{} ms; stdout/stderr bounded to 32768 bytes each. No implicit shell and no background lifetime. pty merges stdout/stderr behind a terminal. Requires process permission. Files written outside the workspace cannot be read back with read_file or read_image.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":128},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["argv"],"additionalProperties":false})});
+            definitions.push(ToolDefinition{name:"bash".into(),description:format!("Run a shell command line (bash -c) in a workspace-write sandbox. Timeout 1..{} ms; output bounded to 32768 bytes. pty merges stdout/stderr behind a terminal. Requires process permission. Files written outside the workspace cannot be read back with read_file or read_image.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"command":{"type":"string","minLength":1},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["command"],"additionalProperties":false})});
         }
         if self.background_enabled() {
             let mut start = definitions
@@ -2909,7 +2909,7 @@ impl Tools {
                 .expect("background requires process")
                 .clone();
             start.name = "start_job".into();
-            start.description="Admit a sandboxed foreground-sized command as a background job. Returns queued job_id; the job survives turn cancel, but runtime shutdown cancels it. Existing-file edits must account for external-writer races. Pass eta_ms when you can estimate how long it will run: the operator then sees a remaining-time countdown while it runs instead of a bare elapsed clock.".into();
+            start.description="Admit a sandboxed foreground-sized command as a background job. Returns queued job_id; the job survives turn cancel, but runtime shutdown cancels it. Existing-file edits must account for external-writer races. Pass eta_ms when you can estimate how long it will run: the operator then sees a remaining-time countdown while it runs instead of a bare elapsed clock. Files written outside the workspace cannot be read back with read_file or read_image.".into();
             // The estimate is display only, so it is declared on the background
             // face alone: a foreground `run_command` has an answer inline and
             // nobody waits beside it.
