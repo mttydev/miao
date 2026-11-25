@@ -32,6 +32,10 @@ pub struct JobRow {
     /// waiting line turns this into the countdown; without it the line can only
     /// count up.
     pub eta_ms: Option<u64>,
+    /// The bound the caller declared for the run. The engine kills the job at
+    /// that deadline, so a row still claiming `running` long past it cannot be
+    /// live: the waiting line must not keep a clock on it.
+    pub timeout_ms: Option<u64>,
     /// When the job last wrote output. A job that has gone quiet for minutes is
     /// the one a reader waiting on it needs told about.
     pub last_output_at_ms: Option<u64>,

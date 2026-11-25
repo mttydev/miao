@@ -2569,6 +2569,7 @@ mod tests {
             command: detail.into(),
             started_at_ms: None,
             eta_ms: None,
+            timeout_ms: None,
             last_output_at_ms: None,
             subagent,
         }

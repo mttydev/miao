@@ -386,6 +386,58 @@ async fn crash_reconciliation_preserves_unknown_running_state_without_replay() {
     );
 }
 
+/// A job is not vouched for by a lease this very process holds: a Runtime
+/// created now owns no task that an earlier one in the same process started,
+/// so honouring our own pid left the row `running` forever after an in-process
+/// engine restart. The Session then waited on a job with nothing behind it -
+/// once for over a day - with no way to end the wait.
+#[tokio::test]
+async fn a_job_whose_lease_this_process_holds_is_reclaimed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store
+        .admit(Input {
+            agent_references: Default::default(),
+            command: None,
+            session_id: "s".into(),
+            input_id: "one".into(),
+            prompt: "submit".into(),
+            delivery: Delivery::Steer,
+        })
+        .await
+        .unwrap();
+    store.promote("s", true).await.unwrap();
+    store.start_run("s", "run").await.unwrap();
+    let input = json!({"command":"sleep 600","timeout_ms":600_000});
+    store
+        .assistant_reply(
+            "s",
+            "run",
+            None,
+            json!([{"type":"tool_use","id":"call","name":"start_job","input":input}]),
+        )
+        .await
+        .unwrap();
+    store.mark_dispatched("s", "run", "call").await.unwrap();
+    let admitted = store.create_job("s", "run", "call", input).await.unwrap();
+    let id = admitted["job_id"].as_str().unwrap().to_string();
+    store.start_job("s", &id).await.unwrap();
+    // The restart: the durable lease still names this pid and is fresh, but
+    // the Runtime that started the job is gone.
+    store.claim_session("s", 60_000).await.unwrap();
+
+    store.recover_jobs_unowned().await.unwrap();
+    assert_eq!(
+        store.job("s", &id).await.unwrap().unwrap()["state"],
+        "unknown",
+        "a job this runtime cannot own is not left claiming to run"
+    );
+    // The answer carries the hard bound, so a client can tell a live row from
+    // one whose task is gone.
+    let jobs = store.jobs("s").await.unwrap();
+    assert_eq!(jobs[0]["timeout_ms"], 600_000);
+}
+
 #[tokio::test]
 async fn job_completion_after_idle_admits_once_and_wakes_the_existing_owner() {
     let dir = tempfile::tempdir().unwrap();

@@ -2016,6 +2016,10 @@ impl Store {
                     "output": output,
                     "started_at_ms": started_at_ms.map(|at| at as u64),
                     "eta_ms": input["eta_ms"].as_u64(),
+                    // The hard bound, unlike the estimate above: a client can
+                    // tell a live job from a row whose task is gone (the
+                    // engine kills a job at this deadline).
+                    "timeout_ms": input["timeout_ms"].as_u64(),
                 }))
             })?;
             Ok(rows.collect::<Result<_, _>>()?)
@@ -2151,7 +2155,18 @@ impl Store {
                 let mut stmt=tx.prepare("SELECT j.id,j.session_id,j.state,l.last_ms,l.interval_ms,l.owner_pid FROM engine_job j LEFT JOIN engine_lease l ON l.session_id=j.session_id WHERE j.state IN ('queued','running')")?;
                 let rows=stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<i64>>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,Option<u32>>(5)?)))?;
                 rows.collect::<Result<Vec<_>,_>>()?.into_iter()
-                    .filter(|(_,_,_,last,interval,pid)| !honor_leases || !last.is_some_and(|last| lease_live(last, interval.unwrap_or(1), *pid)))
+                    // A lease held by *this* process does not vouch for the
+                    // job: a Runtime created now owns no task that an earlier
+                    // one in the same process started. Honouring our own pid
+                    // left those jobs `running` forever after an in-process
+                    // engine restart, which paused the Session with no job to
+                    // wait for and no way out. Same rule as Session recovery:
+                    // reclaim unless a *different* live process holds it.
+                    .filter(|(_,_,_,last,interval,pid)| {
+                        !honor_leases
+                            || *pid == Some(std::process::id())
+                            || !last.is_some_and(|last| lease_live(last, interval.unwrap_or(1), *pid))
+                    })
                     .map(|(id,session,state,_,_,_)|(id,session,state))
                     .collect()
             };
