@@ -2441,11 +2441,21 @@ fn transcript_lines(
     for entry in &transcript.entries {
         match entry {
             Entry::User { text, .. } => {
-                // The operator's own words as one quiet line per row: an accent
-                // `❯` and the text. No panel, no background band, no rules above
-                // and below — the prompt is a line the person typed, not a box
-                // something was put into, and framing it made a short question
-                // take five rows of screen.
+                // The operator's own words: an accent `❯` and the text on a
+                // band of the theme's panel tone, so a prompt is recognisable
+                // at a glance in a long transcript. The band is still one row
+                // per line of input — no rules above and below, no padding
+                // rows — because framing the prompt as a box made a short
+                // question take five rows of screen. The renderer pads a row
+                // whose `bg` is set out to the pane edge, so the band stays
+                // continuous across wrapped rows and reaches the column. A
+                // monochrome terminal has no panel tone to paint, and the
+                // padding that would follow is invisible but real: it would
+                // land in a copied selection, so it adds no band at all.
+                let band = match palette.surface {
+                    Color::Reset => Style::new(),
+                    surface => Style::new().bg(surface),
+                };
                 anchors.push((
                     rows.len(),
                     text.lines().next().unwrap_or_default().to_string(),
@@ -2455,7 +2465,8 @@ fn transcript_lines(
                         Line::from(vec![
                             Span::styled("❯ ", Style::new().fg(palette.primary)),
                             Span::styled(line.to_string(), Style::new().fg(palette.text)),
-                        ]),
+                        ])
+                        .style(band),
                         2,
                     ));
                 }
@@ -7582,10 +7593,11 @@ mod tests {
 
     #[test]
     fn the_prompt_renders_as_one_marked_line() {
-        // The operator's own words are a line, not a panel: an accent `❯`, the
-        // text, and nothing framing it. The panel it used to be drew a rule
-        // above and below plus a background band, so a one-line question took
-        // five rows of screen and read as a box something had been put into.
+        // The operator's own words are one line per line of input: an accent
+        // `❯`, the text, and the theme's panel tone behind them so the prompt
+        // is recognisable at a glance. The panel it used to be drew a rule
+        // above and below as well, so a one-line question took five rows of
+        // screen; the band alone keeps the marker and costs no extra rows.
         let palette =
             crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
                 .expect("theme");
@@ -7612,13 +7624,18 @@ mod tests {
         assert_eq!(text(&lines[0]), "", "the scrollbox opens with a blank row");
         assert_eq!(text(&lines[1]), "❯ question", "the prompt is one line");
         assert_eq!(
-            lines[1].line.style.bg, None,
-            "and carries no background band"
+            lines[1].line.style.bg,
+            Some(palette.surface),
+            "and sits on the theme's panel band"
+        );
+        assert_eq!(
+            text(&lines[2]),
+            "",
+            "the band adds no padding row: the prompt's own blank row follows it"
         );
         // Prose opens below the prompt's trailing blank row, under a muted
         // bullet, and the step closes with the check footer naming the agent
         // and the model.
-        assert_eq!(text(&lines[2]), "");
         assert_eq!(text(&lines[3]), "");
         assert!(
             text(&lines[4]).starts_with("● answer"),
@@ -7627,6 +7644,35 @@ mod tests {
         );
         assert_eq!(text(&lines[5]), "");
         assert_eq!(text(&lines[6]), "  ✓ General · glm-5");
+    }
+
+    /// A monochrome palette has no panel tone to paint. The prompt keeps its
+    /// marker, and the invisible band must not add trailing cells that a copy
+    /// would pick up.
+    #[test]
+    fn a_monochrome_prompt_carries_no_band() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme")
+                .monochrome();
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let transcript = Transcript {
+            entries: vec![Entry::User {
+                text: "question".into(),
+                seq: 1,
+            }],
+            ..Transcript::default()
+        };
+        let lines = transcript_lines(&transcript, &theme, false, None).rows;
+        assert_eq!(
+            row_text(&lines[1]),
+            "❯ question",
+            "the marker and the text survive"
+        );
+        assert_eq!(lines[1].line.style.bg, None, "no invisible band is added");
     }
 
     /// The footer names the agent and the model only when the step differs from
@@ -9599,6 +9645,62 @@ mod tests {
                 "a continuation hangs under the marker column: {row:?}"
             );
         }
+        for line in wrapped.iter().filter(|line| !line.spans.is_empty()) {
+            assert_eq!(
+                line.style.bg,
+                Some(palette.surface),
+                "the prompt band survives every wrapped row: {:?}",
+                line_texts(std::slice::from_ref(line))
+            );
+        }
+    }
+
+    /// The band is a row background, not a span tint: the renderer paints it
+    /// out to the pane's last column, so the prompt reads as one block the way
+    /// the reference layout's input box does.
+    #[test]
+    fn the_prompt_band_reaches_the_pane_edge() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let transcript = Transcript {
+            entries: vec![Entry::User {
+                text: "short".into(),
+                seq: 1,
+            }],
+            ..Transcript::default()
+        };
+        let width = 40u16;
+        let rows = transcript_lines(&transcript, &theme, false, None).rows;
+        let mut pane = TranscriptPane::new(theme);
+        pane.set_rows(rows);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 6)).expect("terminal");
+        terminal
+            .draw(|frame| pane.render(frame, frame.area()))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let cell = |x: u16, y: u16| buffer.cell(ratatui::prelude::Position::new(x, y));
+        let prompt_row = (0..6)
+            .find(|y| (0..width).any(|x| cell(x, *y).is_some_and(|c| c.symbol() == "❯")))
+            .expect("the prompt is painted");
+        let row = (0..width)
+            .map(|x| {
+                cell(x, prompt_row)
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect::<String>();
+        assert!(row.trim_start().starts_with("❯ short"), "{row:?}");
+        assert_eq!(
+            cell(width - 1, prompt_row).map(|c| c.bg),
+            Some(palette.surface),
+            "the band reaches the pane's last column"
+        );
     }
 
     #[test]
