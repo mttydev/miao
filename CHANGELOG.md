@@ -16,6 +16,17 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-25
+
+### Added
+- **tui**: tint the operator prompt with the theme's panel tone (#3394) (`0eac8a9e0c`)
+
+### Fixed
+- **tui**: stop drawing a wait the poll no longer observes (#3395) (`423fe88ab4`)
+- **engine**: shrink inline images to the provider's limits (#3393) (`f389215a95`)
+- **engine**: make the workspace read boundary actionable (#3392) (`464366f546`)
+- **tui**: wait for the other miao window instead of failing the upgrade (#3391) (`7b091dee07`)
+
 ## [0.5.3] - 2026-11-24
 
 ### Fixed
