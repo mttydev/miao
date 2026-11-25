@@ -1655,6 +1655,9 @@ pub(crate) async fn request_with_retry(
                 && !last_failure_detail
                     .as_deref()
                     .is_some_and(crate::media::image_input_rejected)
+                && !last_failure_detail
+                    .as_deref()
+                    .is_some_and(crate::media::image_size_rejected)
             {
                 self_healed = true;
                 announce_retry(

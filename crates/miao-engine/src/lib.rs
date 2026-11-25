@@ -41,6 +41,7 @@ mod history;
 pub mod hooks;
 pub mod host;
 pub mod http;
+mod imaging;
 mod jobs;
 pub mod knowledge;
 pub mod lsp;

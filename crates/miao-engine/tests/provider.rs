@@ -368,7 +368,9 @@ async fn anthropic_defaults_keep_the_plain_system_prompt_uncached() {
 async fn anthropic_merges_split_tool_results_and_keeps_media_inside_the_result() {
     let (url, mut requests, server) = common::endpoint(vec![(200, text_stream())]).await;
     let provider = Anthropic::new(url, "fixture-key".into(), "fixture-model".into()).unwrap();
-    let image = json!({"type":"image","mime":"image/png","data":"aGk="});
+    // A real one-pixel PNG: the request copy is normalized now, so fake bytes
+    // would be replaced with a note instead of reaching the provider body.
+    let image = json!({"type":"image","mime":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"});
     let opened = ModelRequest {
         system: String::new(),
         messages: vec![
