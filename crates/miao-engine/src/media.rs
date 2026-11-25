@@ -78,9 +78,12 @@ fn normalize_parts(
         if !image && part["type"] != "file" {
             continue;
         }
+        // Owned so a branch that rewrites the whole part does not hold a
+        // borrow of it.
         let mime = part["mime"]
             .as_str()
-            .ok_or_else(|| ProviderError::Stream("invalid media type".into()))?;
+            .ok_or_else(|| ProviderError::Stream("invalid media type".into()))?
+            .to_owned();
         let name = part["metadata"]["name"].as_str().unwrap_or("attachment");
         if mime.starts_with("text/") {
             let data = part["data"]
@@ -107,6 +110,32 @@ fn normalize_parts(
                 .map(|path| format!(" (local file: {path})"))
                 .unwrap_or_default();
             *part = json!({"type":"text","text":format!("[attachment not sent: \"{name}\"{location}, {mime}]\nThis model/provider cannot receive {mime} directly; read the file with tools (for PDFs: pdftotext, or render pages to images with pdftoppm and read them).\nTell the user that this attachment could not be sent to the model directly.")});
+        }
+        // An image the provider would reject on size is the one refusal a
+        // request cannot recover from: the durable bytes stay as stored, so
+        // every later turn replays the same failure. Shrink the outgoing copy
+        // to the provider-safe side and budget instead. An image that cannot be
+        // measured or shrunk becomes a note, because sending bytes a provider
+        // has already refused would fail the whole turn.
+        if mime.starts_with("image/") {
+            let (current, data) = (
+                part["mime"].as_str().unwrap_or_default().to_owned(),
+                part["data"].as_str().unwrap_or_default().to_owned(),
+            );
+            match crate::imaging::normalize(&current, &data) {
+                Ok(Some((shrunk_mime, shrunk_data))) => {
+                    part["mime"] = json!(shrunk_mime);
+                    part["data"] = json!(shrunk_data);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    let name = part["metadata"]["name"]
+                        .as_str()
+                        .unwrap_or("attachment")
+                        .to_owned();
+                    *part = json!({"type":"text","text":format!("[image attachment not sent: \"{name}\" cannot be measured or resized to the provider's image limits]")});
+                }
+            }
         }
     }
     Ok(())
@@ -186,6 +215,23 @@ pub(crate) fn image_input_rejected(detail: &str) -> bool {
     .iter()
     .any(|phrase| detail.contains(phrase));
     names_image && refuses
+}
+
+/// A refusal that names an oversized image. The body is deterministic — the
+/// same bytes cannot produce a different answer — so the one immediate replay
+/// a gateway hiccup earns would only spend another request on the same
+/// refusal. `imaging` shrinks images before this can happen; this predicate
+/// covers an image it could not decode.
+pub(crate) fn image_size_rejected(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "image_dimensions_too_large",
+        "exceed max allowed size",
+        "image_too_large",
+        "image size exceeds",
+    ]
+    .iter()
+    .any(|token| detail.contains(token))
 }
 
 /// Attached text reaches the model as a file block: the TS runner gives the
@@ -397,7 +443,23 @@ mod tests {
     }
 
     fn image_part(name: &str) -> Value {
-        json!({"type":"image","mime":"image/png","data":"aGk=","metadata":{"name":name}})
+        json!({"type":"image","mime":"image/png","data":tiny_png(),"metadata":{"name":name}})
+    }
+
+    fn tiny_png() -> String {
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            2,
+            image::Rgb([255, 0, 0]),
+        ));
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode fixture");
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
     fn media_request(content: Value) -> ModelRequest {
@@ -415,10 +477,47 @@ mod tests {
 
     #[test]
     fn a_model_declared_text_only_still_receives_the_picture() {
-        let request = media_request(json!([image_part("shot.png")]));
+        let part = image_part("shot.png");
+        let data = part["data"].clone();
+        let request = media_request(json!([part]));
         let normalized = normalize(request, "openai-chat", &["text".to_owned()]).unwrap();
         assert_eq!(normalized.messages[0].content[0]["type"], "image");
-        assert_eq!(normalized.messages[0].content[0]["data"], "aGk=");
+        assert_eq!(normalized.messages[0].content[0]["data"], data);
+    }
+
+    #[test]
+    fn an_oversized_image_part_is_shrunk_for_the_wire() {
+        let mut image = image::RgbImage::new(4_000, 200);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            let value = ((x * 7 + y * 13) % 251) as u8;
+            *pixel = image::Rgb([value, 128, 255 - value]);
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode fixture");
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let request = media_request(json!([
+            {"type":"tool_result","tool_use_id":"call","content":[
+                {"type":"image","mime":"image/png","data":data,"metadata":{"name":"sheet.png"}}
+            ]}
+        ]));
+        let normalized = normalize(request, "anthropic", &[]).unwrap();
+        let part = &normalized.messages[0].content[0]["content"][0];
+        assert_eq!(part["type"], "image");
+        let rewritten = base64::engine::general_purpose::STANDARD
+            .decode(part["data"].as_str().unwrap())
+            .unwrap();
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&rewritten))
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert!(width <= 2_000 && height <= 2_000, "{width}x{height}");
+        assert!(rewritten.len() <= 512_000, "{}", rewritten.len());
     }
 
     #[test]
