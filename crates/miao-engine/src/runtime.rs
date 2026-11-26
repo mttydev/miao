@@ -1290,6 +1290,11 @@ impl Runtime {
                         .heartbeat_lease(&session, 30_000)
                         .await;
                 }
+                // Keep the WAL from growing past what a reader of the ledger
+                // should have to follow. A timer, not a commit: the checkpoint
+                // holds the WAL write lock, and doing it after every write is
+                // what made other windows wait seconds for their own.
+                let _ = heartbeat_inner.store.checkpoint_wal().await;
             }
         });
         *runtime.inner.heartbeat.lock().await = Some(heartbeat);
