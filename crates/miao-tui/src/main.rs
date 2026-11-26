@@ -225,6 +225,7 @@ fn launch(options: Options) -> ExitCode {
         db: options.db,
         model: options.model,
         config_dir: options.config_dir,
+        config_sources: None,
         session: options.session,
         continue_last: options.continue_last,
         prompt: options.prompt,

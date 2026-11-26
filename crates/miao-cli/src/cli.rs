@@ -225,6 +225,7 @@ fn launch(args: impl Iterator<Item = String>) -> Result<miao_tui::Launch, String
         db,
         model,
         config_dir,
+        config_sources: None,
         session,
         continue_last,
         prompt,
@@ -2302,26 +2303,53 @@ fn codegraph_enabled(layers: &[PathBuf], env: &impl Fn(&str) -> Option<String>) 
 /// The model the product configuration names as its default. Rust commands
 /// honour it the way the product does, so a machine with one configured model
 /// needs no flags at all.
-fn configured_model(config_dir: Option<&std::path::Path>) -> Option<String> {
-    let dir = config_dir?;
-    for name in ["miao.jsonc", "miao.json"] {
-        let path = dir.join(name);
-        if !path.is_file() {
-            continue;
+/// The model the configuration names, from the highest-precedence layer.
+///
+/// Layers are the ordered directories and files the product applies, so the
+/// last one that names a model wins, the way the merged document would.
+fn configured_model(layers: &[PathBuf], env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let mut configured = None;
+    for layer in layers {
+        if layer.is_dir() {
+            for name in ["miao.jsonc", "miao.json"] {
+                if let Some(model) = model_in_file(&layer.join(name)) {
+                    configured = Some(model);
+                }
+            }
+        } else if let Some(model) = model_in_file(layer) {
+            configured = Some(model);
         }
-        let text = std::fs::read_to_string(&path).ok()?;
-        let parsed: serde_json::Value = serde_json::from_str(&strip_comments(&text)).ok()?;
-        let configured = parsed.get("model").and_then(|value| value.as_str())?;
-        // Routes are keyed by bare model id; the product spells it
-        // `provider/model`.
-        return Some(
-            configured
-                .rsplit_once('/')
-                .map(|(_, model)| model.to_string())
-                .unwrap_or_else(|| configured.to_string()),
-        );
     }
-    None
+    if let Some(file) = env("MIAO_CONFIG") {
+        if let Some(model) = model_in_file(std::path::Path::new(&file)) {
+            configured = Some(model);
+        }
+    }
+    if let Some(text) = env("MIAO_CONFIG_CONTENT") {
+        if let Some(model) = model_in_text(&text) {
+            configured = Some(model);
+        }
+    }
+    configured
+}
+
+fn model_in_file(path: &std::path::Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+    model_in_text(&std::fs::read_to_string(path).ok()?)
+}
+
+fn model_in_text(text: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(&strip_comments(text)).ok()?;
+    let configured = parsed.get("model").and_then(|value| value.as_str())?;
+    // Routes are keyed by bare model id; the product spells it `provider/model`.
+    Some(
+        configured
+            .rsplit_once('/')
+            .map(|(_, model)| model.to_string())
+            .unwrap_or_else(|| configured.to_string()),
+    )
 }
 
 /// Where the product keeps its configuration. Resolving this in one place
@@ -2332,6 +2360,42 @@ fn product_config_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("miao"))
         })
+}
+
+/// The global config directory the environment names, the same one
+/// `product_config_dir(None)` resolves. A caller's value that equals it is the
+/// defaulted directory rather than an operator's explicit choice.
+fn default_config_dir(env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    env("MIAO_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".config").join("miao")))
+}
+
+/// Encode ordered config layers as the engine's `--config-sources` plan.
+///
+/// A layer is a directory (`.miao/`, a config directory) or a single document
+/// (a project `miao.jsonc`); the engine reads a `dir` entry with the directory
+/// rules and a `file` entry as one document, so the kind has to travel with the
+/// path. The environment's file and inline overrides ride above every layer.
+fn config_plan(layers: &[PathBuf], env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let mut plan: Vec<serde_json::Value> = layers
+        .iter()
+        .map(|layer| {
+            if layer.is_dir() {
+                serde_json::json!({ "dir": layer.display().to_string() })
+            } else {
+                serde_json::json!({ "file": layer.display().to_string() })
+            }
+        })
+        .collect();
+    if let Some(file) = env("MIAO_CONFIG") {
+        plan.push(serde_json::json!({ "file": file }));
+    }
+    if let Some(content) = env("MIAO_CONFIG_CONTENT") {
+        plan.push(serde_json::json!({ "content": content }));
+    }
+    let encoded = serde_json::to_string(&plan).ok()?;
+    (encoded.len() <= 65536).then_some(encoded)
 }
 
 /// The config directories one start reads, lowest priority first. An explicit
@@ -2683,19 +2747,22 @@ fn prepare_tui_engine(launch: &mut miao_tui::Launch) {
             std::env::set_var("MIAO_ENGINE_REFERENCES_CONFIG", references);
         }
     }
+    // A TUI started without --config-dir still needs the product's providers:
+    // read the same layered stack the engine start will forward, and hand the
+    // engine that stack as a plan so its policy is derived from the project
+    // layers too instead of the global directory alone.
+    let layers = config_layers(&launch.workspace, launch.config_dir.as_deref(), &|name| {
+        std::env::var(name).ok()
+    });
+    launch.config_sources = config_plan(&layers, &|name| std::env::var(name).ok());
     if std::env::var_os("MIAO_ENGINE_MODEL_ROUTES_CONFIG").is_some() {
         return;
     }
     let model = launch
         .model
         .clone()
-        .or_else(|| configured_model(launch.config_dir.as_deref()))
+        .or_else(|| configured_model(&layers, &|name| std::env::var(name).ok()))
         .unwrap_or_default();
-    // A TUI started without --config-dir still needs the product's providers:
-    // read the same layered stack the engine start will forward.
-    let layers = config_layers(&launch.workspace, launch.config_dir.as_deref(), &|name| {
-        std::env::var(name).ok()
-    });
     let Ok(mut routes) = model_routes(&layers, &model) else {
         return;
     };
@@ -5007,7 +5074,14 @@ fn engine_argv_with(
     // The engine reads the server list from this variable (it prefers it over a
     // manifest file), so a configured MCP section reaches every command with no
     // extra plumbing. Absent configuration leaves the variable alone.
-    let layers = config_layers(workspace, config_dir, &env);
+    //
+    // A caller that resolved the global directory only to have a value (every
+    // internal command used to) must not collapse the stack: the default
+    // directory counts as absent, so the managed, global and project layers all
+    // reach the engine. A genuinely different --config-dir keeps its one-dir
+    // shape.
+    let explicit = config_dir.filter(|dir| Some(*dir) != default_config_dir(&env).as_deref());
+    let layers = config_layers(workspace, explicit, &env);
     if let Ok(servers) = mcp_servers(&layers) {
         if !servers.is_empty() {
             if let Ok(encoded) = serde_json::to_string(&servers) {
@@ -5033,29 +5107,23 @@ fn engine_argv_with(
         // permissions reach the engine they name. The env file and inline
         // document ride above the directories, the same order the product
         // applies them in.
-        _ if config_dir.is_some() => {
-            if let Some(dir) = config_dir {
+        _ if explicit.is_some() => {
+            if let Some(dir) = explicit {
                 argv.push("--config-dir".into());
                 argv.push(dir.display().to_string());
             }
         }
         [] => {}
-        [only] if env("MIAO_CONFIG").is_none() && env("MIAO_CONFIG_CONTENT").is_none() => {
+        [only]
+            if only.is_dir()
+                && env("MIAO_CONFIG").is_none()
+                && env("MIAO_CONFIG_CONTENT").is_none() =>
+        {
             argv.push("--config-dir".into());
             argv.push(only.display().to_string());
         }
-        many => {
-            let mut plan: Vec<serde_json::Value> = many
-                .iter()
-                .map(|dir| serde_json::json!({ "dir": dir.display().to_string() }))
-                .collect();
-            if let Some(file) = env("MIAO_CONFIG") {
-                plan.push(serde_json::json!({ "file": file }));
-            }
-            if let Some(content) = env("MIAO_CONFIG_CONTENT") {
-                plan.push(serde_json::json!({ "content": content }));
-            }
-            if let Ok(encoded) = serde_json::to_string(&plan) {
+        _ => {
+            if let Some(encoded) = config_plan(&layers, &env) {
                 argv.push("--config-sources".into());
                 argv.push(encoded);
             }
@@ -6185,10 +6253,17 @@ pub fn run(args: Vec<String>) -> std::process::ExitCode {
             let workspace = workspace
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             let db = db.unwrap_or_else(|| default_db(&workspace));
+            let explicit_config_dir = config_dir.clone();
             let config_dir = config_dir.or_else(|| product_config_dir(None));
             let model = model
                 .or_else(|| std::env::var("MIAO_ENGINE_MODEL").ok())
-                .or_else(|| configured_model(config_dir.as_deref()))
+                .or_else(|| {
+                    let layers =
+                        config_layers(&workspace, explicit_config_dir.as_deref(), &|name| {
+                            std::env::var(name).ok()
+                        });
+                    configured_model(&layers, &|name| std::env::var(name).ok())
+                })
                 .unwrap_or_else(|| "unavailable/model".into());
             match prompt {
                 Ok(prompt) => {

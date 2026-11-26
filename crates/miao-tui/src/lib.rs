@@ -55,6 +55,11 @@ pub struct Launch {
     /// The product's configuration directory, forwarded to the engine as
     /// `--config-dir` so policy and LSP derivation match the TS host.
     pub config_dir: Option<PathBuf>,
+    /// The layered config sources the launcher resolved, encoded as the
+    /// engine's `--config-sources` plan. `Some` supersedes `config_dir`: the
+    /// plan carries the managed, global and project layers, so a project's
+    /// permissions, sandbox, budget and `readScope` reach the engine.
+    pub config_sources: Option<String>,
     pub session: Option<String>,
     pub continue_last: bool,
     pub prompt: Option<String>,
@@ -180,11 +185,15 @@ async fn drive(
     preferences: terminal::Preferences,
     mut termination: platform::signals::Signals,
 ) -> Result<(), Box<dyn Error>> {
+    let config = match launch.config_sources.as_deref() {
+        Some(plan) => engine::ConfigSource::Plan(plan),
+        None => engine::ConfigSource::Dir(launch.config_dir.as_deref()),
+    };
     match engine::settings(
         &launch.workspace,
         launch.db,
         launch.model,
-        launch.config_dir,
+        config,
         launch.auto,
         launch.agent.as_deref(),
         launch.remote_host.clone(),
