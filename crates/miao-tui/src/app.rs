@@ -1957,18 +1957,35 @@ impl App {
             AppEvent::InputSettled {
                 session_id,
                 input_id,
-                cancelled,
+                ..
             } => {
-                self.echoes.retain_mut(|echo| {
-                    if echo.session_id != session_id || echo.input_id != input_id {
-                        return true;
+                // The band above the composer is the last snapshot's pending
+                // list plus the echoes. It used to keep a promoted echo until
+                // the next projection retired it — but that projection can
+                // arrive *before* this event (it then kept the echo, because
+                // the list did not name it pending), and nothing recomputed the
+                // band afterwards: the settled prompt stayed on screen until
+                // something else reopened the Session. A settled input leaves
+                // the band here, whatever the order of the two events.
+                self.echoes
+                    .retain(|echo| echo.session_id != session_id || echo.input_id != input_id);
+                // The snapshot's own copy has to go too: a projection that
+                // raced the promotion painted the row from it.
+                if self.session_id().as_deref() == Some(session_id.as_str()) {
+                    if let Some(index) = self
+                        .state
+                        .pending_input_ids
+                        .iter()
+                        .position(|id| id == &input_id)
+                    {
+                        self.state.pending_input_ids.remove(index);
+                        if index < self.state.pending_prompts.len() {
+                            self.state.pending_prompts.remove(index);
+                        }
+                        self.state.pending = self.state.pending_prompts.len();
                     }
-                    echo.settled = true;
-                    !cancelled
-                });
-                if cancelled {
-                    self.show_queued_prompts();
                 }
+                self.show_queued_prompts();
             }
             AppEvent::InputRetrieved { prompt, delivery } => {
                 self.forget_echo(&prompt);
@@ -8380,8 +8397,12 @@ mod tests {
         assert!(app.echoes.is_empty(), "the engine's row replaced the echo");
     }
 
+    /// A settled input leaves the band at once. The projection that names it
+    /// promoted can arrive before this event, and the echo was kept then
+    /// because the list did not hold it — recomputing only on the projection
+    /// left a promoted prompt on screen until an unrelated reopen.
     #[test]
-    fn a_promoted_prompt_leaves_the_queue_with_the_projection_of_its_message() {
+    fn a_promoted_prompt_leaves_the_queue_when_it_settles() {
         let (mut app, mut requests) = recording_session("ses_a");
         let input_id = send(&mut app, "ship it", &mut requests);
         app.handle(AppEvent::InputSettled {
@@ -8389,10 +8410,34 @@ mod tests {
             input_id,
             cancelled: false,
         });
-        // The message is not on screen until the projection lands, so the
-        // echo outlives the event that promoted it.
-        assert_eq!(app.shell.queued_prompts(), ["ship it"]);
+        assert!(app.shell.queued_prompts().is_empty());
+        // A projection with nothing pending cannot bring it back.
         app.handle(projection("ses_a", SessionState::default()));
+        assert!(app.shell.queued_prompts().is_empty());
+    }
+
+    /// The snapshot's own copy of a pending input is dropped by the settlement
+    /// too: a projection that raced the promotion painted the band from it, and
+    /// only the echo was retired before.
+    #[test]
+    fn a_settled_input_leaves_the_snapshot_copy_of_the_queue() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        let input_id = send(&mut app, "ship it", &mut requests);
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                pending: 1,
+                pending_prompts: vec!["ship it".into()],
+                pending_input_ids: vec![input_id.clone()],
+                ..SessionState::default()
+            },
+        ));
+        assert_eq!(app.shell.queued_prompts(), ["ship it"]);
+        app.handle(AppEvent::InputSettled {
+            session_id: "ses_a".into(),
+            input_id,
+            cancelled: false,
+        });
         assert!(app.shell.queued_prompts().is_empty());
     }
 
