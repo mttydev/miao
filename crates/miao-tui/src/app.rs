@@ -1162,14 +1162,33 @@ impl App {
             // The column decides as much as the row: the transcript shares
             // these rows, so only a pointer inside the sidebar opens its
             // tooltip. The landing carries the same column.
+            let theme = self.shell.theme().clone();
             let tip = self
                 .shell
                 .sidebar
                 .as_ref()
                 .and_then(|sidebar| sidebar.hover_tip(at.0, at.1))
                 .map(str::to_string);
-            if let Some(tip) = tip {
-                crate::pane::render_hover_tip(frame, at, &tip, &self.shell.theme().clone());
+            match tip {
+                Some(tip) => crate::pane::render_hover_tip(frame, at, &tip, &theme),
+                None => {
+                    // A table row clips its cells to keep the grid; hovering it
+                    // shows the whole row, column by column. Only the Session
+                    // screen paints that transcript: the landing keeps the last
+                    // frame's hit regions, which must not answer there.
+                    if self.screen == Screen::Session {
+                        if let Some(hover) = self.shell.transcript.hover_table(at.0, at.1) {
+                            let hover = hover.clone();
+                            crate::pane::render_table_tip(
+                                frame,
+                                at,
+                                &hover.header,
+                                &hover.cells,
+                                &theme,
+                            );
+                        }
+                    }
+                }
             }
         }
         if let Some(dialog) = self.dialog.as_ref() {
@@ -1264,7 +1283,14 @@ impl App {
                     self.shell.composer.paste(&text);
                 }
             }
-            AppEvent::Focus(focused) => self.attention.set_focus(focused),
+            AppEvent::Focus(focused) => {
+                self.attention.set_focus(focused);
+                // A pointer that leaves the window stops reporting moves; the
+                // tip it left behind would stay painted until the next event.
+                if !focused {
+                    self.mouse_pos = None;
+                }
+            }
             AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
             AppEvent::Attention { kind, id } => self.announce(kind, id),
             AppEvent::Provider(frame) => self.provider(frame),
@@ -6793,6 +6819,24 @@ mod tests {
             crate::config::AttentionConfig::default(),
             startup,
         )
+    }
+
+    /// A tip is true only while the pointer is over the row. The terminal
+    /// stops reporting moves when the window loses focus, so focus loss must
+    /// clear the point or the tip would stay painted until the next event.
+    #[test]
+    fn losing_focus_clears_the_hover_point() {
+        let mut app = app();
+        app.mouse_pos = Some((10, 10));
+        app.handle(crate::event::AppEvent::Focus(false));
+        assert_eq!(app.mouse_pos, None);
+        app.mouse_pos = Some((10, 10));
+        app.handle(crate::event::AppEvent::Focus(true));
+        assert_eq!(
+            app.mouse_pos,
+            Some((10, 10)),
+            "gaining focus keeps the current point"
+        );
     }
 
     /// An app whose keymap was overridden, so a test can prove the help view

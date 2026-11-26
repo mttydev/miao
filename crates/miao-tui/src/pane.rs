@@ -1091,6 +1091,12 @@ pub struct TranscriptPane {
     /// characters own their first cell and leave the continuation empty, so a
     /// column index is a screen column.
     rendered: Vec<Vec<String>>,
+    /// Table hover payload per wrapped body line, aligned with `body`.
+    body_meta: Vec<Option<TableHover>>,
+    /// Table rows the pointer can reach on the last frame, in screen
+    /// coordinates. Rebuilt every frame from `mouse` position and the wrapped
+    /// rows, so moving off a table clears the tip without stored state.
+    table_hover: Vec<TableHoverRow>,
 }
 
 /// How long a streamed draft may lag the deltas that arrived. Re-parsing a long
@@ -1139,6 +1145,8 @@ impl TranscriptPane {
             area: Rect::default(),
             selection: None,
             rendered: Vec::new(),
+            body_meta: Vec::new(),
+            table_hover: Vec::new(),
         }
     }
 
@@ -1160,6 +1168,7 @@ impl TranscriptPane {
                 .copied()
                 .unwrap_or(self.header_body_len),
         );
+        self.body_meta.truncate(self.body.len());
         self.rows = rows;
     }
 
@@ -1174,6 +1183,7 @@ impl TranscriptPane {
         self.header = header;
         self.header_width = None;
         self.body.clear();
+        self.body_meta.clear();
         self.body_ends.clear();
         self.body_rows = 0;
         self.body_width = None;
@@ -1364,6 +1374,7 @@ impl Pane for TranscriptPane {
         let resized = content.width != self.width;
         if self.body_width != Some(content.width) || self.header_width != Some(content.width) {
             self.body.clear();
+            self.body_meta.clear();
             self.body_ends.clear();
             self.body_rows = 0;
             self.body_width = Some(content.width);
@@ -1373,14 +1384,17 @@ impl Pane for TranscriptPane {
                 let wrapped = wrap_rows(&self.header, content.width);
                 self.header_body_len = wrapped.len();
                 self.body.extend(wrapped);
+                self.body_meta
+                    .extend(std::iter::repeat_n(None, self.header_body_len));
             }
         }
         while self.body_rows < self.rows.len() {
-            let wrapped = {
+            let (wrapped, meta) = {
                 let row = &self.rows[self.body_rows];
-                wrap_rows(std::slice::from_ref(row), content.width)
+                wrap_rows_meta(std::slice::from_ref(row), content.width)
             };
             self.body.extend(wrapped);
+            self.body_meta.extend(meta);
             self.body_ends.push(self.body.len());
             self.body_rows += 1;
             #[cfg(test)]
@@ -1412,6 +1426,13 @@ impl Pane for TranscriptPane {
                 false => self.draft_rows[row - self.body.len()].clone(),
             })
             .collect::<Vec<_>>();
+        let mut visible_meta = (start..rows)
+            .take(viewport)
+            .map(|row| match row < self.body.len() {
+                true => self.body_meta.get(row).cloned().flatten(),
+                false => None,
+            })
+            .collect::<Vec<_>>();
         // Active delegated Sessions ride the tail as one block each. They sit
         // above the single running-tool row, so the host row still answers
         // "what is this Session doing" while the blocks answer "what are its
@@ -1420,8 +1441,10 @@ impl Pane for TranscriptPane {
             for line in self.subagent_lines(content.width, now_ms()) {
                 if visible.len() == viewport {
                     visible.remove(0);
+                    visible_meta.remove(0);
                 }
                 visible.push(line);
+                visible_meta.push(None);
             }
         }
         // The call in flight rides the tail as one spinner row. It takes the
@@ -1430,6 +1453,7 @@ impl Pane for TranscriptPane {
         if let Some(label) = self.running_tool.as_ref().filter(|_| self.follow) {
             if visible.len() == viewport {
                 visible.remove(0);
+                visible_meta.remove(0);
             }
             let frame = SPINNER_FRAMES[(now_ms() / 160) as usize % SPINNER_FRAMES.len()];
             // This row never passes the wrapper that clips completed rows, so
@@ -1441,6 +1465,7 @@ impl Pane for TranscriptPane {
                 format!("{frame} running {label}"),
                 Style::new().fg(palette.text_muted),
             )));
+            visible_meta.push(None);
         }
         // A compaction pass is the other work with no tool call to name: the
         // summary runs on its own model calls, and a transcript that never
@@ -1448,6 +1473,7 @@ impl Pane for TranscriptPane {
         if let Some((segment, total)) = self.running_compaction.filter(|_| self.follow) {
             if visible.len() == viewport {
                 visible.remove(0);
+                visible_meta.remove(0);
             }
             let frame = SPINNER_FRAMES[(now_ms() / 160) as usize % SPINNER_FRAMES.len()];
             let label = match total > 1 {
@@ -1459,6 +1485,7 @@ impl Pane for TranscriptPane {
                 format!("{frame} {label}"),
                 Style::new().fg(palette.text_muted),
             )));
+            visible_meta.push(None);
         }
         // Scrolling back loses the question a view belongs to: the viewport's
         // first row names the nearest prompt at or above it, painted over that
@@ -1475,6 +1502,7 @@ impl Pane for TranscriptPane {
                         Style::new().fg(palette.primary),
                     ))
                     .style(Style::new().bg(palette.surface));
+                    visible_meta[0] = None;
                 }
             }
         }
@@ -1497,6 +1525,22 @@ impl Pane for TranscriptPane {
         }
         // Borderless, like the TypeScript layout this mirrors: a frame around
         // the transcript only steals columns from the text.
+        self.table_hover = visible_meta
+            .iter()
+            .enumerate()
+            .filter_map(|(index, meta)| {
+                let meta = meta.as_ref()?;
+                Some(TableHoverRow {
+                    row: content.y + index as u16,
+                    span: (
+                        content.x + meta.offset,
+                        content.x + meta.offset + meta.width.saturating_sub(1),
+                    ),
+                    header: meta.header.clone(),
+                    cells: meta.cells.clone(),
+                })
+            })
+            .collect();
         frame.render_widget(
             Paragraph::new(visible).style(Style::new().fg(palette.text).bg(palette.background)),
             content,
@@ -1539,6 +1583,9 @@ pub struct Row {
     pub(crate) hang: u16,
     pub(crate) keep: u16,
     pub(crate) wrap: bool,
+    /// A table row's structure: the pane lays it out at the width it has
+    /// instead of folding the pre-painted line. `None` for prose.
+    pub(crate) table: Option<markdown::TableMeta>,
 }
 
 impl Row {
@@ -1549,6 +1596,7 @@ impl Row {
             hang: 0,
             keep: 0,
             wrap: true,
+            table: None,
         }
     }
 
@@ -1560,6 +1608,7 @@ impl Row {
             hang,
             keep: 0,
             wrap: true,
+            table: None,
         }
     }
 
@@ -1571,6 +1620,7 @@ impl Row {
             hang,
             keep,
             wrap: true,
+            table: None,
         }
     }
 
@@ -1581,6 +1631,19 @@ impl Row {
             hang: 0,
             keep: 0,
             wrap: false,
+            table: None,
+        }
+    }
+
+    /// A table row: `line` carries the hanging prefix only, and the table
+    /// metadata supplies the cells at wrap time.
+    fn table_hung(line: Line<'static>, table: markdown::TableMeta, hang: u16) -> Self {
+        Self {
+            line,
+            hang,
+            keep: 0,
+            wrap: false,
+            table: Some(table),
         }
     }
 }
@@ -1642,94 +1705,264 @@ fn wrap_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
 /// Wrap projected rows to `width` display cells, honoring each row's hanging
 /// prefix and clip mode.
 fn wrap_rows(rows: &[Row], width: u16) -> Vec<Line<'static>> {
+    wrap_rows_meta(rows, width).0
+}
+
+/// The cells a clipped table row still holds, and the screen cells the table
+/// occupies, so the app can show the whole row while the pointer is on it.
+#[derive(Clone)]
+pub struct TableHover {
+    pub header: Vec<String>,
+    pub cells: Vec<String>,
+    pub offset: u16,
+    pub width: u16,
+}
+
+/// One table row the pointer can reach: its screen row, the columns the table
+/// occupies, and the full cells the line had to clip.
+#[derive(Clone)]
+pub struct TableHoverRow {
+    pub row: u16,
+    pub span: (u16, u16),
+    pub header: Vec<String>,
+    pub cells: Vec<String>,
+}
+
+/// Wrap rows and, per emitted line, keep the table row it came from.
+fn wrap_rows_meta(rows: &[Row], width: u16) -> (Vec<Line<'static>>, Vec<Option<TableHover>>) {
     let width = width.max(1) as usize;
     let mut out = Vec::with_capacity(rows.len());
+    let mut hover = Vec::with_capacity(rows.len());
     for row in rows {
-        // Blank rows are spacing, not content: they pass through untouched.
-        if row.line.spans.is_empty() {
-            out.push(row.line.clone());
+        if let Some(table) = &row.table {
+            let available = width.saturating_sub(row.hang as usize).max(4);
+            let rendered = layout_table(table, available);
+            let mut spans = row.line.spans.clone();
+            spans.push(Span::styled(rendered.text, table.style));
+            out.push(Line::from(spans).style(row.line.style));
+            hover.push(match table.kind {
+                markdown::TableKind::Rule => None,
+                markdown::TableKind::Header => Some(TableHover {
+                    header: Vec::new(),
+                    cells: table.cells.clone(),
+                    offset: row.hang,
+                    width: rendered.width as u16,
+                }),
+                markdown::TableKind::Body => Some(TableHover {
+                    header: table.header.clone(),
+                    cells: table.cells.clone(),
+                    offset: row.hang,
+                    width: rendered.width as u16,
+                }),
+            });
             continue;
         }
-        let cells = row
-            .line
-            .spans
-            .iter()
-            .flat_map(|span| {
-                span.content
-                    .chars()
-                    .map(move |character| (character, span.style))
-            })
-            .collect::<Vec<_>>();
-        if !row.wrap {
-            // A clipped row keeps its start and drops the overflow, the way
-            // TS `wrapMode="none"` never folds a status line.
-            let mut used = 0;
-            let mut end = 0;
-            while end < cells.len() {
-                let cell = cells[end].0.width().unwrap_or(0);
-                if used + cell > width {
-                    break;
-                }
-                used += cell;
-                end += 1;
+        wrap_plain_row(row, width, &mut out);
+        hover.resize(out.len(), None);
+    }
+    (out, hover)
+}
+
+/// The non-table path of [`wrap_rows_meta`], unchanged from the wrapper it
+/// came out of.
+fn wrap_plain_row(row: &Row, width: usize, out: &mut Vec<Line<'static>>) {
+    // Blank rows are spacing, not content: they pass through untouched.
+    if row.line.spans.is_empty() {
+        out.push(row.line.clone());
+        return;
+    }
+    let cells = row
+        .line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |character| (character, span.style))
+        })
+        .collect::<Vec<_>>();
+    if !row.wrap {
+        // A clipped row keeps its start and drops the overflow, the way
+        // TS `wrapMode="none"` never folds a status line.
+        let mut used = 0;
+        let mut end = 0;
+        while end < cells.len() {
+            let cell = cells[end].0.width().unwrap_or(0);
+            if used + cell > width {
+                break;
             }
-            out.push(row_from(&cells[..end], &row.line));
-            continue;
+            used += cell;
+            end += 1;
         }
-        // `hang` is a display-cell width while `cells` holds one entry per
-        // char, so a prefix measured across wide characters can ask for more
-        // entries than the row carries; clamp so the slices below stay in
-        // range instead of panicking on CJK-heavy rows.
-        let hang = (row.hang as usize)
-            .min(width.saturating_sub(1))
-            .min(cells.len());
-        if hang == 0 || cells_width(&cells) <= width {
-            if hang == 0 {
-                out.extend(wrap_cells(&cells, width, &row.line));
-            } else {
-                out.push(row_from(&cells, &row.line));
-            }
-            continue;
-        }
-        // Container model: the prefix stays fixed on every row and the text
-        // wraps inside the width that remains. The first row reuses the
-        // projected prefix verbatim; continuation rows keep the structural
-        // leading slice (`keep`, the `┃` panel edge) and blank the rest to the
-        // prefix's trailing style, which is where the TS text element starts
-        // its wrapped lines.
-        let prefix = &cells[..hang];
-        let text = &cells[hang..];
-        if text.is_empty() {
-            // The clamped prefix swallowed the whole row: keeping it beats
-            // dropping it, which is what an empty chunk list would do.
+        out.push(row_from(&cells[..end], &row.line));
+        return;
+    }
+    // `hang` is a display-cell width while `cells` holds one entry per
+    // char, so a prefix measured across wide characters can ask for more
+    // entries than the row carries; clamp so the slices below stay in
+    // range instead of panicking on CJK-heavy rows.
+    let hang = (row.hang as usize)
+        .min(width.saturating_sub(1))
+        .min(cells.len());
+    if hang == 0 || cells_width(&cells) <= width {
+        if hang == 0 {
+            out.extend(wrap_cells(&cells, width, &row.line));
+        } else {
             out.push(row_from(&cells, &row.line));
-            continue;
         }
-        let budget = width - hang;
-        let blank = prefix
-            .last()
-            .map(|(_, style)| (' ', *style))
-            .unwrap_or((' ', Style::new()));
-        let keep = (row.keep as usize).min(hang);
-        let mut first = true;
-        for chunk in chunk_cells(text, budget) {
-            let row = match first {
-                true => {
-                    first = false;
-                    row_from(prefix.iter().chain(chunk.iter()), &row.line)
-                }
-                false => row_from(
-                    prefix[..keep]
-                        .iter()
-                        .chain(std::iter::repeat_n(&blank, hang - keep))
-                        .chain(chunk.iter()),
-                    &row.line,
-                ),
-            };
-            out.push(row);
+        return;
+    }
+    // Container model: the prefix stays fixed on every row and the text
+    // wraps inside the width that remains. The first row reuses the
+    // projected prefix verbatim; continuation rows keep the structural
+    // leading slice (`keep`, the `┃` panel edge) and blank the rest to the
+    // prefix's trailing style, which is where the TS text element starts
+    // its wrapped lines.
+    let prefix = &cells[..hang];
+    let text = &cells[hang..];
+    if text.is_empty() {
+        // The clamped prefix swallowed the whole row: keeping it beats
+        // dropping it, which is what an empty chunk list would do.
+        out.push(row_from(&cells, &row.line));
+        return;
+    }
+    let budget = width - hang;
+    let blank = prefix
+        .last()
+        .map(|(_, style)| (' ', *style))
+        .unwrap_or((' ', Style::new()));
+    let keep = (row.keep as usize).min(hang);
+    let mut first = true;
+    for chunk in chunk_cells(text, budget) {
+        let line = match first {
+            true => {
+                first = false;
+                row_from(prefix.iter().chain(chunk.iter()), &row.line)
+            }
+            false => row_from(
+                prefix[..keep]
+                    .iter()
+                    .chain(std::iter::repeat_n(&blank, hang - keep))
+                    .chain(chunk.iter()),
+                &row.line,
+            ),
+        };
+        out.push(line);
+    }
+}
+
+/// One table line painted to `available` display cells.
+struct RenderedTable {
+    text: String,
+    width: usize,
+}
+
+fn layout_table(table: &markdown::TableMeta, available: usize) -> RenderedTable {
+    let widths = fit_columns(&table.natural, available);
+    let text = match table.kind {
+        markdown::TableKind::Rule => widths
+            .iter()
+            .map(|width| "─".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("─┼─"),
+        _ => render_table_cells(&table.cells, &widths, &table.aligns),
+    };
+    let width = widths.iter().sum::<usize>() + 3 * widths.len().saturating_sub(1);
+    if width > available {
+        // Even one cell per column cannot fit (a table with dozens of
+        // columns): keep the grid's left edge aligned and let the hover tip
+        // carry what the cut removed.
+        RenderedTable {
+            text: clip_cells(&text, 0, available.min(u16::MAX as usize) as u16),
+            width: available,
+        }
+    } else {
+        RenderedTable { text, width }
+    }
+}
+
+/// Column widths for `available` cells: the real widths when they fit, and a
+/// water-fill shrink (every column capped at the same limit, then the leftover
+/// handed to columns that can still grow) when they do not.
+fn fit_columns(natural: &[usize], available: usize) -> Vec<usize> {
+    let columns = natural.len();
+    if columns == 0 {
+        return Vec::new();
+    }
+    let separators = 3 * (columns - 1);
+    let minimum = if 3 * columns + separators <= available {
+        3
+    } else {
+        1
+    };
+    let fits = |limit: usize| {
+        natural
+            .iter()
+            .map(|width| (*width).min(limit).max(minimum))
+            .sum::<usize>()
+            + separators
+            <= available
+    };
+    let ceiling = natural.iter().copied().max().unwrap_or(1).max(minimum);
+    let (mut low, mut high) = (minimum, ceiling);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
         }
     }
-    out
+    let mut widths: Vec<usize> = natural
+        .iter()
+        .map(|width| (*width).min(low).max(minimum))
+        .collect();
+    let mut leftover = available.saturating_sub(widths.iter().sum::<usize>() + separators);
+    while leftover > 0 {
+        let mut grew = false;
+        for (index, width) in widths.iter_mut().enumerate() {
+            if leftover == 0 {
+                break;
+            }
+            if *width < natural[index].max(minimum) {
+                *width += 1;
+                leftover -= 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    widths
+}
+
+fn render_table_cells(
+    cells: &[String],
+    widths: &[usize],
+    aligns: &[markdown::TableAlign],
+) -> String {
+    let mut text = String::new();
+    for (column, width) in widths.iter().enumerate() {
+        if column > 0 {
+            text.push_str(" │ ");
+        }
+        let cell = markdown::clip_cell(cells.get(column).map(String::as_str).unwrap_or(""), *width);
+        let pad = width.saturating_sub(cell.width());
+        let (left, right) = match aligns
+            .get(column)
+            .copied()
+            .unwrap_or(markdown::TableAlign::Left)
+        {
+            markdown::TableAlign::Left => (0, pad),
+            markdown::TableAlign::Right => (pad, 0),
+            markdown::TableAlign::Center => (pad / 2, pad - pad / 2),
+        };
+        text.push_str(&" ".repeat(left));
+        text.push_str(&cell);
+        text.push_str(&" ".repeat(right));
+    }
+    text
 }
 
 fn cells_width(cells: &[(char, Style)]) -> usize {
@@ -1862,6 +2095,14 @@ where
 }
 
 impl TranscriptPane {
+    /// The full row behind the table cell under the pointer, or `None` when
+    /// the pointer is on another row or outside the table's columns.
+    pub fn hover_table(&self, column: u16, row: u16) -> Option<&TableHoverRow> {
+        self.table_hover
+            .iter()
+            .find(|tip| tip.row == row && (tip.span.0..=tip.span.1).contains(&column))
+    }
+
     /// Remember the symbols this frame drew so a drag can be copied verbatim.
     fn snapshot(&mut self, frame: &mut Frame, inner: Rect) {
         let buffer = frame.buffer_mut();
@@ -2335,12 +2576,21 @@ fn thought_header(reasoning: &Reasoning, theme: &Theme) -> Line<'static> {
 fn prose_lines(text: &str, theme: &Theme) -> Vec<Row> {
     let palette = theme.palette;
     let bullet = Style::new().fg(palette.text_muted);
-    markdown::lines(text, theme)
+    markdown::lines_meta(text, theme)
         .into_iter()
         .enumerate()
-        .map(|(index, line)| {
+        .map(|(index, markdown_line)| {
+            let prefix = Span::styled(if index == 0 { "● " } else { "  " }, bullet);
+            if let Some(table) = markdown_line.table {
+                return Row::table_hung(
+                    Line::from(vec![prefix]).style(markdown_line.line.style),
+                    table,
+                    2,
+                );
+            }
+            let line = markdown_line.line;
             let mut spans = Vec::with_capacity(line.spans.len() + 1);
-            spans.push(Span::styled(if index == 0 { "● " } else { "  " }, bullet));
+            spans.push(prefix);
             spans.extend(line.spans);
             let line = Line::from(spans).style(line.style);
             // A fenced code block is drawn as `  ╭ … │ … ╰`. Its body rows are
@@ -5038,6 +5288,87 @@ pub fn render_hover_tip(frame: &mut Frame, at: (u16, u16), text: &str, theme: &T
         )))
         .style(Style::new().bg(theme.palette.background))
         .block(Block::bordered().border_style(Style::new().fg(theme.palette.text_muted))),
+        rect,
+    );
+}
+
+/// The tip a hovered table row draws: every cell the row had to clip, labelled
+/// with its column, wrapped inside a floating panel. The table itself stays a
+/// formatted grid of clipped cells; the whole row is one hover away instead of
+/// being folded into the grid.
+pub fn render_table_tip(
+    frame: &mut Frame,
+    at: (u16, u16),
+    header: &[String],
+    cells: &[String],
+    theme: &Theme,
+) {
+    let area = frame.area();
+    let style = Style::new().fg(theme.palette.text);
+    let mut composed = Vec::new();
+    for (column, cell) in cells.iter().enumerate() {
+        let label = header.get(column).map(String::as_str).unwrap_or("").trim();
+        let value = cell.trim();
+        let text = match label.is_empty() || label == value {
+            true => cell.clone(),
+            false => format!("{label}: {cell}"),
+        };
+        if !text.trim().is_empty() {
+            composed.push(text);
+        }
+    }
+    if composed.is_empty() {
+        return;
+    }
+    let widest = composed
+        .iter()
+        .map(|text| UnicodeWidthStr::width(text.as_str()))
+        .max()
+        .unwrap_or(0);
+    let width = (widest as u16 + 4)
+        .clamp(20, 80)
+        .min(area.width.saturating_sub(2));
+    if width < 8 || area.height < 4 {
+        return;
+    }
+    let mut lines = Vec::new();
+    for text in &composed {
+        let cells: Vec<(char, Style)> = text.trim_end().chars().map(|c| (c, style)).collect();
+        lines.extend(wrap_cells(&cells, (width - 2) as usize, &Line::default()));
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let room = area.height.saturating_sub(2) as usize;
+    if lines.len() > room {
+        lines.truncate(room.saturating_sub(1));
+        lines.push(Line::from(Span::styled(
+            "…",
+            Style::new().fg(theme.palette.text_muted),
+        )));
+    }
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let x = (at.0 + 1).min(area.width.saturating_sub(width));
+    let y = if at.1 + 1 + height <= area.height {
+        at.1 + 1
+    } else {
+        at.1.saturating_sub(height)
+    };
+    let rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(
+                Style::new()
+                    .fg(theme.palette.text)
+                    .bg(theme.palette.background),
+            )
+            .block(Block::bordered().border_style(Style::new().fg(theme.palette.text_muted))),
         rect,
     );
 }
@@ -12307,6 +12638,178 @@ mod final_layout_check {
         );
         assert_eq!(glyph.width(), Some(1), "narrow width tables");
         assert_eq!(glyph.width_cjk(), Some(1), "CJK width tables");
+    }
+}
+
+#[cfg(test)]
+mod table_layout_tests {
+    use super::*;
+    use unicode_width::UnicodeWidthChar;
+
+    fn theme() -> Theme {
+        Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette: crate::theme::builtin(
+                crate::theme::DEFAULT_THEME,
+                crate::theme::ThemeMode::Dark,
+            )
+            .expect("theme"),
+        }
+    }
+
+    fn painted(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// Display-cell positions of `needle`, so a row's grid columns can be
+    /// compared independently of the bytes or chars its cells hold.
+    fn separators(line: &str, needle: char) -> Vec<usize> {
+        let mut column = 0;
+        let mut found = Vec::new();
+        for character in line.chars() {
+            if character == needle {
+                found.push(column);
+            }
+            column += character.width().unwrap_or(0);
+        }
+        found
+    }
+
+    const TABLE: &str = "| model | notes |\n| --- | --- |\n| deepseek-v4 | a long note that has to be clipped so the grid stays readable |";
+
+    /// Columns keep their real widths when they fit, and shrink together when
+    /// they do not, so the table always lands inside the pane.
+    #[test]
+    fn columns_shrink_to_the_width_they_have() {
+        assert_eq!(fit_columns(&[3, 4], 40), vec![3, 4]);
+        let narrow = fit_columns(&[10, 40, 8], 40);
+        let total = narrow.iter().sum::<usize>() + 3 * (narrow.len() - 1);
+        assert!(total <= 40, "{narrow:?} is {total} cells");
+        assert!(
+            narrow.iter().all(|width| *width >= 3),
+            "a column kept room for a clipped cell: {narrow:?}"
+        );
+        let floor = fit_columns(&[5, 5], 9);
+        assert_eq!(floor, vec![3, 3], "both columns share the shrink");
+    }
+
+    /// A table row is laid out to the pane width once; it is never folded by
+    /// the prose wrapper. Every line keeps the same separator columns, and a
+    /// cell that does not fit ends in `…`.
+    #[test]
+    fn a_wide_table_keeps_its_grid_without_folding_cells() {
+        let rows = prose_lines(TABLE, &theme());
+        let wrapped = wrap_rows(&rows, 50);
+        assert_eq!(wrapped.len(), rows.len(), "a table row folded");
+        for line in &wrapped {
+            assert!(
+                line.width() <= 50,
+                "{:?} is {} cells",
+                painted(line),
+                line.width()
+            );
+        }
+        let rule = painted(&wrapped[1]);
+        let columns = separators(&rule, '┼');
+        assert_eq!(columns.len(), 1, "the rule names the column break");
+        for line in &wrapped[2..] {
+            assert_eq!(
+                separators(&painted(line), '│'),
+                columns,
+                "{:?} does not line up with the rule {rule:?}",
+                painted(line)
+            );
+        }
+        assert!(
+            painted(&wrapped[2]).contains('…'),
+            "the clipped cell is marked: {:?}",
+            painted(&wrapped[2])
+        );
+    }
+
+    /// Hovering a laid-out table row exposes the whole row, and only inside
+    /// the columns the table occupies.
+    #[test]
+    fn hovering_a_table_row_reaches_the_whole_row() {
+        let mut shell = Shell::new(Path::new("."), theme());
+        shell.set_transcript(&Transcript {
+            entries: vec![Entry::Assistant {
+                agent: None,
+                model: None,
+                parts: vec![Part::Text(TABLE.into())],
+            }],
+            ..Transcript::default()
+        });
+        let width = 100u16;
+        let height = 40u16;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| shell.render(frame)).unwrap();
+
+        let hover = shell
+            .transcript
+            .table_hover
+            .iter()
+            .find(|hover| !hover.header.is_empty())
+            .expect("the table body row is reachable")
+            .clone();
+        assert_eq!(hover.cells[0], "deepseek-v4");
+        assert!(hover.cells[1].contains("grid stays readable"));
+        assert!(hover.span.1 > hover.span.0, "the table has a width");
+        assert!(
+            shell
+                .transcript
+                .hover_table(hover.span.0, hover.row)
+                .is_some(),
+            "the pointer is on the table"
+        );
+        assert!(
+            shell
+                .transcript
+                .hover_table(hover.span.0.saturating_sub(1), hover.row)
+                .is_none(),
+            "the bullet column is not the table"
+        );
+        assert!(
+            shell
+                .transcript
+                .hover_table(hover.span.0, hover.row + 100)
+                .is_none(),
+            "another row is not the table"
+        );
+    }
+
+    /// The floating tip shows the full cells the grid clipped, with their
+    /// column names, wrapped inside the panel.
+    #[test]
+    fn the_table_tip_shows_what_the_grid_clipped() {
+        let header = vec!["notes".to_string()];
+        let cells = vec![format!(
+            "{} grid stays readable",
+            "a long note that has to be clipped so the ".repeat(3)
+        )];
+        let width = 90u16;
+        let height = 24u16;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render_table_tip(frame, (4, 4), &header, &cells, &theme()))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect();
+        assert!(screen.contains("notes: a long note"), "{screen}");
+        assert!(
+            screen.contains("readable"),
+            "the tip keeps the tail the grid clipped: {screen}"
+        );
     }
 }
 
