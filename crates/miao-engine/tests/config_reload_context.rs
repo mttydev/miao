@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use miao_engine::{
     config_derive::ContextOrigin,
-    permission::{Config, Policy},
+    permission::{Config, Policy, ReadScope},
     protocol::ModelRequest,
     provider::{Identity, Provider, ProviderError, Reply},
     runtime::Runtime,
@@ -71,7 +71,11 @@ async fn engine(workspace: &Path, origin: ContextOrigin) -> (Runtime, Tools) {
         Store::open(workspace.join("engine.db")).await.unwrap(),
         Arc::new(Base),
         tools.clone(),
-        Policy::new(Config::default()).unwrap(),
+        Policy::new(Config {
+            read_scope: ReadScope::Workspace,
+            ..Config::default()
+        })
+        .unwrap(),
     )
     .await
     .unwrap();

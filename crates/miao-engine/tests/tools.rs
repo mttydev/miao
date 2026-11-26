@@ -1,3 +1,4 @@
+use miao_engine::permission::ReadScope;
 use miao_engine::tools::{ToolError, Tools};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +12,10 @@ async fn read_is_bounded_and_cannot_escape_workspace() {
     std::fs::write(dir.path().join("outside"), "secret").unwrap();
     std::fs::write(root.join("large"), "line of padding\n".repeat(4000)).unwrap();
     std::fs::write(root.join("binary"), [0xff]).unwrap();
-    let tools = Tools::new(&root).await.unwrap();
+    let tools = Tools::new(&root)
+        .await
+        .unwrap()
+        .with_file_reads(ReadScope::Workspace);
     assert_eq!(
         tools
             .execute(

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use miao_engine::permission::ReadScope;
 use miao_engine::{
     context::{self, Reference},
     permission::{Config, Decision, Mode, Policy, Rule},
@@ -37,6 +38,7 @@ async fn file_reference_grants_only_the_named_file_and_never_its_parent_siblings
     let tools = Tools::new(workspace.path())
         .await
         .unwrap()
+        .with_file_reads(ReadScope::Workspace)
         .with_references(vec![Reference {
             path: granted.to_string_lossy().into_owned(),
             description: "One file".into(),
@@ -69,6 +71,7 @@ async fn references_are_listed_and_readable_but_not_writable() {
     let tools = Tools::new(workspace.path())
         .await
         .unwrap()
+        .with_file_reads(ReadScope::Workspace)
         .with_references(vec![Reference {
             path: external.path().to_string_lossy().into_owned(),
             description: "External docs".into(),
@@ -126,6 +129,7 @@ async fn a_reference_does_not_grant_writes() {
     let tools = Tools::new(workspace.path())
         .await
         .unwrap()
+        .with_file_reads(ReadScope::Workspace)
         .with_references(vec![Reference {
             path: external.path().to_string_lossy().into_owned(),
             description: "External docs".into(),
@@ -146,7 +150,10 @@ async fn a_reference_does_not_grant_writes() {
 #[tokio::test]
 async fn invalid_references_are_rejected() {
     let workspace = tempfile::tempdir().unwrap();
-    let tools = Tools::new(workspace.path()).await.unwrap();
+    let tools = Tools::new(workspace.path())
+        .await
+        .unwrap()
+        .with_file_reads(ReadScope::Workspace);
     assert!(tools
         .with_references(vec![Reference {
             path: workspace.path().to_string_lossy().into_owned(),
@@ -196,6 +203,7 @@ async fn authorized_reference_read_passes_runtime_authorization() {
     let tools = Tools::new(workspace.path())
         .await
         .unwrap()
+        .with_file_reads(ReadScope::Workspace)
         .with_references(vec![Reference {
             path: external.path().to_string_lossy().into_owned(),
             description: "External".into(),

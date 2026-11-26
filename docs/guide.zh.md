@@ -112,6 +112,7 @@ miao
 | `cost`                                                            | `budget_usd` 同一份会话预算的金额轴；Goal 用 `goal.budget` 声明自己的预算                                                                            |
 | `loop`                                                            | 自治续跑（见 §5.8）                                                                                                                               |
 | `shell`                                                           | 默认 shell                                                                                                                                        |
+| `readScope`                                                       | 文件读取范围：`host`（默认，本用户可读的任意文件）或 `workspace`（工作区 + 只读引用）                                                             |
 | `skills` / `commands` / `instructions` / `references` / `plugins` | 技能、命令、指令、引用、插件                                                                                                                      |
 | `watcher` / `attachments` / `tool_output` / `snapshots`           | 文件监听、附件、工具输出阈值、快照                                                                                                                |
 | `providers`                                                       | 自定义 provider / 模型（含本币单价 `cost`）                                                                                                       |
@@ -203,6 +204,8 @@ V2 `bash` 工具可以把每条命令放进 OS 沙箱运行：macOS 用 seatbelt
 `MIAO_SANDBOX=1`、`MIAO_SANDBOX_DENY_NETWORK=1` 可覆盖配置。`workspace-write` 不限制读取，只允许写入当前 Location、命令工作目录、临时目录、`writable_roots`，以及被拦截后你批准的路径（命令会带该目录重跑）。网络默认允许，可显式禁止。沙箱已开启但主机没有后端时，`on_unavailable` 默认 `"warn"`，命令不带沙箱运行；设为 `"fail"` 则直接拒绝。平台限制见 [接入说明](native-benchmarks.zh.md#原生工具与沙箱适用范围)。
 
 原生引擎自己的进程命令（bash、run_command、start_job、终端、hooks、格式化）始终在 OS 沙箱内运行，权限规则改变不了这一点——全量放行规则也抬不掉沙箱。同一个开关也是显式的运营者退出通道：配置里 `sandbox.mode: "off"` 或环境变量 `MIAO_SANDBOX=0` 会让引擎命令不带沙箱运行；`MIAO_SANDBOX=1` 或 `mode: "workspace-write"` 则保持约束。两者都没设置时，引擎保持沙箱。
+
+文件读取是另一层：默认跟随 OS 用户，Session 能读本用户可读的任意文件（包括另一个检出），不需要按路径授权。`readScope: "workspace"` 恢复“工作区 + 只读引用”的收窄；写入和命令的工作目录始终落在工作区内。
 
 ### 5.7 成本与缓存遥测
 

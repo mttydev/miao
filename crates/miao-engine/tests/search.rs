@@ -213,6 +213,13 @@ async fn output_limits_report_partial_and_long_lines_are_bounded() {
 
 #[tokio::test]
 async fn invalid_regex_glob_scope_and_limits_fail_before_search() {
+    // `path: ".."` is refused by the workspace jail now: the default read
+    // scope follows the OS user, so a host read of the parent directory is
+    // legitimate. The other cases here are invalid input either way.
+    let jailed = Config {
+        read_scope: miao_engine::permission::ReadScope::Workspace,
+        ..Config::default()
+    };
     for (name, input) in [
         ("grep", json!({"pattern":"["})),
         ("glob", json!({"pattern":"../**"})),
@@ -220,7 +227,7 @@ async fn invalid_regex_glob_scope_and_limits_fail_before_search() {
         ("grep", json!({"pattern":"a","limit":0})),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let result = run(dir.path(), name, input, Config::default()).await;
+        let result = run(dir.path(), name, input, jailed.clone()).await;
         assert!(result.get("error").is_some(), "{result}");
     }
 }

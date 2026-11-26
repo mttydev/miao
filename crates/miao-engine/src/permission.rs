@@ -20,6 +20,18 @@ pub enum Mode {
     Workspace,
 }
 
+/// How far a file read may reach. `Host` (the default) lets the read tools
+/// open anything the engine's user can read; `Workspace` keeps the
+/// workspace-plus-references jail. Writes and a process tool's working
+/// directory are unaffected: they always stay inside the Session's root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadScope {
+    #[default]
+    Host,
+    Workspace,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     Read,
@@ -75,6 +87,11 @@ pub struct Config {
     /// `MIAO_SANDBOX` overrides in both directions.
     #[serde(default = "sandbox_default")]
     pub sandbox: bool,
+    /// How far the file read tools may reach (product `readScope`). Reads
+    /// follow the engine's user by default; `workspace` restores the
+    /// workspace-plus-references jail. Writes are never widened by it.
+    #[serde(default)]
+    pub read_scope: ReadScope,
     /// Extra directories the sandbox lets commands write to, beyond the
     /// workspace, the command's own working directory and temp. `sandbox
     /// .writable_roots` in the product config; empty means no extra grants.
@@ -152,6 +169,7 @@ impl Default for Config {
             process_network: false,
             auto: false,
             sandbox: sandbox_default(),
+            read_scope: ReadScope::Host,
             rules: vec![],
             approval_timeout_ms: approval_timeout(),
             max_provider_turns: provider_turns(),
@@ -206,6 +224,11 @@ impl Policy {
     /// The operator's sandbox switch this policy snapshot carries.
     pub(crate) fn sandbox(&self) -> bool {
         self.config.sandbox
+    }
+
+    /// How far the file read tools may reach (product `readScope`).
+    pub fn read_scope(&self) -> ReadScope {
+        self.config.read_scope
     }
 
     /// Flip the switch for a live `/sandbox` toggle. The runtime clones the

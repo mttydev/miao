@@ -615,6 +615,18 @@ Skill bodies are read on demand through ordinary authorized tools. External
 skill paths remain absolute so a later read uses the same reference boundary.
 
 
+## Read scope
+
+`readScope` decides where the read tools (`read_file`, `read_image`, `list_files`,
+`glob`, `grep`) may reach. The default, `"host"`, stops at the OS user's own
+permissions: a worktree Session reads the checkout it was placed beside, another
+repository, or a document tree without a grant. `"workspace"` restores the
+workspace-plus-read-only-references jail. Writes and a process tool's working
+directory never widen: they stay inside the Session's root, because edit
+snapshots and `revert` are workspace-relative. External hits are named
+`@reference/<absolute path>` in permission rules, like every other path outside
+the workspace.
+
 ## Native web tools
 
 Enable native HTTP reads/search through the ordinary policy boundary:

@@ -1,3 +1,4 @@
+use miao_engine::permission::ReadScope;
 use miao_engine::tools::{ToolError, Tools};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -9,7 +10,10 @@ async fn directory_catalog_and_execution_have_bounded_workspace_scope() {
     std::fs::create_dir(&root).unwrap();
     std::fs::create_dir(root.join("subdir")).unwrap();
     std::fs::write(root.join("file"), "hello").unwrap();
-    let tools = Tools::new(&root).await.unwrap();
+    let tools = Tools::new(&root)
+        .await
+        .unwrap()
+        .with_file_reads(ReadScope::Workspace);
     assert_eq!(
         tools
             .definitions()

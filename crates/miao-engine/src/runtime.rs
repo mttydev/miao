@@ -1069,6 +1069,7 @@ impl Runtime {
             tools.process_runner().is_some(),
         ));
         tools.set_writable_roots(policy.writable_roots().to_vec());
+        tools.set_file_reads(policy.read_scope());
         for path in provider.protected_resources() {
             let path = tokio::fs::canonicalize(path).await?;
             tools = tools.with_protected_resource(&path);
@@ -2231,6 +2232,7 @@ impl Runtime {
             self.inner
                 .tools
                 .set_writable_roots(policy.writable_roots().to_vec());
+            self.inner.tools.set_file_reads(policy.read_scope());
             self.inner.set_policy(policy);
         }
         let lsp_changed = reconciled.as_ref().is_some_and(|reconciled| {

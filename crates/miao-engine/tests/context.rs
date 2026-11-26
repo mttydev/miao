@@ -418,6 +418,7 @@ async fn host_instruction_files_require_an_exact_reference_and_refresh_context_e
     let tools = Tools::new(dir.path())
         .await
         .unwrap()
+        .with_file_reads(miao_engine::permission::ReadScope::Workspace)
         .with_context_sources(vec![source.clone()])
         .unwrap();
     let policy = Policy::new(Config::default()).unwrap();
