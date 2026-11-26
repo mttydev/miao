@@ -868,21 +868,22 @@ impl Shell {
             let style = Style::new()
                 .fg(self.transcript.theme.palette.border)
                 .bg(self.transcript.theme.palette.background);
-            paint_divider(
-                frame.buffer_mut(),
-                area,
-                style,
-                self.transcript.body_unchanged,
-            );
+            paint_divider(frame.buffer_mut(), area, style);
         }
     }
 }
 
 /// Paint the divider column and the empty column left of it.
 ///
-/// The rule is marked [`CellDiffOption::AlwaysUpdate`]: a terminal that
-/// dropped a row (a wide glyph, a host renderer, a resize) must get the cell
-/// back even when the buffer's rule cell itself did not change.
+/// The rule is ASCII `|`, not the box-drawing `│` it used to be: `│` is an
+/// East Asian Ambiguous character — one column to `unicode-width`, two to a
+/// CJK console. That console stores the rule across its own cell and the
+/// sidebar's first cell, and overlaying or re-encoding the row drops the rule
+/// again. The gap, and the drift into the sidebar while scrolling, survived
+/// every earlier paint because each one changed the glyphs around the rule
+/// (a boundary cleanup, a frame split, a gutter column) and left the rule
+/// itself ambiguous. ASCII is one column under every width table, so the cell
+/// the buffer paints is the cell every console stores.
 ///
 /// [`body_columns`] lays no pane out over the column left of the rule, so no
 /// glyph sits beside it. A terminal that lays a character out two columns wide
@@ -892,14 +893,11 @@ impl Shell {
 /// changes: such a glyph ends in it, and rewriting the cell would erase the
 /// glyph's first half with it.
 ///
-/// `heal` says the frame did not move the transcript's viewport. Only then is
-/// the rule marked [`CellDiffOption::AlwaysUpdate`]: a host that re-encodes the
-/// screen prints a dirty rule right after the row it has just repainted, one
-/// column off per glyph whose width it counts differently from the terminal.
-/// A frame that moved the body leaves the mark off, so the host does not print
-/// the rule at all; the next quiet frame carries every row of it again, which
-/// is what brings back a row the terminal dropped.
-fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style, heal: bool) {
+/// The rule is marked [`CellDiffOption::AlwaysUpdate`]: ratatui sends only
+/// cells that changed, so a terminal that dropped that row (a resize, a host
+/// renderer) would otherwise keep the gap forever. Every frame carries it,
+/// which heals such a row on the next draw.
+fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
     if area.x == 0 {
         return;
     }
@@ -907,10 +905,10 @@ fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style,
         buffer[(area.x - 1, y)]
             .set_symbol(" ")
             .set_style(Style::new().bg(style.bg.unwrap_or(Color::Reset)));
-        let rule = buffer[(area.x, y)].set_symbol("│").set_style(style);
-        if heal {
-            rule.set_diff_option(CellDiffOption::AlwaysUpdate);
-        }
+        buffer[(area.x, y)]
+            .set_symbol("|")
+            .set_style(style)
+            .set_diff_option(CellDiffOption::AlwaysUpdate);
     }
 }
 
@@ -1093,12 +1091,6 @@ pub struct TranscriptPane {
     /// characters own their first cell and leave the continuation empty, so a
     /// column index is a screen column.
     rendered: Vec<Vec<String>>,
-    /// Whether the viewport this frame paints is the one the last frame did.
-    /// A frame that moved the body leaves the rule out of its diff; a quiet
-    /// frame carries it. See `paint_divider`.
-    body_unchanged: bool,
-    /// The lines the last frame painted, which `body_unchanged` compares to.
-    last_lines: Vec<Line<'static>>,
 }
 
 /// How long a streamed draft may lag the deltas that arrived. Re-parsing a long
@@ -1147,8 +1139,6 @@ impl TranscriptPane {
             area: Rect::default(),
             selection: None,
             rendered: Vec::new(),
-            body_unchanged: true,
-            last_lines: Vec::new(),
         }
     }
 
@@ -1505,10 +1495,6 @@ impl Pane for TranscriptPane {
                 }
             }
         }
-        // The rule is painted only on a frame that leaves this viewport alone;
-        // see `paint_divider`.
-        self.body_unchanged = visible == self.last_lines;
-        self.last_lines.clone_from(&visible);
         // Borderless, like the TypeScript layout this mirrors: a frame around
         // the transcript only steals columns from the text.
         frame.render_widget(
@@ -8079,7 +8065,7 @@ mod tests {
         // placeholder naming a session that does not exist yet.
         assert_eq!(
             buffer[(97, 10)].symbol(),
-            "│",
+            "|",
             "the sidebar divider paints: {:?}",
             row(10)
         );
@@ -9178,7 +9164,7 @@ mod tests {
             left.trim_end().ends_with('…'),
             "the label clips at the column edge: {left:?}"
         );
-        assert_eq!(row[77], "│", "the sidebar's rule keeps its cell: row {y}");
+        assert_eq!(row[77], "|", "the sidebar's rule keeps its cell: row {y}");
     }
 
     #[test]
@@ -9450,7 +9436,7 @@ mod tests {
         for (y, row) in rows.iter().enumerate() {
             assert_eq!(
                 row[column as usize].symbol(),
-                "│",
+                "|",
                 "row {y} column {column} is the sidebar's rule"
             );
             assert_eq!(
@@ -9502,7 +9488,7 @@ mod tests {
                 " ",
                 "row {y} prints beside the rule"
             );
-            assert_eq!(row[column as usize].symbol(), "│", "row {y} lost the rule");
+            assert_eq!(row[column as usize].symbol(), "|", "row {y} lost the rule");
         }
     }
 
@@ -11418,7 +11404,7 @@ mod tests {
         let below = rows[header + 1..]
             .iter()
             .take_while(|row| {
-                !row.trim_matches(|c: char| c == '│' || c.is_whitespace())
+                !row.trim_matches(|c: char| c == '│' || c == '|' || c.is_whitespace())
                     .is_empty()
             })
             .collect::<Vec<_>>();
@@ -11486,7 +11472,7 @@ mod tests {
             .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>();
         let blank = |row: &String| {
-            row.trim_matches(|c: char| c == '│' || c.is_whitespace())
+            row.trim_matches(|c: char| c == '│' || c == '|' || c.is_whitespace())
                 .is_empty()
         };
         for header in [
@@ -11970,11 +11956,16 @@ mod layout_alignment_tests {
 
         // The sidebar's rule divides the body. The transcript's text must not
         // run past it, and the sidebar's content must start after it.
-        let rule = rows
-            .iter()
-            .find_map(|row| row.find('│').or_else(|| row.find('┃')))
-            .expect("the sidebar rule is painted");
+        let rule_cell = body_columns(Rect::new(0, 0, width, 1))
+            .1
+            .expect("the sidebar is shown")
+            .x;
+        let rule = rule_cell as usize;
         assert!(rule > 0, "the rule sits between the two columns: {rule}");
+        assert!(
+            (0..24).any(|y| buffer[(rule_cell, y)].symbol() == "|"),
+            "the sidebar rule is painted: {rows:?}"
+        );
         // The transcript's column ends where the rule begins, so no transcript
         // glyph is painted on or past it.
         for row in &rows {
@@ -12147,7 +12138,7 @@ mod final_layout_check {
         let buffer = terminal.backend().buffer();
         for y in 0..24 {
             let cell = &buffer[(rule, y)];
-            assert_eq!(cell.symbol(), "│", "row {y} lost the rule");
+            assert_eq!(cell.symbol(), "|", "row {y} lost the rule");
             assert_eq!(cell.bg, palette.background, "row {y} tinted the rule");
             assert_eq!(
                 cell.diff_option,
@@ -12191,7 +12182,7 @@ mod final_layout_check {
             assert!(
                 updates
                     .iter()
-                    .any(|(x, row, cell)| { *x == rule && *row == y && cell.symbol() == "│" }),
+                    .any(|(x, row, cell)| { *x == rule && *row == y && cell.symbol() == "|" }),
                 "row {y} kept the stale terminal instead of the rule"
             );
         }
@@ -12205,7 +12196,7 @@ mod final_layout_check {
         let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 2));
         buffer[(6, 0)].set_symbol("中");
         buffer[(7, 1)].set_symbol("文");
-        paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), Style::new(), true);
+        paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), Style::new());
         assert_eq!(
             buffer[(6, 0)].symbol(),
             "中",
@@ -12217,7 +12208,7 @@ mod final_layout_check {
                 " ",
                 "row {y} kept a glyph beside the rule"
             );
-            assert_eq!(buffer[(8, y)].symbol(), "│", "row {y} lost the rule");
+            assert_eq!(buffer[(8, y)].symbol(), "|", "row {y} lost the rule");
         }
     }
 
@@ -12230,7 +12221,7 @@ mod final_layout_check {
             let style = Style::new().bg(Color::Rgb(1, 2, 3));
             let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 2));
             buffer[(6, 0)].set_symbol(text).set_style(style);
-            paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), style, true);
+            paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), style);
             buffer
         };
         let first = paint("中");
@@ -12250,13 +12241,13 @@ mod final_layout_check {
         );
     }
 
-    /// A frame that repainted the transcript must not also carry the rule: a
-    /// host that re-encodes the screen for the terminal prints a dirty rule as
-    /// a continuation of the row it has just repainted, one column off per
-    /// glyph whose width it counts differently. The quiet frame after it
-    /// carries the rule again, which is what heals a row the terminal dropped.
+    /// A frame that moved the body still carries every rule cell: the rule is
+    /// ASCII and one column, so a dirty rule re-encoded with its row lands
+    /// where the buffer put it, and `AlwaysUpdate` is what heals a row the
+    /// terminal dropped. Withholding the rule from a scrolling frame, as the
+    /// ambiguous `│` once required, is what left the gap in place.
     #[test]
-    fn a_moved_body_keeps_the_rule_out_of_the_diff() {
+    fn a_moved_body_still_carries_the_rule() {
         let palette =
             crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
                 .expect("theme");
@@ -12292,25 +12283,30 @@ mod final_layout_check {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         second.draw(|frame| shell.render(frame)).unwrap();
         let moved = previous.diff(second.backend().buffer());
-        assert!(
-            !moved
-                .iter()
-                .any(|(x, _, cell)| *x == rule && cell.symbol() == "│"),
-            "a frame that moved the body carried the rule"
-        );
-        let quiet = second.backend().buffer().clone();
-        let mut third =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-        third.draw(|frame| shell.render(frame)).unwrap();
-        let healed = quiet.diff(third.backend().buffer());
         for y in 0..height {
             assert!(
-                healed
+                moved
                     .iter()
-                    .any(|(x, row, cell)| *x == rule && *row == y && cell.symbol() == "│"),
-                "row {y} was not carried by the quiet frame"
+                    .any(|(x, row, cell)| *x == rule && *row == y && cell.symbol() == "|"),
+                "row {y} was not carried while the body moved"
             );
         }
+    }
+
+    /// The rule must occupy exactly one cell under every width table. The
+    /// box-drawing `│` was two columns to a CJK console while the buffer kept
+    /// one; every earlier divider fix (a wide-glyph cleanup, a frame split,
+    /// `AlwaysUpdate`, a gutter column) left that mismatch in place, which is
+    /// why the rule kept breaking on Windows.
+    #[test]
+    fn the_rule_is_one_column_under_every_width_table() {
+        let glyph = '|';
+        assert!(
+            glyph.is_ascii(),
+            "the rule must not be an East Asian Ambiguous glyph"
+        );
+        assert_eq!(glyph.width(), Some(1), "narrow width tables");
+        assert_eq!(glyph.width_cjk(), Some(1), "CJK width tables");
     }
 }
 
