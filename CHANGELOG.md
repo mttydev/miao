@@ -16,6 +16,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-11-26
+
+### Fixed
+- **engine**: survive a contended ledger instead of ending the turn (#3421) (`f50411c623`)
+- **cli**: hand the engine the config stack the product resolves (#3420) (`350e04498b`)
+
 ## [0.5.9] - 2026-11-26
 
 ### Fixed
