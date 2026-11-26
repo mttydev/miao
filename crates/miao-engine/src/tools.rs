@@ -3530,7 +3530,7 @@ mod native_config_ownership_tests {
 
 #[cfg(test)]
 mod write_containment_tests {
-    use super::{Gates, ToolError, Tools};
+    use super::{canonical_plain, Gates, ToolError, Tools};
     use serde_json::json;
 
     fn writing_tools() -> Gates {
@@ -3619,8 +3619,10 @@ mod write_containment_tests {
             )
             .await
             .unwrap();
-        // The walk reports the canonical spelling, so compare against it.
-        let document = std::fs::canonicalize(external.path().join("notes.md")).unwrap();
+        // The walk reports the canonical spelling with the Windows verbatim
+        // prefix stripped, so compare against the same spelling on both sides.
+        let document =
+            canonical_plain(std::fs::canonicalize(external.path().join("notes.md")).unwrap());
         assert!(
             found["matches"]
                 .as_array()
