@@ -151,6 +151,10 @@ pub struct Store {
     /// Cached usage reports per Session: `(last_event_seq, report)`. A report
     /// is only recomputed when new usage-bearing events appear.
     usage_cache: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, (u64, Value)>>>,
+    /// The lease renewal's own connection. The shared worker also runs `git`
+    /// probes and whole projections, and a renewal that queues behind them (or
+    /// gives up at the first busy lock) used to end a healthy turn.
+    renewal: Arc<std::sync::Mutex<Option<rusqlite::Connection>>>,
 }
 
 pub(crate) struct RuntimeLease {
@@ -218,6 +222,7 @@ impl Store {
             usage_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::BTreeMap::new(),
             )),
+            renewal: Arc::new(std::sync::Mutex::new(None)),
             path: Arc::new(path),
         })
     }
@@ -330,8 +335,11 @@ impl Store {
                 acquire_migration_lock(&migration, &canonical)?;
                 let conn = Connection::open(&canonical)?;
                 // Concurrent writers wait for SQLite's write lock instead of
-                // failing the statement with SQLITE_BUSY.
-                conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                // failing the statement with SQLITE_BUSY. The window has to
+                // cover a checkpoint on a ledger of this product's grown size:
+                // five seconds turned an ordinary maintenance pass into a failed
+                // write, and a failed write is a visible error in the turn.
+                conn.busy_timeout(std::time::Duration::from_secs(20))?;
                 let app_id: u32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
                 let engine:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='engine_session' AND type='table')",[],|r|r.get(0))?;
                 let existing:u32=conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",[],|r|r.get(0))?;
@@ -684,6 +692,7 @@ impl Store {
             usage_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::BTreeMap::new(),
             )),
+            renewal: Arc::new(std::sync::Mutex::new(None)),
             path: Arc::new(path),
         })
     }
@@ -3168,13 +3177,32 @@ impl Store {
     /// Renew this writer's claim without changing its epoch. Renewal must not
     /// bump the fence, or a long turn would invalidate its own lease on every
     /// heartbeat; a superseded writer learns it lost ownership here.
+    ///
+    /// The renewal owns a connection and a blocking thread of its own. It has to
+    /// answer within two lease intervals, and the shared worker also serves `git`
+    /// probes and whole projections, while the ledger itself can be inside
+    /// another window's write transaction for seconds. Queueing behind either —
+    /// or treating the first `busy` as a lost claim, which is what this used to
+    /// do — ended turns that had nothing wrong with them.
     pub async fn renew_session(
         &self,
         lease: &SessionLease,
         interval_ms: i64,
     ) -> Result<SessionLease, Error> {
+        let path = (*self.path).clone();
+        let renewal = self.renewal.clone();
         let (lease, interval_ms) = (lease.clone(), interval_ms);
-        self.call(move |conn| {
+        tokio::task::spawn_blocking(move || {
+            let mut cached = renewal.lock().map_err(|_| Error::Busy)?;
+            if cached.is_none() {
+                let conn = rusqlite::Connection::open_with_flags(
+                    &path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                )?;
+                conn.busy_timeout(RENEWAL_BUSY_TIMEOUT)?;
+                *cached = Some(conn);
+            }
+            let conn = cached.as_ref().ok_or(Error::Busy)?;
             let now = crate::approval::now_ms() as i64;
             let changed = conn.execute(
                 "UPDATE engine_lease SET last_ms=?3, interval_ms=?4, owner_pid=?5 WHERE session_id=?1 AND epoch=?2",
@@ -3186,6 +3214,7 @@ impl Store {
             Ok(lease)
         })
         .await
+        .map_err(|_| Error::Closed)?
     }
     /// Claim Session execution ownership. Every claim advances the durable
     /// epoch, which is the fence that Session-scoped writes must present.
@@ -4454,24 +4483,78 @@ pub(crate) struct WriteTx<'a> {
     tx: Transaction<'a>,
     _lock: WriteLock,
     ledger_path: std::path::PathBuf,
+    started: std::time::Instant,
 }
 
 impl<'a> WriteTx<'a> {
     pub(crate) fn commit(self) -> Result<(), Error> {
-        self.tx.commit()?;
-        // A serve process holds its WAL open indefinitely; without a
-        // checkpoint the WAL grows unbounded and independent readers (external
-        // `session list`, `sqlite3` on the ledger, the acceptance harness) see
-        // none of the writes until the process exits. PASSIVE merges committed
-        // frames into the main database without blocking writers or readers,
-        // and a failed checkpoint only delays visibility without losing data.
-        if let Ok(checkpoint_conn) = rusqlite::Connection::open_with_flags(
-            &self.ledger_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        ) {
-            let _ = checkpoint_conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+        let WriteTx {
+            tx,
+            _lock,
+            ledger_path,
+            started,
+        } = self;
+        tx.commit()?;
+        // Every other writer waits on this lock, so a transaction this slow is
+        // the reason a turn elsewhere might have stalled; it leaves a trace that
+        // names the ledger. The WAL merge is not part of a commit any more: a
+        // checkpoint takes SQLite's WAL write lock, which is exactly what every
+        // other writer and every lease renewal need, so it runs on its own timer.
+        let elapsed = started.elapsed();
+        if elapsed >= SLOW_WRITE {
+            crate::diagnostics::warn(
+                "slow write transaction",
+                &[
+                    ("ledger", ledger_path.display().to_string()),
+                    ("elapsed_ms", elapsed.as_millis().to_string()),
+                ],
+            );
         }
         Ok(())
+    }
+}
+
+/// How long a write transaction may hold the cross-process lock before it is
+/// worth a diagnostics line.
+const SLOW_WRITE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// WAL bytes worth merging back into the ledger. Below this the frames are cheap
+/// for any reader to follow, and a merge would be pure overhead.
+const WAL_MERGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How long a lease renewal waits for the write lock. Two lease intervals is
+/// the point at which the claim lapses, so this window is the longest a renewal
+/// can wait without changing the meaning of the claim.
+const RENEWAL_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(55);
+
+impl Store {
+    /// Merge committed WAL frames into the ledger when they have grown enough to
+    /// matter. A serve process holds its WAL open indefinitely, so without this
+    /// the WAL grows unbounded and independent readers (external `session list`,
+    /// `sqlite3` on the ledger, the acceptance harness) fall behind it. PASSIVE
+    /// merges frames without blocking readers and never truncates; a failed
+    /// checkpoint only delays visibility without losing data.
+    ///
+    /// A checkpoint holds SQLite's WAL write lock while it copies frames. Doing
+    /// this after every commit therefore serialized every other writer — and
+    /// every lease renewal — behind a pass over the whole ledger, which is what
+    /// ended healthy turns. The runtime calls this on a timer instead.
+    pub async fn checkpoint_wal(&self) -> Result<(), Error> {
+        let path = (*self.path).clone();
+        let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+        if std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0) < WAL_MERGE_BYTES {
+            return Ok(());
+        }
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )?;
+            let _ = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Closed)?
     }
 }
 
@@ -4496,6 +4579,7 @@ pub(crate) fn write_tx(conn: &mut Connection) -> Result<WriteTx<'_>, Error> {
             tx,
             _lock: WriteLock(lock),
             ledger_path,
+            started: std::time::Instant::now(),
         }),
         Err(error) => {
             let _ = FileExt::unlock(&*lock);

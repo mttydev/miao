@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod cancel_authority_tests;
 mod command;
+#[cfg(test)]
+mod lease_tests;
 mod shell;
 use crate::{
     approval::{now_ms, Approval, Response},
@@ -1288,6 +1290,11 @@ impl Runtime {
                         .heartbeat_lease(&session, 30_000)
                         .await;
                 }
+                // Keep the WAL from growing past what a reader of the ledger
+                // should have to follow. A timer, not a commit: the checkpoint
+                // holds the WAL write lock, and doing it after every write is
+                // what made other windows wait seconds for their own.
+                let _ = heartbeat_inner.store.checkpoint_wal().await;
             }
         });
         *runtime.inner.heartbeat.lock().await = Some(heartbeat);
@@ -3701,17 +3708,53 @@ impl Drop for LeaseKeepalive {
     }
 }
 
+/// Ticks of the renewal loop (250 ms each) between lease renewals.
+const LEASE_RENEWAL_TICKS: u32 = 8;
+/// Failed renewals tolerated before the drain stops its own work. The claim
+/// stays valid for two lease intervals, so a store that cannot answer an UPDATE
+/// for a few seconds has not taken the Session away from anybody: ending the
+/// turn there turned every ledger stall into a silent interruption.
+const LEASE_RENEWAL_PATIENCE: u32 =
+    2 * SESSION_LEASE_MS as u32 / (250 * LEASE_RENEWAL_TICKS as u64) as u32;
+/// Renewal failures between diagnostics lines during one stall.
+const LEASE_RENEWAL_LOG_EVERY: u32 = 10;
+
+/// What a failed renewal means for the turn that is running.
+#[derive(Debug, PartialEq, Eq)]
+enum Renewal {
+    Keep,
+    Stop(&'static str),
+}
+
+/// A renewal error is only ownership loss when the store says the claim was
+/// fenced. Anything else — `store_busy` behind a long write transaction, a disk
+/// that stalled — leaves the claim intact, and the drain keeps going: the claim
+/// only lapses after two intervals, and the run's own writes (admission, reply,
+/// tool result, promotion, finish) are fenced, so a superseded drain is refused
+/// there instead. Only a claim held past its own window stops the turn, and it
+/// does so with an origin the journal can read back.
+fn renew_decision(result: &Result<(), Error>, failures: u32) -> Renewal {
+    match result {
+        Ok(()) => Renewal::Keep,
+        Err(Error::Fenced) => Renewal::Stop("lease_lost"),
+        Err(_) if failures >= LEASE_RENEWAL_PATIENCE => Renewal::Stop("lease_unavailable"),
+        Err(_) => Renewal::Keep,
+    }
+}
+
 /// Renew the drain's claim and consume cross-process cancel requests until the
 /// turn ends. A superseded owner, or one another window asked to stop, cancels
 /// its own work instead of continuing.
 async fn keep_lease(
-    store: Store,
+    inner: Arc<Inner>,
     lease: SessionLease,
     run: String,
     cursor: u64,
     cancel: CancellationToken,
 ) {
+    let store = inner.store.clone();
     let mut ticks = 0u32;
+    let mut failures = 0u32;
     loop {
         tokio::select! {
             biased;
@@ -3728,9 +3771,41 @@ async fn keep_lease(
             return;
         }
         ticks += 1;
-        if ticks.is_multiple_of(8) && store.renew_session(&lease, SESSION_LEASE_MS).await.is_err() {
-            cancel.cancel();
-            return;
+        if !ticks.is_multiple_of(LEASE_RENEWAL_TICKS) {
+            continue;
+        }
+        let renewed = store
+            .renew_session(&lease, SESSION_LEASE_MS)
+            .await
+            .map(|_| ());
+        failures = if renewed.is_ok() { 0 } else { failures + 1 };
+        match renew_decision(&renewed, failures) {
+            Renewal::Keep => {
+                if let Err(error) = &renewed {
+                    if failures == 1 || failures.is_multiple_of(LEASE_RENEWAL_LOG_EVERY) {
+                        crate::diagnostics::warn(
+                            "lease renewal failed",
+                            &[
+                                ("session", lease.session.clone()),
+                                ("run", run.clone()),
+                                ("attempt", failures.to_string()),
+                                ("error", error.to_string()),
+                            ],
+                        );
+                    }
+                }
+            }
+            Renewal::Stop(origin) => {
+                // The drain writes this into `run.cancel_requested` before its
+                // own finish, so a stop the engine decided on is readable.
+                inner
+                    .stop_origins
+                    .lock()
+                    .await
+                    .insert(lease.session.clone(), origin.to_string());
+                cancel.cancel();
+                return;
+            }
         }
     }
 }
@@ -3794,7 +3869,7 @@ async fn drain(
         return Ok(());
     };
     let _keepalive = LeaseKeepalive(tokio::spawn(keep_lease(
-        inner.store.clone(),
+        inner.clone(),
         lease.clone(),
         run.clone(),
         cursor,
