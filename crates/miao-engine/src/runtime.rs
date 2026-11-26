@@ -1101,7 +1101,22 @@ impl Runtime {
         // A Session placed in a worktree keeps that root across a restart.
         // Registering it here means a resumed turn edits the same files it did
         // before instead of silently falling back to the engine's checkout.
+        //
+        // A Session recorded at the engine root needs no entry: an
+        // unregistered Session already resolves to the engine root, which is
+        // exactly that root. Walking those rows anyway cost one or two
+        // `git rev-parse` processes per historical Session, so a workspace
+        // with a long session history spent a long time here on every start.
+        // A quit while it was still running dropped the tokio blocking pool
+        // under it, and every remaining row then reported
+        // `file IO failed: background task failed` — an error about a Session
+        // that was actually fine. Only worktree placements carry information
+        // the fallback cannot reproduce.
+        let engine_root = tools.engine_root().to_string_lossy().to_string();
         for (session, root) in store.session_roots().await? {
+            if root == engine_root {
+                continue;
+            }
             if let Err(error) = tools.register_session_root(&session, &root).await {
                 // A worktree removed outside miao must not fall back to the
                 // engine checkout: that checkout may belong to another
@@ -1129,7 +1144,6 @@ impl Runtime {
         // Legacy databases predate the lease. Give the checkout to the oldest
         // live Session already there so a new Session is not the one that
         // starts sharing it.
-        let engine_root = tools.engine_root().to_string_lossy().to_string();
         let _ = store.seed_checkout_lease(&engine_root).await?;
         // Ephemeral progress notices, one per streamed delta. This is a
         // lossless fan-out rather than a `broadcast` ring: a dropped delta has

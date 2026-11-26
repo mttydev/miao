@@ -208,3 +208,43 @@ async fn a_worktree_session_can_change_its_model_and_account() {
         "a worktree Session must reach its account selection, not be rejected by the engine root: {account:?}"
     );
 }
+
+/// A worktree removed outside miao is re-homed before its next turn. Startup
+/// skips the rows recorded at the engine root (the fallback already resolves
+/// them), but a worktree placement still gets an entry, so a missing one is
+/// repaired instead of silently falling back to the shared checkout.
+#[tokio::test]
+async fn a_removed_worktree_is_rehomed_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    repository(dir.path());
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(state.path().join("engine.db")).await.unwrap();
+    let gone = canonical(dir.path())
+        .join(".miao-worktrees")
+        .join("gone")
+        .to_string_lossy()
+        .to_string();
+    store
+        .initialize("ses_lost", "lost worktree", &gone)
+        .await
+        .unwrap();
+    assert!(!Path::new(&gone).exists());
+
+    let tools = Tools::new(dir.path()).await.unwrap();
+    let runtime = Runtime::new(store.clone(), Arc::new(Idle), tools.clone())
+        .await
+        .unwrap();
+
+    let rehomed = store.session_root("ses_lost").await.unwrap().unwrap();
+    assert_ne!(rehomed, gone, "the missing root must be replaced");
+    assert!(
+        Path::new(&rehomed).is_dir(),
+        "the Session was not re-homed at a directory: {rehomed}"
+    );
+    assert_eq!(
+        tools.with_read_scope("ses_lost").location(),
+        rehomed,
+        "the repaired root must also reach the tools"
+    );
+    drop(runtime);
+}
