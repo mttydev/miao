@@ -3619,8 +3619,11 @@ mod write_containment_tests {
             )
             .await
             .unwrap();
-        // The walk reports the canonical spelling, so compare against it.
-        let document = std::fs::canonicalize(external.path().join("notes.md")).unwrap();
+        // The walk reports the engine's plain canonical spelling: a raw
+        // `canonicalize` is verbatim on Windows (`\\?\C:\\…`) and never matches.
+        let document = super::canonical_plain(
+            std::fs::canonicalize(external.path().join("notes.md")).unwrap(),
+        );
         assert!(
             found["matches"]
                 .as_array()
