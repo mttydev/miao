@@ -4721,8 +4721,18 @@ impl App {
             }
             PanelKind::Question(_) if typing => match key.code {
                 // While a custom answer is being typed, keys belong to it.
+                // Enter accepts the text and sends it: on the custom row the
+                // panel's own Enter would start typing again, so an accepted
+                // answer could never leave this process.
                 KeyCode::Enter => {
                     panel.accept_typing();
+                    if let Some(answer) = panel.submit() {
+                        if let (Some(session_id), Some(engine)) =
+                            (session_id.as_deref(), self.engine.as_ref())
+                        {
+                            engine.answer(session_id, answer);
+                        }
+                    }
                     true
                 }
                 KeyCode::Esc => {
@@ -9189,6 +9199,62 @@ mod tests {
         );
         assert!(app.shell.panel.is_none(), "the panel is gone");
         assert!(app.state.questions.is_empty());
+    }
+
+    /// Enter completes a typed custom answer and sends it. The panel used to
+    /// start typing again on the custom row, so the answer never left this
+    /// process; moving off the row would have sent an option instead.
+    #[test]
+    fn enter_sends_a_typed_custom_answer() {
+        let mut app = session_app();
+        app.handle(AppEvent::SessionOpened {
+            // A question belongs to a Session: without one the answer has
+            // nowhere to go.
+            summary: Some(summary("ses_open", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState {
+                questions: vec![crate::session::QuestionView {
+                    question_id: "run-1/q1".into(),
+                    input_hash: "b".repeat(64),
+                    expires_at_ms: None,
+                    questions: vec![crate::session::QuestionItem {
+                        question: "Which files?".into(),
+                        header: "Files".into(),
+                        options: vec![
+                            crate::session::Choice {
+                                label: "src".into(),
+                                description: String::new(),
+                            },
+                            crate::session::Choice {
+                                label: "docs".into(),
+                                description: String::new(),
+                            },
+                        ],
+                        multi_select: false,
+                        custom: true,
+                    }],
+                }],
+                ..SessionState::default()
+            }),
+        });
+        assert!(app.shell.panel.is_some(), "a live question opens the panel");
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        // Two options, then the custom row.
+        for _ in 0..2 {
+            app.handle(key(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        for character in "src/new.rs".chars() {
+            app.handle(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        match requests.try_recv() {
+            Ok(engine::Request::Answer { answer, .. }) => {
+                assert_eq!(answer["answers"], serde_json::json!([["src/new.rs"]]));
+            }
+            _ => panic!("Enter must send the typed answer"),
+        }
     }
 
     #[test]
