@@ -16,6 +16,15 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-26
+
+### Added
+- **tui**: fit tables to the pane and show the full row on hover (#3408) (`5a5ba72001`)
+
+### Fixed
+- **engine**: skip engine-root Sessions when restoring placement (#3407) (`c6a9895339`)
+- **tui**: paint the sidebar rule with a width-stable glyph (#3406) (`b6a43955d3`)
+
 ## [0.5.6] - 2026-11-26
 
 ### Fixed
