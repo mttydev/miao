@@ -29,6 +29,8 @@ fn composer_column(width: u16) -> u16 {
 
 /// Where the body splits between the transcript and the sidebar.
 ///
+/// One column of the rule and one empty column left of it sit between the two
+/// panes, and [`paint_divider`] owns both.
 fn body_columns(area: Rect) -> (Rect, Option<Rect>) {
     if area.width < SIDEBAR_MIN_WIDTH {
         return (area, None);
@@ -41,7 +43,7 @@ fn body_columns(area: Rect) -> (Rect, Option<Rect>) {
     (
         Rect {
             x: area.x,
-            width: split.saturating_sub(1),
+            width: split.saturating_sub(2),
             ..area
         },
         Some(Rect {
@@ -856,45 +858,59 @@ impl Shell {
             );
         }
         // The rule separates the columns; it is not part of either one. Paint it
-        // last, after every pane: a band that pads to its own edge, a wide glyph
-        // clipped at the last column, or any one-cell overflow then cannot leave
-        // a gap in the divider or tint it with that row's colour. That is what a
-        // Windows terminal showed as a broken rule with green remnants in it.
+        // last, after every pane, together with the empty column left of it: no
+        // pane prints there, so nothing can leave a gap in the divider or tint
+        // it with that row's colour. That is what a Windows terminal showed as
+        // a broken rule with green remnants in it. The rule is a frame edge, so
+        // it takes the border colour the composer's box does: `text_muted` is
+        // the colour of secondary text, and read as a white line down the page.
         if let Some(area) = sidebar_area {
             let style = Style::new()
-                .fg(self.transcript.theme.palette.text_muted)
+                .fg(self.transcript.theme.palette.border)
                 .bg(self.transcript.theme.palette.background);
-            paint_divider(frame.buffer_mut(), area, style);
+            paint_divider(
+                frame.buffer_mut(),
+                area,
+                style,
+                self.transcript.body_unchanged,
+            );
         }
     }
 }
 
-/// Paint the divider column and keep a wide glyph from leaning on it.
+/// Paint the divider column and the empty column left of it.
 ///
-/// The crossterm backend repositions the cursor only when the next cell is not
-/// at `x + 1`. A wide glyph advances the terminal two columns, so the cell
-/// right after it is printed one column to the right whenever that cell changed
-/// in the same frame. At the conversation's edge that print lands on the
-/// divider and the rule cell then goes one column into the sidebar: the broken,
-/// intermittently gapped rule Windows terminals showed. Replacing a wide glyph
-/// in the last two conversation columns keeps every row of the divider on its
-/// own column. The rule is also marked [`CellDiffOption::AlwaysUpdate`]: a
-/// terminal that dropped a row (a wide glyph, a host renderer, a resize) must
-/// get the cell back even when the buffer's rule cell itself did not change.
-fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
+/// The rule is marked [`CellDiffOption::AlwaysUpdate`]: a terminal that
+/// dropped a row (a wide glyph, a host renderer, a resize) must get the cell
+/// back even when the buffer's rule cell itself did not change.
+///
+/// [`body_columns`] lays no pane out over the column left of the rule, so no
+/// glyph sits beside it. A terminal that lays a character out two columns wide
+/// where `unicode-width` counts one — the East Asian Ambiguous symbols the
+/// transcript prints, on a CJK console — would otherwise let a glyph in that
+/// last column cover the rule's cell. The gutter itself is sent only when it
+/// changes: such a glyph ends in it, and rewriting the cell would erase the
+/// glyph's first half with it.
+///
+/// `heal` says the frame did not move the transcript's viewport. Only then is
+/// the rule marked [`CellDiffOption::AlwaysUpdate`]: a host that re-encodes the
+/// screen prints a dirty rule right after the row it has just repainted, one
+/// column off per glyph whose width it counts differently from the terminal.
+/// A frame that moved the body leaves the mark off, so the host does not print
+/// the rule at all; the next quiet frame carries every row of it again, which
+/// is what brings back a row the terminal dropped.
+fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style, heal: bool) {
     if area.x == 0 {
         return;
     }
     for y in area.y..area.y + area.height {
-        for x in [area.x.saturating_sub(2), area.x - 1] {
-            if buffer[(x, y)].symbol().width() > 1 {
-                buffer[(x, y)].set_symbol(" ");
-            }
+        buffer[(area.x - 1, y)]
+            .set_symbol(" ")
+            .set_style(Style::new().bg(style.bg.unwrap_or(Color::Reset)));
+        let rule = buffer[(area.x, y)].set_symbol("│").set_style(style);
+        if heal {
+            rule.set_diff_option(CellDiffOption::AlwaysUpdate);
         }
-        buffer[(area.x, y)]
-            .set_symbol("│")
-            .set_style(style)
-            .set_diff_option(CellDiffOption::AlwaysUpdate);
     }
 }
 
@@ -1077,6 +1093,12 @@ pub struct TranscriptPane {
     /// characters own their first cell and leave the continuation empty, so a
     /// column index is a screen column.
     rendered: Vec<Vec<String>>,
+    /// Whether the viewport this frame paints is the one the last frame did.
+    /// A frame that moved the body leaves the rule out of its diff; a quiet
+    /// frame carries it. See `paint_divider`.
+    body_unchanged: bool,
+    /// The lines the last frame painted, which `body_unchanged` compares to.
+    last_lines: Vec<Line<'static>>,
 }
 
 /// How long a streamed draft may lag the deltas that arrived. Re-parsing a long
@@ -1125,6 +1147,8 @@ impl TranscriptPane {
             area: Rect::default(),
             selection: None,
             rendered: Vec::new(),
+            body_unchanged: true,
+            last_lines: Vec::new(),
         }
     }
 
@@ -1481,6 +1505,10 @@ impl Pane for TranscriptPane {
                 }
             }
         }
+        // The rule is painted only on a frame that leaves this viewport alone;
+        // see `paint_divider`.
+        self.body_unchanged = visible == self.last_lines;
+        self.last_lines.clone_from(&visible);
         // Borderless, like the TypeScript layout this mirrors: a frame around
         // the transcript only steals columns from the text.
         frame.render_widget(
@@ -4292,7 +4320,7 @@ impl Pane for SidebarPane {
         // the divider that did not match the page on either side of it.
         let edge = Block::new()
             .borders(Borders::LEFT)
-            .border_style(Style::new().fg(palette.text_muted).bg(palette.background))
+            .border_style(Style::new().fg(palette.border).bg(palette.background))
             .style(Style::new().bg(palette.background))
             .padding(ratatui::widgets::Padding::left(2));
         let inner = edge.inner(outer);
@@ -8328,7 +8356,8 @@ mod tests {
             "a queued prompt long enough to reach the sidebar when the band is painted at the window's width, and then some more".to_string(),
         ]);
         let width = 160u16;
-        let column = body_columns(Rect::new(0, 0, width, 1)).0.width;
+        let (_, sidebar) = body_columns(Rect::new(0, 0, width, 1));
+        let column = sidebar.expect("the sidebar is shown").x;
         assert!(
             column < width - 1,
             "the sidebar takes columns from the band"
@@ -9366,12 +9395,13 @@ mod tests {
         let (prose, sidebar) = body_columns(area);
         let sidebar = sidebar.expect("wide enough for both");
         assert_eq!(prose.x, 0, "the prose starts at the window's edge");
-        assert_eq!(prose.width, 200 - SIDEBAR_WIDTH - 1);
+        // One column for the rule and one empty column left of it.
+        assert_eq!(prose.width, 200 - SIDEBAR_WIDTH - 2);
         assert_eq!(sidebar.width, SIDEBAR_WIDTH + 1);
         assert_eq!(
             sidebar.x,
-            prose.right(),
-            "the sidebar starts on the divider column"
+            prose.right() + 1,
+            "one empty column, then the sidebar on the divider column"
         );
         assert_eq!(sidebar.right(), area.right(), "and it holds the right edge");
     }
@@ -9385,11 +9415,12 @@ mod tests {
         let sidebar = sidebar.expect("120 columns show it");
         // The sidebar starts on the divider column and owns it: a column
         // belonging to neither pane kept the terminal's default background.
-        assert_eq!(sidebar.x, prose.right());
+        // The empty column left of the rule is the divider's, not the prose's.
+        assert_eq!(sidebar.x, prose.right() + 1);
         // The divider column is the sidebar's, so its rectangle is one wider
         // than the content column it holds.
         assert_eq!(sidebar.width, SIDEBAR_WIDTH + 1);
-        assert_eq!(prose.width, 120 - SIDEBAR_WIDTH - 1);
+        assert_eq!(prose.width, 120 - SIDEBAR_WIDTH - 2);
         // A body narrower than the threshold has no sidebar at all.
         let (prose, sidebar) = body_columns(Rect::new(0, 0, 99, 20));
         assert!(sidebar.is_none());
@@ -9405,7 +9436,11 @@ mod tests {
         let mut shell = Shell::new(Path::new("."), theme);
         let width = 160u16;
         let height = 24u16;
-        let column = body_columns(Rect::new(0, 0, width, 1)).0.width;
+        let column = body_columns(Rect::new(0, 0, width, 1))
+            .1
+            .expect("the sidebar is shown")
+            .x;
+        let border = shell.transcript.theme.palette.border;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
                 .expect("terminal");
@@ -9418,6 +9453,56 @@ mod tests {
                 "│",
                 "row {y} column {column} is the sidebar's rule"
             );
+            assert_eq!(
+                row[column as usize].fg, border,
+                "row {y} draws the rule in a text colour rather than the border's"
+            );
+        }
+    }
+
+    /// A transcript row used to run right up to the rule. A glyph in that last
+    /// column that the terminal lays out two columns wide then covered it: on
+    /// Windows the rule came back broken. Rows now end a column short of it.
+    #[test]
+    fn transcript_rows_stop_one_column_short_of_the_rule() {
+        let theme = home_theme();
+        let mut shell = Shell::new(Path::new("."), theme);
+        shell.set_transcript(&Transcript {
+            entries: vec![Entry::User {
+                text: "a ".repeat(400),
+                seq: 1,
+            }],
+            ..Transcript::default()
+        });
+        let width = 160u16;
+        let column = body_columns(Rect::new(0, 0, width, 1))
+            .1
+            .expect("the sidebar is shown")
+            .x;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24))
+            .expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        // The transcript is laid out to stop there, not painted across and
+        // erased afterwards.
+        assert_eq!(
+            shell.transcript.area.right(),
+            column - 1,
+            "the transcript is laid out over the column beside the rule"
+        );
+        let buffer = terminal.backend().buffer();
+        let rows = buffer.content.chunks(width as usize).collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row[(column - 2) as usize].symbol() != " "),
+            "no row reaches the conversation's last column"
+        );
+        for (y, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row[(column - 1) as usize].symbol(),
+                " ",
+                "row {y} prints beside the rule"
+            );
+            assert_eq!(row[column as usize].symbol(), "│", "row {y} lost the rule");
         }
     }
 
@@ -12052,7 +12137,10 @@ mod final_layout_check {
         };
         let mut shell = Shell::new(std::path::Path::new("."), theme);
         let width = 160u16;
-        let rule = body_columns(Rect::new(0, 0, width, 1)).0.width;
+        let rule = body_columns(Rect::new(0, 0, width, 1))
+            .1
+            .expect("the sidebar is shown")
+            .x;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
         terminal.draw(|frame| shell.render(frame)).unwrap();
@@ -12066,6 +12154,9 @@ mod final_layout_check {
                 CellDiffOption::AlwaysUpdate,
                 "row {y} let the terminal keep a dropped rule"
             );
+            let gutter = &buffer[(rule - 1, y)];
+            assert_eq!(gutter.symbol(), " ", "row {y} prints beside the rule");
+            assert_eq!(gutter.bg, palette.background, "row {y} tinted the gutter");
         }
     }
 
@@ -12083,7 +12174,10 @@ mod final_layout_check {
         };
         let width = 160u16;
         let height = 24u16;
-        let rule = body_columns(Rect::new(0, 0, width, 1)).0.width;
+        let rule = body_columns(Rect::new(0, 0, width, 1))
+            .1
+            .expect("the sidebar is shown")
+            .x;
         let mut shell = Shell::new(std::path::Path::new("."), theme);
         let mut first =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
@@ -12103,25 +12197,119 @@ mod final_layout_check {
         }
     }
 
-    /// A wide glyph in the conversation's last columns must not lean on the
-    /// divider. The backend prints the cell after a wide glyph one column to
-    /// the right when that cell changed, and at the pane edge that print
-    /// overwrites the rule and pushes the rule cell into the sidebar.
+    /// No pane is laid out beside the rule, so that column is empty whoever
+    /// paints the frame, and a wide glyph that ends in it stays: erasing it, as
+    /// the divider once did, dropped the last character of a Chinese line.
     #[test]
-    fn a_wide_glyph_never_leans_on_the_divider() {
+    fn the_column_beside_the_rule_stays_empty() {
         let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 2));
         buffer[(6, 0)].set_symbol("中");
         buffer[(7, 1)].set_symbol("文");
-        paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), Style::new());
+        paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), Style::new(), true);
+        assert_eq!(
+            buffer[(6, 0)].symbol(),
+            "中",
+            "a glyph ending beside the rule was erased"
+        );
         for y in 0..2 {
+            assert_eq!(
+                buffer[(7, y)].symbol(),
+                " ",
+                "row {y} kept a glyph beside the rule"
+            );
             assert_eq!(buffer[(8, y)].symbol(), "│", "row {y} lost the rule");
-            for x in [6, 7] {
-                assert_eq!(
-                    buffer[(x, y)].symbol().width(),
-                    1,
-                    "row {y} column {x} kept a wide glyph"
-                );
-            }
+        }
+    }
+
+    /// A wide glyph occupies the column beside the rule in the terminal. That
+    /// column goes out only when it changes, so a frame that leaves the glyph
+    /// alone does not print a space over its second half and erase it.
+    #[test]
+    fn an_unchanged_gutter_is_not_sent_over_a_wide_glyph() {
+        let paint = |text: &str| {
+            let style = Style::new().bg(Color::Rgb(1, 2, 3));
+            let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 2));
+            buffer[(6, 0)].set_symbol(text).set_style(style);
+            paint_divider(&mut buffer, Rect::new(8, 0, 12, 2), style, true);
+            buffer
+        };
+        let first = paint("中");
+        let second = paint("中");
+        let again = first.diff(&second);
+        assert!(
+            again.iter().all(|(x, _, _)| *x == 8),
+            "an unchanged frame sent the column beside the rule: {again:?}"
+        );
+        let narrow = paint("x");
+        let replaced = first.diff(&narrow);
+        assert!(
+            replaced
+                .iter()
+                .any(|(x, y, cell)| *x == 7 && *y == 0 && cell.symbol() == " "),
+            "the column the glyph covered was not sent back: {replaced:?}"
+        );
+    }
+
+    /// A frame that repainted the transcript must not also carry the rule: a
+    /// host that re-encodes the screen for the terminal prints a dirty rule as
+    /// a continuation of the row it has just repainted, one column off per
+    /// glyph whose width it counts differently. The quiet frame after it
+    /// carries the rule again, which is what heals a row the terminal dropped.
+    #[test]
+    fn a_moved_body_keeps_the_rule_out_of_the_diff() {
+        let palette =
+            crate::theme::builtin(crate::theme::DEFAULT_THEME, crate::theme::ThemeMode::Dark)
+                .expect("theme");
+        let theme = Theme {
+            name: crate::theme::DEFAULT_THEME.to_string(),
+            palette,
+        };
+        let width = 160u16;
+        let height = 24u16;
+        let rule = body_columns(Rect::new(0, 0, width, 1))
+            .1
+            .expect("the sidebar is shown")
+            .x;
+        let mut shell = Shell::new(std::path::Path::new("."), theme);
+        let mut transcript = Transcript {
+            entries: vec![Entry::User {
+                text: "hello".into(),
+                seq: 1,
+            }],
+            ..Transcript::default()
+        };
+        shell.set_transcript(&transcript);
+        let mut first =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        first.draw(|frame| shell.render(frame)).unwrap();
+        let previous = first.backend().buffer().clone();
+        transcript.entries.push(Entry::User {
+            text: "again".into(),
+            seq: 2,
+        });
+        shell.set_transcript(&transcript);
+        let mut second =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        second.draw(|frame| shell.render(frame)).unwrap();
+        let moved = previous.diff(second.backend().buffer());
+        assert!(
+            !moved
+                .iter()
+                .any(|(x, _, cell)| *x == rule && cell.symbol() == "│"),
+            "a frame that moved the body carried the rule"
+        );
+        let quiet = second.backend().buffer().clone();
+        let mut third =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        third.draw(|frame| shell.render(frame)).unwrap();
+        let healed = quiet.diff(third.backend().buffer());
+        for y in 0..height {
+            assert!(
+                healed
+                    .iter()
+                    .any(|(x, row, cell)| *x == rule && *row == y && cell.symbol() == "│"),
+                "row {y} was not carried by the quiet frame"
+            );
         }
     }
 }
