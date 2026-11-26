@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-11-26
+
+### Fixed
+- **tui**: repaint the whole screen once a scroll settles (#3417) (`f8a27d2084`)
+
 ## [0.5.8] - 2026-11-26
 
 ### Added
