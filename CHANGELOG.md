@@ -16,6 +16,14 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-11-26
+
+### Added
+- **engine**: let reads follow the OS user by default (#3411) (`b84622f932`)
+
+### Fixed
+- **cli**: grant configured references to the engine again (#3412) (`1f85dca656`)
+
 ## [0.5.7] - 2026-11-26
 
 ### Added
