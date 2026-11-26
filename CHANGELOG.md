@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-11-26
+
+### Fixed
+- **tui**: settle a queued prompt out of the band at once (#3426) (`efd93b39f3`)
+
 ## [0.5.10] - 2026-11-26
 
 ### Fixed
