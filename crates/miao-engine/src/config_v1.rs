@@ -65,6 +65,7 @@ const V2_KEYS: &[&str] = &[
     "cost",
     "budget",
     "sandbox",
+    "readScope",
     "skills",
     "commands",
     "instructions",
@@ -138,6 +139,7 @@ pub fn migrate(input: &Value) -> Value {
         "lsp",
         "tool_output",
         "sandbox",
+        "readScope",
         "instructions",
     ] {
         if let Some(value) = map.get(key) {

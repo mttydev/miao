@@ -95,6 +95,14 @@ fn validate(origin: &str, value: &serde_json::Value) -> Result<(), String> {
         None => {}
         Some(sandbox) => validate_sandbox(origin, sandbox)?,
     }
+    match object.get("readScope") {
+        Some(scope) if scope.as_str() != Some("host") && scope.as_str() != Some("workspace") => {
+            return Err(format!(
+                "{origin}: readScope must be \"host\" or \"workspace\""
+            ));
+        }
+        _ => {}
+    }
     match object.get("lsp") {
         None => {}
         Some(lsp) => validate_lsp(origin, lsp)?,
@@ -249,6 +257,7 @@ pub fn policy(documents: &[Document], miao_sandbox: Option<&str>) -> permission:
         process_network: true,
         auto: false,
         sandbox: sandbox_enabled(documents, miao_sandbox),
+        read_scope: read_scope(documents),
         writable_roots: writable_roots(documents),
         rules: permission_rules(&normalized),
         // Matches the engine's default; the product policy never sets it.
@@ -320,6 +329,23 @@ pub fn sandbox_enabled(documents: &[Document], miao_sandbox: Option<&str>) -> bo
     // per-invocation grant fixes it. Every platform therefore shares the same
     // explicit opt-in instead of a platform split.
     matches!(mode, Some("workspace-write"))
+}
+
+/// How far file reads may reach (product `readScope`). Absent means `host`:
+/// reads follow the engine's user, the same reach process tools have when they
+/// are not sandboxed. `workspace` is the explicit jail.
+pub fn read_scope(documents: &[Document]) -> crate::permission::ReadScope {
+    let values = documents
+        .iter()
+        .map(|document| document.value.clone())
+        .collect::<Vec<_>>();
+    match config_scope::merge_values(&values)
+        .get("readScope")
+        .and_then(Value::as_str)
+    {
+        Some("workspace") => crate::permission::ReadScope::Workspace,
+        _ => crate::permission::ReadScope::Host,
+    }
 }
 
 /// Extra directories `sandbox.writable_roots` grants the confined command.
@@ -1439,6 +1465,32 @@ mod tests {
     }
 
     #[test]
+    fn read_scope_defaults_to_host_and_accepts_the_workspace_jail() {
+        assert_eq!(
+            read_scope(&documents(&[])),
+            crate::permission::ReadScope::Host
+        );
+        assert_eq!(
+            read_scope(&documents(&[serde_json::json!({"readScope": "workspace"})])),
+            crate::permission::ReadScope::Workspace
+        );
+        assert_eq!(
+            read_scope(&documents(&[serde_json::json!({"readScope": "host"})])),
+            crate::permission::ReadScope::Host
+        );
+    }
+
+    #[test]
+    fn an_unknown_read_scope_is_refused_by_its_key() {
+        let error = load(&[Source::Content(
+            serde_json::json!({"readScope": "anywhere"}).to_string(),
+        )])
+        .err()
+        .unwrap();
+        assert!(error.contains("readScope"), "{error}");
+    }
+
+    #[test]
     fn sandbox_mode_merges_across_documents_like_the_product() {
         let merged = documents(&[
             serde_json::json!({"sandbox": {"mode": "off", "network": false}}),
@@ -1481,6 +1533,7 @@ mod tests {
                 "allow_cron": true,
                 "process_network": true,
                 "sandbox": false,
+                "read_scope": "host",
                 "writable_roots": [],
                 "rules": [],
                 "approval_timeout_ms": 60_000,

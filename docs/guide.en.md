@@ -114,6 +114,7 @@ the file that won it. Main fields:
 | `cost`                                                            | `budget_usd` money axis of the same Session budget; a Goal states its own with `goal.budget`                                                          |
 | `loop`                                                            | autonomous continuation (see §5.8)                                                                                                                   |
 | `shell`                                                           | default shell                                                                                                                                        |
+| `readScope`                                                       | where file reads reach: `host` (default; anything this user can read) or `workspace` (the workspace plus read-only references)                       |
 | `skills` / `commands` / `instructions` / `references` / `plugins` | skills, commands, instructions, references, plugins                                                                                                  |
 | `watcher` / `attachments` / `tool_output` / `snapshots`           | watcher, attachments, tool-output thresholds, snapshots                                                                                              |
 | `providers`                                                       | custom providers/models (including native-currency `cost`)                                                                                           |
@@ -216,6 +217,8 @@ The V2 `bash` tool can run each command under the OS sandbox: seatbelt on macOS,
 `MIAO_SANDBOX=1` and `MIAO_SANDBOX_DENY_NETWORK=1` override the config. `workspace-write` leaves reads unrestricted and allows writes only to the active Location, the command's working directory, temp directories, `writable_roots`, and paths you approve after a blocked write (the command is rerun with the added directory). Network is allowed unless denied. If the sandbox is requested but no backend is available, `on_unavailable` defaults to `"warn"` and the command runs unsandboxed; set `"fail"` to refuse instead. See the [integration matrix](native-benchmarks.en.md#native-tools-and-sandbox-where-they-apply) for platform limits.
 
 The native engine always confines its own process commands (bash, run_command, start_job, terminals, hooks, formatters) regardless of permission rules — a catch-all allow rule cannot lift that sandbox. It honors the same switch as an explicit operator opt-out: `sandbox.mode: "off"` in config or `MIAO_SANDBOX=0` runs engine commands unsandboxed, while `MIAO_SANDBOX=1` or `mode: "workspace-write"` keeps the confinement. With neither set, the engine stays sandboxed.
+
+File reads are a separate layer. They follow the OS user by default: a Session reads any file the user can, including another checkout, so no per-path grant is needed. `readScope: "workspace"` restores the workspace-plus-read-only-references jail. Writes and a command's working directory always stay inside the workspace.
 
 ### 5.7 Cost and cache telemetry
 

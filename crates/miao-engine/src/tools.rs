@@ -37,7 +37,7 @@ pub enum ToolError {
     External(String),
     #[error("context exceeds 64 KiB budget")]
     ContextBudget,
-    #[error("path is outside the configured workspace; copy the file into the workspace, or have the host grant it as a read-only reference")]
+    #[error("path is outside the configured workspace; writes stay inside it, while reads need readScope \"host\" or a read-only reference")]
     OutsideWorkspace,
     #[error("file must be regular UTF-8 text of at most 32768 bytes")]
     InvalidFile,
@@ -293,6 +293,9 @@ pub struct Tools {
     /// Which session's deliveries this clone reads and records. Empty is the
     /// direct-caller scope; the runtime scopes every model-driven call.
     read_scope: String,
+    /// How far the read tools may reach (product `readScope`). The write
+    /// boundary and a process tool's working directory never consult it.
+    file_reads: Arc<StdRwLock<crate::permission::ReadScope>>,
     /// VAL-04 ablation switch: `false` answers every read with the payload
     /// again instead of answering an exact repeat with its earlier delivery.
     minimal_reads: bool,
@@ -404,6 +407,7 @@ impl Tools {
             edit_snapshots: Arc::new(std::sync::Mutex::new(Snapshots::new())),
             read_ledger: Arc::new(std::sync::Mutex::new(ReadLedger::default())),
             read_scope: String::new(),
+            file_reads: Arc::new(StdRwLock::new(crate::permission::ReadScope::Host)),
             minimal_reads: true,
             edit_recovery: true,
             short_anchors: true,
@@ -573,6 +577,38 @@ impl Tools {
             .writable_roots
             .write()
             .unwrap_or_else(|held| held.into_inner()) = Arc::new(roots);
+    }
+
+    /// Set where the read tools may reach. The cell is shared by every clone,
+    /// so a configuration reload applies to the next tool call.
+    pub(crate) fn set_file_reads(&self, scope: crate::permission::ReadScope) {
+        *self
+            .file_reads
+            .write()
+            .unwrap_or_else(|held| held.into_inner()) = scope;
+    }
+
+    /// Build a clone with an explicit read reach; the default is `Host`.
+    pub fn with_file_reads(self, scope: crate::permission::ReadScope) -> Self {
+        self.set_file_reads(scope);
+        self
+    }
+
+    fn file_reads(&self) -> crate::permission::ReadScope {
+        *self
+            .file_reads
+            .read()
+            .unwrap_or_else(|held| held.into_inner())
+    }
+
+    /// A clone whose read tools keep the host's context authority: the
+    /// workspace plus read-only references. Context assembly uses it so an
+    /// instruction file the host never granted cannot enter the system prompt
+    /// merely because the read tools follow the OS user.
+    pub(crate) fn with_context_authority(&self) -> Self {
+        let mut tools = self.clone();
+        tools.file_reads = Arc::new(StdRwLock::new(crate::permission::ReadScope::Workspace));
+        tools
     }
     /// A product host can supply its resolved aggregate without standalone
     /// discovery reintroducing disabled sources or duplicating instructions.
@@ -1987,6 +2023,11 @@ impl Tools {
                 return Err(ToolError::OutsideWorkspace);
             }
             parent.join(candidate.file_name().ok_or(ToolError::InvalidInput)?)
+        } else if matches!(
+            name,
+            "read_file" | "read_image" | "list_files" | "glob" | "grep"
+        ) {
+            self.contained_read(&path).await?
         } else {
             self.contained(&path).await?
         };
@@ -2670,27 +2711,47 @@ impl Tools {
             };
         }
         if prepared.name == "glob" || prepared.name == "grep" {
-            let directory = self.directory.clone();
-            let workspace = self.root.clone();
+            let target = prepared.path.clone();
+            let name = prepared.name.clone();
             let protected = self.protected.clone();
             let policy = policy.clone();
-            let relative = prepared
-                .path
-                .strip_prefix(&self.root)
-                .map_err(|_| ToolError::OutsideWorkspace)?
-                .to_owned();
-            let query = search::Query::parse(&prepared.name, prepared.input)?;
+            let query = search::Query::parse(&name, prepared.input)?;
+            // A search inside the workspace walks the workspace handle. A host
+            // read outside it opens the named directory itself, so the same
+            // walk applies and every hit still carries a namespaced resource.
+            let (directory, relative, base, external) = match target.strip_prefix(&self.root) {
+                Ok(relative) => (
+                    self.directory.clone(),
+                    relative.to_owned(),
+                    self.root.clone(),
+                    false,
+                ),
+                Err(_) if self.file_reads() == crate::permission::ReadScope::Host => {
+                    let base = target.clone();
+                    let opened = tokio::task::spawn_blocking({
+                        let base = base.clone();
+                        move || Dir::open_ambient_dir(&base, ambient_authority())
+                    })
+                    .await
+                    .map_err(|_| {
+                        ToolError::Io(std::io::Error::other("directory worker failed"))
+                    })??;
+                    (Arc::new(opened), PathBuf::new(), base, true)
+                }
+                Err(_) => return Err(ToolError::OutsideWorkspace),
+            };
             return tokio::task::spawn_blocking(move || {
                 let _lease = read_lease;
                 search::apply(
                     search::Scope {
                         root: &directory,
-                        workspace: &workspace,
+                        base: &base,
+                        external,
                         policy: &policy,
                         protected: &protected,
                     },
                     &relative,
-                    &prepared.name,
+                    &name,
                     query,
                     &cancel,
                 )
@@ -2767,16 +2828,16 @@ impl Tools {
     fn all_definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions=vec![ToolDefinition {
             name:"read_file".into(),
-            description:"Read a UTF-8 file or PDF under the configured workspace or a host-granted read-only reference. Text reads are limited to 32768 bytes; larger files return the first window (truncated, with total_lines and a note) — pass a 1-based line offset and a line limit (up to 2000 lines) to read further windows. PDF reads return page text and page images; pass pages such as 1-3,5 (at most 20 pages) to select pages.".into(),
+            description:"Read a UTF-8 file or PDF by path. Text reads are limited to 32768 bytes; larger files return the first window (truncated, with total_lines and a note) — pass a 1-based line offset and a line limit (up to 2000 lines) to read further windows. PDF reads return page text and page images; pass pages such as 1-3,5 (at most 20 pages) to select pages.".into(),
             input_schema:json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":2000},"pages":{"type":"string"}},"required":["path"],"additionalProperties":false}),
         },ToolDefinition {
             name:"list_files".into(),
-            description:"List immediate entries of a workspace directory. Does not recurse or follow symlinks; output is bounded.".into(),
+            description:"List immediate entries of a directory. Does not recurse or follow symlinks; output is bounded.".into(),
             input_schema:json!({"type":"object","properties":{"path":{"type":"string","default":"."},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}},"additionalProperties":false}),
         }];
         definitions.extend([
-            ToolDefinition{name:"glob".into(),description:"Find workspace-relative file paths by glob under a directory. No symlink following; generated directories excluded. Per-file permissions and output/traversal budgets apply; truncated reports partial results.".into(),input_schema:json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"include_hidden":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false})},
-            ToolDefinition{name:"grep".into(),description:"Find regex matches in permitted UTF-8 workspace files under a directory. Returns paths, 1-based lines and bounded previews. Optional workspace-relative glob filter. No shell or symlink traversal.".into(),input_schema:json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"glob":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"case_sensitive":{"type":"boolean","default":true},"include_hidden":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false})},
+            ToolDefinition{name:"glob".into(),description:"Find file paths by glob under a directory. No symlink following; generated directories excluded. Per-file permissions and output/traversal budgets apply; truncated reports partial results.".into(),input_schema:json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"include_hidden":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false})},
+            ToolDefinition{name:"grep".into(),description:"Find regex matches in permitted UTF-8 files under a directory. Returns paths, 1-based lines and bounded previews. Optional glob filter. No shell or symlink traversal.".into(),input_schema:json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"glob":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},"case_sensitive":{"type":"boolean","default":true},"include_hidden":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false})},
         ]);
         // Git worktrees: the engine owns the git plumbing, so an agent can ask
         // for a second checkout without the operator leaving the TUI.
@@ -2843,7 +2904,7 @@ impl Tools {
         }
         definitions.push(ToolDefinition {
             name: "read_image".into(),
-            description: "Read a local PNG/JPEG/GIF/WebP image (up to 4 MiB) for visual understanding. The committed tool result attaches image pixels to the next provider turn; base64 is not text context. Use after extracting video frames/contact sheets with Bash, or for screenshots. Uses read permission and path boundaries.".into(),
+            description: "Read a local PNG/JPEG/GIF/WebP image (up to 4 MiB) for visual understanding. The committed tool result attaches image pixels to the next provider turn; base64 is not text context. Use after extracting video frames/contact sheets with Bash, or for screenshots. Uses read permission.".into(),
             input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
         });
         definitions.push(ToolDefinition {
@@ -2899,8 +2960,8 @@ impl Tools {
             }
         }
         if self.process_enabled() {
-            definitions.push(ToolDefinition{name:"run_command".into(),description:format!("Run an explicit argv in a workspace-write sandbox. Timeout 1..{} ms; stdout/stderr bounded to 32768 bytes each. No implicit shell and no background lifetime. pty merges stdout/stderr behind a terminal. Requires process permission. Files written outside the workspace cannot be read back with read_file or read_image.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":128},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["argv"],"additionalProperties":false})});
-            definitions.push(ToolDefinition{name:"bash".into(),description:format!("Run a shell command line (bash -c) in a workspace-write sandbox. Timeout 1..{} ms; output bounded to 32768 bytes. pty merges stdout/stderr behind a terminal. Requires process permission. Files written outside the workspace cannot be read back with read_file or read_image.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"command":{"type":"string","minLength":1},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["command"],"additionalProperties":false})});
+            definitions.push(ToolDefinition{name:"run_command".into(),description:format!("Run an explicit argv in a workspace-write sandbox. Timeout 1..{} ms; stdout/stderr bounded to 32768 bytes each. No implicit shell and no background lifetime. pty merges stdout/stderr behind a terminal. Requires process permission.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":128},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["argv"],"additionalProperties":false})});
+            definitions.push(ToolDefinition{name:"bash".into(),description:format!("Run a shell command line (bash -c) in a workspace-write sandbox. Timeout 1..{} ms; output bounded to 32768 bytes. pty merges stdout/stderr behind a terminal. Requires process permission.",crate::process::MAX_TIMEOUT_MS),input_schema:json!({"type":"object","properties":{"command":{"type":"string","minLength":1},"cwd":{"type":"string","default":"."},"timeout_ms":{"type":"integer","minimum":1,"maximum":crate::process::MAX_TIMEOUT_MS,"default":crate::process::DEFAULT_TIMEOUT_MS},"pty":{"type":"boolean","default":false}},"required":["command"],"additionalProperties":false})});
         }
         if self.background_enabled() {
             let mut start = definitions
@@ -2909,7 +2970,7 @@ impl Tools {
                 .expect("background requires process")
                 .clone();
             start.name = "start_job".into();
-            start.description="Admit a sandboxed foreground-sized command as a background job. Returns queued job_id; the job survives turn cancel, but runtime shutdown cancels it. Existing-file edits must account for external-writer races. Pass eta_ms when you can estimate how long it will run: the operator then sees a remaining-time countdown while it runs instead of a bare elapsed clock. Files written outside the workspace cannot be read back with read_file or read_image.".into();
+            start.description="Admit a sandboxed foreground-sized command as a background job. Returns queued job_id; the job survives turn cancel, but runtime shutdown cancels it. Existing-file edits must account for external-writer races. Pass eta_ms when you can estimate how long it will run: the operator then sees a remaining-time countdown while it runs instead of a bare elapsed clock.".into();
             // The estimate is display only, so it is declared on the background
             // face alone: a foreground `run_command` has an answer inline and
             // nobody waits beside it.
@@ -2984,6 +3045,18 @@ impl Tools {
             return Ok(path);
         }
         Err(ToolError::OutsideWorkspace)
+    }
+
+    /// Canonical containment for the read tools alone. `ReadScope::Host` (the
+    /// default) stops at the OS user's own permissions; `Workspace` keeps the
+    /// workspace-plus-references jail. Writes and process working directories
+    /// never call this.
+    async fn contained_read(&self, path: &str) -> Result<PathBuf, ToolError> {
+        if self.file_reads() == crate::permission::ReadScope::Host {
+            let joined = self.root.join(path);
+            return Ok(canonical_plain(tokio::fs::canonicalize(&joined).await?));
+        }
+        self.contained(path).await
     }
 
     /// Patch targets may not exist yet (Add File). Canonicalize the nearest
@@ -3145,7 +3218,7 @@ impl Tools {
                     use base64::Engine;
                     let input: ReadInput =
                         serde_json::from_value(input).map_err(|_| ToolError::InvalidInput)?;
-                    let path = self.contained(&input.path).await?;
+                    let path = self.contained_read(&input.path).await?;
                     let file = tokio::fs::File::open(&path).await?;
                     let metadata = file.metadata().await?;
                     if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
@@ -3179,7 +3252,7 @@ impl Tools {
                 "read_file" => {
                     let input: ReadInput =
                         serde_json::from_value(input).map_err(|_| ToolError::InvalidInput)?;
-                    let path = self.contained(&input.path).await?;
+                    let path = self.contained_read(&input.path).await?;
                     let metadata = tokio::fs::metadata(&path).await?;
                     if !metadata.is_file() {
                         return Err(ToolError::InvalidFile);
@@ -3366,7 +3439,7 @@ impl Tools {
                     if !(1..=500).contains(&input.limit) {
                         return Err(ToolError::InvalidInput);
                     }
-                    let path = self.contained(&input.path).await?;
+                    let path = self.contained_read(&input.path).await?;
                     let mut directory = tokio::fs::read_dir(path).await?;
                     let mut entries = Vec::new();
                     let mut truncated = false;
@@ -3517,6 +3590,69 @@ mod write_containment_tests {
             .await
             .expect("a patch under the workspace must prepare");
         assert!(patch.resolved_path().starts_with(tools.location()));
+    }
+
+    #[tokio::test]
+    async fn host_reads_reach_outside_and_writes_or_the_jail_do_not() {
+        use crate::permission::{Config, Policy};
+        use tokio_util::sync::CancellationToken;
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("notes.md"), "outside").unwrap();
+        let tools = Tools::new(workspace.path()).await.unwrap();
+
+        // `glob` is dispatched through `prepare`/`execute_prepared`, not the
+        // direct-caller `execute` match.
+        let prepared = tools
+            .prepare(
+                "glob",
+                json!({"pattern": "*.md", "path": external.path().to_string_lossy()}),
+            )
+            .await
+            .expect("a host read of an external directory must prepare");
+        let found = tools
+            .execute_prepared(
+                prepared,
+                &Policy::new(Config::default()).unwrap(),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        // The walk reports the canonical spelling, so compare against it.
+        let document = std::fs::canonicalize(external.path().join("notes.md")).unwrap();
+        assert!(
+            found["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hit| hit["path"] == json!(document.to_string_lossy())),
+            "{found}"
+        );
+
+        // Writes stay inside the Session root.
+        tools.set_gates(writing_tools());
+        assert!(matches!(
+            tools
+                .prepare(
+                    "write_file",
+                    json!({"path": external.path().join("out.txt"), "text": "x", "expected_sha256": null})
+                )
+                .await,
+            Err(ToolError::OutsideWorkspace)
+        ));
+
+        // The explicit jail keeps the old behaviour, for reads only.
+        let jailed = tools.with_file_reads(crate::permission::ReadScope::Workspace);
+        assert!(matches!(
+            jailed
+                .prepare(
+                    "read_file",
+                    json!({"path": external.path().join("notes.md")})
+                )
+                .await,
+            Err(ToolError::OutsideWorkspace)
+        ));
     }
 
     #[tokio::test]

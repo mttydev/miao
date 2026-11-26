@@ -207,6 +207,10 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   sandbox: ConfigSandbox.Info.pipe(Schema.optional).annotate({
     description: "OS sandbox for bash commands",
   }),
+  readScope: Schema.Literals(["host", "workspace"]).pipe(Schema.optional).annotate({
+    description:
+      "How far the file read tools reach: host (default; anything this user can read) or workspace (the workspace plus read-only references). Writes always stay inside the workspace.",
+  }),
   skills: Schema.String.pipe(Schema.Array, Schema.optional).annotate({
     description: "Additional paths or URLs to discover skills from",
   }),

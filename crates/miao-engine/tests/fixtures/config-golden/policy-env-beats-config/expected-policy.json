@@ -10,6 +10,7 @@
   "allow_cron": true,
   "process_network": true,
   "sandbox": true,
+  "read_scope": "host",
   "writable_roots": [],
   "rules": [],
   "approval_timeout_ms": 60000,

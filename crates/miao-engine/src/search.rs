@@ -127,7 +127,12 @@ fn glob(pattern: &str) -> Result<GlobMatcher, ToolError> {
 /// relative to its pinned parent; permission is checked before file content IO.
 pub(crate) struct Scope<'a> {
     pub root: &'a Dir,
-    pub workspace: &'a Path,
+    /// The absolute directory `root` was opened at: protected paths and
+    /// external permission resources resolve against it.
+    pub base: &'a Path,
+    /// Whether the walk runs outside the workspace. External hits are reported
+    /// by absolute path and named `@reference/<absolute path>` for policy.
+    pub external: bool,
     pub policy: &'a Policy,
     pub protected: &'a [PathBuf],
 }
@@ -141,7 +146,8 @@ pub(crate) fn apply(
 ) -> Result<Value, ToolError> {
     let Scope {
         root,
-        workspace,
+        base,
+        external,
         policy,
         protected,
     } = scope;
@@ -191,12 +197,27 @@ pub(crate) fn apply(
                 .components()
                 .map(|part| part.as_os_str().to_str().ok_or(ToolError::InvalidInput))
                 .collect::<Result<Vec<_>, _>>()?;
-            let resource = parts.join("/");
+            let relative = parts.join("/");
+            let resource = if external {
+                format!(
+                    "@reference/{}",
+                    base.join(&child)
+                        .to_string_lossy()
+                        .trim_start_matches(['/', '\\'])
+                )
+            } else {
+                relative.clone()
+            };
+            let display = if external {
+                base.join(&child).to_string_lossy().into_owned()
+            } else {
+                relative.clone()
+            };
             if resource.len() > 4096 {
                 truncated = true;
                 continue;
             }
-            if protected.contains(&workspace.join(&child))
+            if protected.contains(&base.join(&child))
                 || policy.evaluate(name, &resource, Access::Read) != Decision::Allow
             {
                 skipped_policy += 1;
@@ -221,7 +242,7 @@ pub(crate) fn apply(
                 || query
                     .matcher
                     .as_ref()
-                    .is_some_and(|matcher| !matcher.is_match(&resource))
+                    .is_some_and(|matcher| !matcher.is_match(&relative))
             {
                 continue;
             }
@@ -264,7 +285,7 @@ pub(crate) fn apply(
                         continue;
                     }
                     let preview: String = text.chars().take(512).collect();
-                    let result = json!({"path":resource,"sha256":sha256,"line":line+1,"text":preview,"line_truncated":text.chars().count()>512});
+                    let result = json!({"path":display,"sha256":sha256,"line":line+1,"text":preview,"line_truncated":text.chars().count()>512});
                     output_bytes += serde_json::to_vec(&result)
                         .map_err(|_| ToolError::InvalidInput)?
                         .len();
@@ -275,12 +296,12 @@ pub(crate) fn apply(
                     results.push(result);
                 }
             } else {
-                output_bytes += resource.len() + 8;
+                output_bytes += display.len() + 8;
                 if output_bytes > 30000 || results.len() >= query.limit {
                     truncated = true;
                     break 'walk;
                 }
-                results.push(json!({"path":resource}));
+                results.push(json!({"path":display}));
             }
         }
     }

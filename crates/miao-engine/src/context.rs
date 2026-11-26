@@ -615,6 +615,11 @@ pub(crate) async fn assemble_for_agent(
     reads: &[ReadSource],
     reserve: usize,
 ) -> Result<ContextBundle, ToolError> {
+    // Instruction sources keep the host's authority (the workspace or an
+    // explicit read-only reference) even though the read tools follow the OS
+    // user: a file the host never granted must not enter the system prompt.
+    let tools = &tools.with_context_authority();
+
     if cancel.is_cancelled() {
         return Err(ToolError::Interrupted);
     }
