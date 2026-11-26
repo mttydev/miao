@@ -45,6 +45,15 @@ pub enum Screen {
 /// frames is a real gap rather than scheduler jitter.
 const LIVE_SILENCE: Duration = Duration::from_secs(15);
 
+/// How long after the last scroll the seamless full repaint runs.
+///
+/// A terminal can drop a cell while the transcript moves — a Windows console
+/// re-encodes the screen it hands the terminal — and ratatui's diff then
+/// believes that cell is drawn, so nothing re-sends it. One full repaint after
+/// the scroll settles repairs it; doing it per notch would resend the whole
+/// screen for the length of the burst.
+const SCROLL_REPAINT: Duration = Duration::from_millis(200);
+
 /// How long a transient notice stays on screen. Long enough to read a
 /// sentence, short enough that it does not outlive its own event.
 const NOTICE_LIFETIME: Duration = Duration::from_secs(5);
@@ -791,6 +800,10 @@ pub struct App {
     bus: Option<Bus>,
     pending_editor: Option<editor::Request>,
     redraw_requested: bool,
+    /// A seamless full repaint is owed after the scroll that asked for it.
+    repaint_all_requested: bool,
+    /// When the scroll settled. See [`SCROLL_REPAINT`].
+    scroll_repaint_due: Option<Instant>,
     suspend_requested: bool,
     terminal_title_enabled: bool,
     terminal_title_allowed: bool,
@@ -990,6 +1003,8 @@ impl App {
             bus: None,
             pending_editor: None,
             redraw_requested: false,
+            repaint_all_requested: false,
+            scroll_repaint_due: None,
             suspend_requested: false,
             terminal_title_enabled: true,
             terminal_title_allowed: true,
@@ -1063,6 +1078,21 @@ impl App {
 
     pub fn take_redraw_request(&mut self) -> bool {
         std::mem::take(&mut self.redraw_requested)
+    }
+
+    /// The seamless full repaint a settled scroll asked for. The loop empties
+    /// both of ratatui's diff buffers instead of clearing the screen, so every
+    /// cell is re-sent without a blank frame.
+    pub fn take_repaint_all_request(&mut self) -> bool {
+        std::mem::take(&mut self.repaint_all_requested)
+    }
+
+    /// The transcript moved: schedule its full repaint for once the scroll
+    /// settles. A terminal can lose a cell of the rows a repaint moved, and the
+    /// diff will not re-send a cell it believes is drawn — the older glyph then
+    /// stays at the row's edge.
+    fn scrolled(&mut self) {
+        self.scroll_repaint_due = Some(Instant::now() + SCROLL_REPAINT);
     }
 
     /// The TUI is leaving: an idle report stops the tab claiming a run that
@@ -1827,6 +1857,7 @@ impl App {
                 // snapping to the newest row on the next projection.
                 if switched {
                     self.shell.follow_transcript();
+                    self.scrolled();
                 }
                 self.screen = Screen::Session;
                 self.sync_panel();
@@ -2148,6 +2179,7 @@ impl App {
                 // arrive in a burst and acceleration is enabled.
                 let rows = self.scroll.rows(Instant::now(), delta as i8) as i32;
                 self.shell.scroll_transcript(delta * rows);
+                self.scrolled();
                 // The oldest row is on screen and the wheel still asks for
                 // more: fetch the page behind it instead of scrolling against
                 // the edge.
@@ -4652,29 +4684,35 @@ impl App {
         if action(keybinds::Action::PageUp) {
             let page = self.shell.transcript_page();
             self.shell.scroll_transcript(-page);
+            self.scrolled();
             return;
         }
         if action(keybinds::Action::PageDown) {
             let page = self.shell.transcript_page();
             self.shell.scroll_transcript(page);
+            self.scrolled();
             return;
         }
         // Home and End name the ends of the history outright: reading a long
         // run should not require paging towards either one.
         if prompt_empty && key.code == KeyCode::Home {
             self.shell.scroll_transcript_to_start();
+            self.scrolled();
             return;
         }
         if prompt_empty && key.code == KeyCode::End {
             self.shell.follow_transcript();
+            self.scrolled();
             return;
         }
         if prompt_empty && !streaming && action(keybinds::Action::LineUp) {
             self.shell.scroll_transcript(-1);
+            self.scrolled();
             return;
         }
         if prompt_empty && !streaming && action(keybinds::Action::LineDown) {
             self.shell.scroll_transcript(1);
+            self.scrolled();
             return;
         }
         if self.handle_panel_key(key) {
@@ -5293,6 +5331,17 @@ impl App {
     /// yet far less often, and an idle Session with nothing delegated asks the
     /// engine nothing at all.
     pub fn tick(&mut self) {
+        // The scroll settled and a row may be missing a cell the terminal
+        // dropped while it moved: ask the loop for one full repaint. This runs
+        // before the screen check so a scroll left over from a Session that has
+        // since closed cannot keep waking the loop for a repaint it never gets.
+        if self
+            .scroll_repaint_due
+            .is_some_and(|due| Instant::now() >= due)
+        {
+            self.scroll_repaint_due = None;
+            self.repaint_all_requested = true;
+        }
         if self.screen != Screen::Session {
             return;
         }
@@ -5573,7 +5622,13 @@ impl App {
                     .min(Duration::from_secs(1))
             })
             .min();
-        [wait, poll, self.mtty_state.footer_heartbeat()]
+        // The scroll's full repaint is due a settle window after its last
+        // notch; wake for it even when nothing else changes on screen.
+        let scroll = self.scroll_repaint_due.map(|due| {
+            due.saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1))
+        });
+        [wait, poll, scroll, self.mtty_state.footer_heartbeat()]
             .into_iter()
             .flatten()
             .min()
@@ -6264,6 +6319,7 @@ impl App {
         // transcript left detached by an earlier scroll re-attaches here,
         // or the whole run streams by out of sight.
         self.shell.follow_transcript();
+        self.scrolled();
         let Some(session_id) = self.session.as_ref().map(|session| session.id.clone()) else {
             self.shell.composer.restore_with(&text, attachments);
             return;
@@ -7296,6 +7352,37 @@ mod tests {
         assert!(
             app.shell.following(),
             "the last visible row is the tail, so one notch back follows again"
+        );
+    }
+
+    /// A terminal can drop a cell while the transcript moves — a Windows
+    /// console re-encodes the screen it hands the terminal — and ratatui then
+    /// believes that cell is drawn, so nothing re-sends it and an older glyph
+    /// stays at the row's edge. The scroll asks for one seamless full repaint a
+    /// settle window later, not one per notch.
+    #[test]
+    fn a_settled_scroll_asks_for_one_seamless_full_repaint() {
+        let mut app = session_app();
+        app.handle(wheel(MouseEventKind::ScrollUp));
+        assert!(
+            !app.take_repaint_all_request(),
+            "a scroll in flight repaints its own rows"
+        );
+        assert!(
+            app.next_repaint()
+                .is_some_and(|wait| wait <= SCROLL_REPAINT),
+            "the settle window has to wake the loop"
+        );
+        std::thread::sleep(SCROLL_REPAINT + Duration::from_millis(20));
+        app.tick();
+        assert!(
+            app.take_repaint_all_request(),
+            "a settled scroll owes one full repaint"
+        );
+        app.tick();
+        assert!(
+            !app.take_repaint_all_request(),
+            "the repaint is owed once per settled scroll"
         );
     }
 
