@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-11-26
+
+### Fixed
+- **tui**: send a typed custom answer when Enter ends the typing (#3404) (`db9043027`)
+
 ## [0.5.5] - 2026-11-26
 
 ### Fixed
