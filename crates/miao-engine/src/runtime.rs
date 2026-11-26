@@ -1132,7 +1132,8 @@ impl Runtime {
                         {
                             eprintln!(
                                 "miao-engine: Session {session} worktree {root} is gone; \
-                                 re-homed at {tree}"
+                                 re-homed at {tree}. History is intact; uncommitted changes \
+                                 in the removed tree were not recovered."
                             );
                             continue;
                         }
