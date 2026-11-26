@@ -10008,7 +10008,11 @@ mod tests {
         // build showed "paused: waiting" and nothing else, so a reader could
         // not tell a long job from a wedged one.
         let mut app = session_app();
-        app.jobs = vec![running_job(6 * 60_000, Some(20 * 60_000))];
+        // The estimate is half a minute past the whole minute on purpose: the
+        // line counts down from a clock read a moment later than the fixture,
+        // so a whole-minute ETA drops to `13m 59s` as soon as the test runs and
+        // the assertion below reads as a failure.
+        app.jobs = vec![running_job(6 * 60_000, Some(20 * 60_000 + 30_000))];
         let line = app.waiting_line().expect("a running job is a live wait");
         assert!(line.contains("waiting on 1 background job"), "{line}");
         assert!(line.contains("6m "), "the clock it has run: {line}");
