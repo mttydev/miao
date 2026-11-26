@@ -224,6 +224,12 @@ async fn drive(
     update_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let _ = title.update(app.terminal_title().as_deref());
+        // A settled scroll asks for the same seamless repaint a failed paint
+        // does: the rows it moved may have lost a cell in the terminal's copy,
+        // and the diff will not re-send a cell it believes is already drawn.
+        if app.take_repaint_all_request() {
+            repaint_all = true;
+        }
         if repaint_all {
             // A paint failed, so the terminal is missing cells ratatui believes
             // it already wrote. Emptying both diff buffers makes the next draw
