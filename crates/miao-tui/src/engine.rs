@@ -787,11 +787,11 @@ pub fn unrouted_notice(args: &[String], model: &str, supplied_by_shim: bool) -> 
     )
 }
 
-pub fn settings(
+pub(crate) fn settings(
     workspace: &Path,
     db: Option<PathBuf>,
     model: Option<String>,
-    config_dir: Option<PathBuf>,
+    config: ConfigSource<'_>,
     auto_approve: bool,
     agent: Option<&str>,
     remote_host: Option<PathBuf>,
@@ -808,7 +808,13 @@ pub fn settings(
     let model = model
         .or_else(|| std::env::var("MIAO_TUI_MODEL").ok())
         .unwrap_or_else(|| UNROUTED_MODEL.to_string());
-    let config_dir = config_dir.or_else(crate::config::global_dir);
+    // A direct TUI start names no directory; it still gets the product's
+    // global configuration unless the launcher resolved a plan.
+    let default_dir = crate::config::global_dir();
+    let config = match config {
+        ConfigSource::Plan(plan) => ConfigSource::Plan(plan),
+        ConfigSource::Dir(dir) => ConfigSource::Dir(dir.or(default_dir.as_deref())),
+    };
     let spawn = EngineSpawn {
         program: engine_binary(),
         args: launch_args(
@@ -816,7 +822,7 @@ pub fn settings(
                 &db,
                 workspace,
                 &model,
-                config_dir.as_deref(),
+                config,
                 auto_approve,
                 agent,
                 |name| std::env::var(name).ok(),
@@ -869,11 +875,19 @@ fn launch_args(args: Vec<String>, prefix: Option<&str>) -> Result<Vec<String>, S
 /// the configuration directory plus the operator's `MIAO_ENGINE_*` knobs to the
 /// engine, and a Rust-run Session has to read the same configuration or it
 /// would run with a different policy, provider route, or tool set.
+/// Where the engine reads its configuration: the host's ordered plan when the
+/// launcher resolved one, otherwise a single directory (or nothing, which lets
+/// the engine's own defaults decide).
+pub(crate) enum ConfigSource<'a> {
+    Plan(&'a str),
+    Dir(Option<&'a Path>),
+}
+
 fn args(
     db: &Path,
     workspace: &Path,
     model: &str,
-    config_dir: Option<&Path>,
+    config: ConfigSource<'_>,
     auto_approve: bool,
     agent: Option<&str>,
     env: impl Fn(&str) -> Option<String>,
@@ -890,8 +904,13 @@ fn args(
     if model != UNROUTED_MODEL {
         push(&mut args, "--model", model.to_string());
     }
-    if let Some(dir) = config_dir {
-        push(&mut args, "--config-dir", dir.display().to_string());
+    match config {
+        ConfigSource::Plan(plan) => push(&mut args, "--config-sources", plan.to_string()),
+        ConfigSource::Dir(dir) => {
+            if let Some(dir) = dir {
+                push(&mut args, "--config-dir", dir.display().to_string());
+            }
+        }
     }
     // A valueless flag: the engine parses its presence as the operator's
     // launch-wide classifier approval.
@@ -3264,7 +3283,7 @@ mod tests {
             Path::new("/data/miao.db"),
             Path::new("/work"),
             "openai/gpt-5",
-            Some(Path::new("/config")),
+            ConfigSource::Dir(Some(Path::new("/config"))),
             false,
             None,
             environment(&[]),
@@ -3286,12 +3305,28 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_argv_carries_the_configuration_plan_instead_of_a_directory() {
+        let argv = args(
+            Path::new("/data/miao.db"),
+            Path::new("/work"),
+            "openai/gpt-5",
+            ConfigSource::Plan(r#"[{"dir":"/config"},{"dir":"/work/.miao"}]"#),
+            false,
+            None,
+            environment(&[]),
+        );
+        assert!(argv.windows(2).any(|pair| pair[0] == "--config-sources"
+            && pair[1] == r#"[{"dir":"/config"},{"dir":"/work/.miao"}]"#));
+        assert!(!argv.iter().any(|arg| arg == "--config-dir"));
+    }
+
+    #[test]
     fn the_agent_option_rides_to_the_engine_as_agent_name() {
         let argv = args(
             Path::new("/data/miao.db"),
             Path::new("/work"),
             "openai/gpt-5",
-            None,
+            ConfigSource::Dir(None),
             false,
             Some("reviewer"),
             environment(&[]),
@@ -3303,7 +3338,7 @@ mod tests {
             Path::new("/data/miao.db"),
             Path::new("/work"),
             "openai/gpt-5",
-            None,
+            ConfigSource::Dir(None),
             false,
             None,
             environment(&[]),
@@ -3341,7 +3376,7 @@ mod tests {
             Path::new("/data/miao.db"),
             Path::new("/work"),
             "openai/gpt-5",
-            None,
+            ConfigSource::Dir(None),
             false,
             None,
             environment(&[
@@ -3375,7 +3410,7 @@ mod tests {
             Path::new("/data/miao.db"),
             Path::new("/work"),
             "m",
-            None,
+            ConfigSource::Dir(None),
             false,
             None,
             environment(&[]),
