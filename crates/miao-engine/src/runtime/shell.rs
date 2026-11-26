@@ -52,7 +52,7 @@ pub(super) async fn execute(
         }
     }
     let _keepalive = LeaseKeepalive(tokio::spawn(keep_lease(
-        inner.store.clone(),
+        inner.clone(),
         lease.clone(),
         run.clone(),
         cursor,

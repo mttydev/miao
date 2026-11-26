@@ -2904,6 +2904,10 @@ fn interrupt_reason(by: Option<&str>) -> String {
         Some("take_back") => "stopped while taking back a queued message".to_string(),
         Some("shutdown") => "stopped because miao was shutting down".to_string(),
         Some("session_closed") => "stopped because the Session was closed".to_string(),
+        Some("lease_lost") => "stopped because another window took over this Session".to_string(),
+        Some("lease_unavailable") => {
+            "stopped because the Session lease could not be renewed".to_string()
+        }
         Some(other) => format!("stopped ({other})"),
         None => "stopped before it finished".to_string(),
     };
@@ -9613,6 +9617,10 @@ mod tests {
         assert_eq!(lines[2].line.spans[0].style.fg, Some(theme.palette.warning));
         // An origin this build has not learned yet is printed as recorded.
         assert!(interrupt_reason(Some("remote")).contains("remote"));
+        // A stop the engine decided on names itself instead of reading like a
+        // dead turn: these two are why a stalled ledger used to look like nothing.
+        assert!(interrupt_reason(Some("lease_lost")).contains("another window"));
+        assert!(interrupt_reason(Some("lease_unavailable")).contains("could not be renewed"));
         assert!(interrupt_reason(None).contains("send a message to continue"));
     }
 

@@ -4454,24 +4454,67 @@ pub(crate) struct WriteTx<'a> {
     tx: Transaction<'a>,
     _lock: WriteLock,
     ledger_path: std::path::PathBuf,
+    started: std::time::Instant,
 }
 
 impl<'a> WriteTx<'a> {
     pub(crate) fn commit(self) -> Result<(), Error> {
-        self.tx.commit()?;
-        // A serve process holds its WAL open indefinitely; without a
-        // checkpoint the WAL grows unbounded and independent readers (external
-        // `session list`, `sqlite3` on the ledger, the acceptance harness) see
-        // none of the writes until the process exits. PASSIVE merges committed
-        // frames into the main database without blocking writers or readers,
-        // and a failed checkpoint only delays visibility without losing data.
-        if let Ok(checkpoint_conn) = rusqlite::Connection::open_with_flags(
-            &self.ledger_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        ) {
-            let _ = checkpoint_conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+        let WriteTx {
+            tx,
+            _lock,
+            ledger_path,
+            started,
+        } = self;
+        tx.commit()?;
+        // The cross-process lock exists to serialize transactions; it must not
+        // cover the WAL merge. Holding it across the checkpoint made every other
+        // writer — and every lease renewal — queue behind a multi-second pass
+        // over a multi-gigabyte ledger.
+        drop(_lock);
+        merge_wal(&ledger_path);
+        // Every other writer waits on this lock, and a lease renewal only waits
+        // five seconds: a transaction this slow is the reason a turn elsewhere
+        // lost its claim, so it has to leave a trace naming the ledger.
+        let elapsed = started.elapsed();
+        if elapsed >= SLOW_WRITE {
+            let path = std::path::Path::new(&ledger_path);
+            crate::diagnostics::warn(
+                "slow write transaction",
+                &[
+                    ("ledger", path.display().to_string()),
+                    ("elapsed_ms", elapsed.as_millis().to_string()),
+                ],
+            );
         }
         Ok(())
+    }
+}
+
+/// How long a write transaction may hold the cross-process lock before it is
+/// worth a diagnostics line. Well under the store's five-second busy timeout,
+/// so a stall that would fence a renewal is visible while it happens.
+const SLOW_WRITE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// WAL bytes worth merging back into the ledger. Below this the frames are cheap
+/// for any reader to follow, and a merge is pure overhead: a fresh connection
+/// plus a checkpoint per commit serialized writers on the ledgers this product
+/// actually grows, without changing what a reader observes.
+const WAL_MERGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A serve process holds its WAL open indefinitely; without a checkpoint the
+/// WAL grows unbounded and independent readers (external `session list`,
+/// `sqlite3` on the ledger, the acceptance harness) fall behind it. PASSIVE
+/// merges committed frames into the main database without blocking writers or
+/// readers, and a failed checkpoint only delays visibility without losing data.
+fn merge_wal(path: &std::path::Path) {
+    let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+    if std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0) < WAL_MERGE_BYTES {
+        return;
+    }
+    if let Ok(conn) =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+    {
+        let _ = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
     }
 }
 
@@ -4496,6 +4539,7 @@ pub(crate) fn write_tx(conn: &mut Connection) -> Result<WriteTx<'_>, Error> {
             tx,
             _lock: WriteLock(lock),
             ledger_path,
+            started: std::time::Instant::now(),
         }),
         Err(error) => {
             let _ = FileExt::unlock(&*lock);
