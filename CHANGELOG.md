@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-26
+
+### Fixed
+- **tui**: place the sidebar rule where the terminal can keep it (#3400) (`44f624dc1`)
+
 ## [0.5.4] - 2026-11-25
 
 ### Added
