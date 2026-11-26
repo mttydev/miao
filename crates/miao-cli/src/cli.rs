@@ -2673,6 +2673,16 @@ fn exit_for(message: &str) -> std::process::ExitCode {
 /// builder already reads. Without this the default entry point has no model
 /// catalogue and cannot resolve a credential.
 fn prepare_tui_engine(launch: &mut miao_tui::Launch) {
+    // The TUI builds its engine argv from the environment, so the reference
+    // manifest has to be in place before that argv is assembled. An explicit
+    // operator manifest wins.
+    if std::env::var_os("MIAO_ENGINE_REFERENCES_CONFIG").is_none() {
+        if let Some(references) =
+            assemble_references(&launch.workspace, launch.config_dir.as_deref())
+        {
+            std::env::set_var("MIAO_ENGINE_REFERENCES_CONFIG", references);
+        }
+    }
     if std::env::var_os("MIAO_ENGINE_MODEL_ROUTES_CONFIG").is_some() {
         return;
     }
@@ -4722,6 +4732,240 @@ fn assemble_skills(
     Some(path)
 }
 
+/// The read-only reference manifest the engine grants reads from.
+///
+/// The retired TypeScript host wrote this manifest and passed it as
+/// `--references-config`. After that host went away nothing materialized the
+/// key, so `references` in `miao.jsonc` was parsed and shown by `miao debug
+/// config` while every read outside the workspace stayed refused.
+fn assemble_references(
+    workspace: &std::path::Path,
+    config_dir: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let env = |name: &str| std::env::var(name).ok();
+    let layers = config_layers(workspace, config_dir, &env);
+    assemble_references_from(&layers, workspace, &env)
+}
+
+fn assemble_references_from(
+    layers: &[PathBuf],
+    workspace: &std::path::Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<PathBuf> {
+    let (grants, unsupported) = match reference_grants(layers, workspace, env) {
+        Ok(grants) => grants,
+        Err(error) => {
+            eprintln!("miao: references: {error}");
+            return None;
+        }
+    };
+    for name in unsupported {
+        eprintln!(
+            "miao: reference `{name}` names a git repository; the native product grants local \
+             paths only, so it is not granted"
+        );
+    }
+    if grants.is_empty() {
+        return None;
+    }
+    let path = std::env::temp_dir().join(format!("miao-references-{}.json", std::process::id()));
+    std::fs::write(&path, reference_manifest(grants).to_string()).ok()?;
+    Some(path)
+}
+
+fn reference_manifest(grants: Vec<serde_json::Value>) -> serde_json::Value {
+    let grants = match grants.len() {
+        // The engine refuses more than sixteen grants, and a seventeenth is not
+        // worth failing the launch over: report it and keep the first sixteen.
+        count if count > 16 => {
+            eprintln!(
+                "miao: references: {count} grants configured; the engine reads at most 16, so \
+                 the rest are dropped"
+            );
+            grants[..16].to_vec()
+        }
+        _ => grants,
+    };
+    serde_json::Value::Array(grants)
+}
+
+/// One launch's grants, derived from the same ordered documents the engine
+/// reads. A relative path resolves against the directory of the document that
+/// declared it, `~/` expands through the home directory, a hidden entry grants
+/// nothing, and a path that does not exist is skipped rather than failing the
+/// launch — the rules the retired host applied.
+fn reference_grants(
+    layers: &[PathBuf],
+    workspace: &std::path::Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(Vec<serde_json::Value>, Vec<String>), String> {
+    let home = env("HOME")
+        .or_else(|| env("USERPROFILE"))
+        .map(PathBuf::from);
+    let mut declared: Vec<(String, Declared)> = Vec::new();
+    for (origin, value) in reference_documents(layers, env)? {
+        let value = if miao_engine::config_v1::is_v1(&value) {
+            miao_engine::config_v1::migrate(&value)
+        } else {
+            miao_engine::config_v1::normalize(&value)
+        };
+        let Some(section) = value.get("references").and_then(|value| value.as_object()) else {
+            continue;
+        };
+        let base = origin
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .unwrap_or(workspace)
+            .to_path_buf();
+        for (name, entry) in section {
+            if !valid_reference_name(name) {
+                continue;
+            }
+            let Some(resolved) = reference_entry(name, entry, &base, home.as_deref()) else {
+                continue;
+            };
+            // A later document replaces an earlier declaration of the same
+            // name, including hiding it or turning it into an unsupported one.
+            match declared.iter().position(|(existing, _)| existing == name) {
+                Some(index) => declared[index].1 = resolved,
+                None => declared.push((name.clone(), resolved)),
+            }
+        }
+    }
+    let mut grants = Vec::new();
+    let mut unsupported = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
+    for (name, resolved) in declared {
+        match resolved {
+            Declared::Local(grant) => {
+                let path = grant["path"].as_str().unwrap_or_default().to_string();
+                // Two names may grant the same directory; the engine needs it
+                // once, and the first name's description is the one it shows.
+                if paths.contains(&path) {
+                    continue;
+                }
+                paths.push(path);
+                grants.push(grant);
+            }
+            Declared::Git => unsupported.push(name),
+            Declared::Ignored => {}
+        }
+    }
+    Ok((grants, unsupported))
+}
+
+enum Declared {
+    Local(serde_json::Value),
+    Git,
+    Ignored,
+}
+
+/// The documents that can declare references, in the precedence order the
+/// engine applies. `config_scope::documents` orders the file names inside one
+/// directory; the explicit file and inline document ride above the directories
+/// exactly as `--config-sources` does.
+fn reference_documents(
+    layers: &[PathBuf],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<(Option<PathBuf>, serde_json::Value)>, String> {
+    let mut documents = Vec::new();
+    for layer in layers {
+        if layer.is_dir() {
+            for (path, value) in miao_engine::config_scope::documents(std::slice::from_ref(layer))?
+            {
+                documents.push((Some(path), value));
+            }
+            continue;
+        }
+        documents.push((Some(layer.clone()), read_config_document(layer)?));
+    }
+    if let Some(file) = env("MIAO_CONFIG") {
+        let path = PathBuf::from(file);
+        documents.push((Some(path.clone()), read_config_document(&path)?));
+    }
+    if let Some(content) = env("MIAO_CONFIG_CONTENT") {
+        let value = miao_engine::config_scope::parse_document(&content)
+            .map_err(|error| format!("inline config: {error}"))?;
+        documents.push((None, value));
+    }
+    Ok(documents)
+}
+
+fn read_config_document(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    miao_engine::config_scope::parse_document(&text)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn valid_reference_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.chars().any(|character| {
+            character == '/' || character == '`' || character == ',' || character.is_whitespace()
+        })
+}
+
+fn reference_entry(
+    name: &str,
+    entry: &serde_json::Value,
+    base: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Option<Declared> {
+    let (path, description) = match entry {
+        serde_json::Value::String(path) => {
+            let local = path.starts_with('.') || path.starts_with('/') || path.starts_with('~');
+            if !local {
+                return Some(Declared::Git);
+            }
+            (path.as_str(), name)
+        }
+        serde_json::Value::Object(map) => {
+            if map.get("hidden").and_then(serde_json::Value::as_bool) == Some(true) {
+                return Some(Declared::Ignored);
+            }
+            match map.get("path").and_then(serde_json::Value::as_str) {
+                Some(path) => (
+                    path,
+                    map.get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|description| !description.is_empty())
+                        .unwrap_or(name),
+                ),
+                None if map.contains_key("repository") => return Some(Declared::Git),
+                None => return Some(Declared::Ignored),
+            }
+        }
+        _ => return Some(Declared::Ignored),
+    };
+    let resolved = resolve_reference_path(path, base, home)?;
+    let canonical = std::fs::canonicalize(&resolved).ok()?;
+    let description: String = description.chars().take(64).collect();
+    Some(Declared::Local(serde_json::json!({
+        "path": canonical.display().to_string(),
+        "description": description,
+    })))
+}
+
+fn resolve_reference_path(
+    path: &str,
+    base: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    if path == "~" {
+        return home.map(std::path::Path::to_path_buf);
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home.map(|home| home.join(rest));
+    }
+    let path = std::path::Path::new(path);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    })
+}
+
 /// Write the assembled instructions as the agent manifest the engine reads.
 fn agent_manifest(instructions: &str) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!("miao-agent-{}.json", std::process::id()));
@@ -4900,6 +5144,14 @@ fn engine_argv_with(
             }
         }
     }
+    // The configured references become the engine's read-only read scope. An
+    // explicit host manifest wins; the environment table below forwards it.
+    if env("MIAO_ENGINE_REFERENCES_CONFIG").is_none() {
+        if let Some(references) = assemble_references_from(&layers, workspace, &env) {
+            argv.push("--references-config".into());
+            argv.push(references.display().to_string());
+        }
+    }
     // `workspace` is the mode the product runs in; without it the engine keeps
     // its read-only default and process/write tools are never advertised.
     argv.push("--mode".into());
@@ -4915,6 +5167,7 @@ fn engine_argv_with(
             "--credential-integration",
         ),
         ("MIAO_ENGINE_MODEL_ROUTES_CONFIG", "--model-routes-config"),
+        ("MIAO_ENGINE_REFERENCES_CONFIG", "--references-config"),
     ] {
         // A derived manifest names a credential per route; passing the single
         // credential pair as well makes the engine demand an id it does not need.
@@ -6667,9 +6920,9 @@ mod tests {
         db_file_bytes, db_read_only, db_report, db_vacuum, default_db, engine_argv_with,
         event_line, git_worktree_main_checkout, launch, lsp_servers, mcp_servers, merged_config,
         model_routes_with, parsed_session_location, plugin_entries, project_copy_apply,
-        project_copy_plan, retention_plan, serve_database, session_known, settle_primary,
-        strip_comments, tree_bytes, uninstall_targets, worktree_remove_apply, worktree_remove_plan,
-        write_routes_manifest,
+        project_copy_plan, reference_grants, reference_manifest, retention_plan, serve_database,
+        session_known, settle_primary, strip_comments, tree_bytes, uninstall_targets,
+        worktree_remove_apply, worktree_remove_plan, write_routes_manifest,
     };
     use std::sync::{Mutex, MutexGuard};
 
@@ -8250,6 +8503,156 @@ mod tests {
             "the environment overrides configuration: {argv:?}"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn canonical(path: std::path::PathBuf) -> String {
+        std::fs::canonicalize(path)
+            .expect("canonical path")
+            .display()
+            .to_string()
+    }
+
+    /// `references` is the only grant that lets `read_file` leave the
+    /// workspace. The retired TypeScript host materialized it as
+    /// `--references-config`; the native entry has to do the same, or the key
+    /// parses and `miao debug config` shows it while every read is refused.
+    #[test]
+    fn references_grant_local_paths_against_the_declaring_document() {
+        let (root, global, workspace) = layered_fixture("refs-grants");
+        std::fs::create_dir_all(global.join("docs-global")).expect("global docs");
+        std::fs::create_dir_all(workspace.join("docs-project")).expect("project docs");
+        std::fs::create_dir_all(workspace.join("docs-hidden")).expect("hidden docs");
+        std::fs::create_dir_all(root.join("home/docs-home")).expect("home docs");
+        std::fs::write(
+            global.join("miao.json"),
+            r#"{ "model": "deepseek", "references": {
+                 "global": "./docs-global",
+                 "shared": "./docs-global",
+                 "home": "~/docs-home",
+                 "source": "https://github.com/owner/repo"
+               } }"#,
+        )
+        .expect("global references");
+        std::fs::write(
+            workspace.join(".miao/miao.json"),
+            r#"{ "references": {
+                 "shared": { "path": "../docs-project", "description": "  project docs  " },
+                 "hidden": { "path": "../docs-hidden", "hidden": true },
+                 "gone": "../nowhere"
+               } }"#,
+        )
+        .expect("project references");
+        let env = fixture_env(&root);
+        let layers = config_layers(&workspace, None, &env);
+        let (grants, unsupported) = reference_grants(&layers, &workspace, &env).expect("derives");
+        assert_eq!(
+            unsupported,
+            vec!["source".to_string()],
+            "a git repository is reported, not granted"
+        );
+        assert_eq!(
+            grants.len(),
+            3,
+            "hidden and missing paths grant nothing: {grants:?}"
+        );
+        let path =
+            |grant: &serde_json::Value| grant["path"].as_str().unwrap_or_default().to_string();
+        let by_description = |description: &str| {
+            grants
+                .iter()
+                .find(|grant| grant["description"] == description)
+                .unwrap_or_else(|| panic!("no grant described {description}: {grants:?}"))
+        };
+        let global_grant = by_description("global");
+        assert_eq!(path(global_grant), canonical(global.join("docs-global")));
+        let project_grant = by_description("project docs");
+        assert_eq!(
+            path(project_grant),
+            canonical(workspace.join("docs-project")),
+            "a later document wins the name and its own directory resolves the path"
+        );
+        assert_eq!(
+            path(by_description("home")),
+            canonical(root.join("home/docs-home")),
+            "~ resolves through the home directory"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_legacy_reference_key_still_grants() {
+        let (root, _global, workspace) = layered_fixture("refs-legacy");
+        std::fs::create_dir_all(workspace.join("docs")).expect("docs");
+        std::fs::write(
+            workspace.join(".miao/miao.json"),
+            r#"{ "reference": { "legacy": { "path": "../docs", "description": "legacy docs" } } }"#,
+        )
+        .expect("legacy references");
+        let env = fixture_env(&root);
+        let layers = config_layers(&workspace, None, &env);
+        let (grants, unsupported) = reference_grants(&layers, &workspace, &env).expect("derives");
+        assert!(unsupported.is_empty());
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0]["description"], "legacy docs");
+        assert_eq!(grants[0]["path"], canonical(workspace.join("docs")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_configured_reference_reaches_the_engine_argv() {
+        let (root, _global, workspace) = layered_fixture("refs-argv");
+        std::fs::create_dir_all(workspace.join("docs")).expect("docs");
+        std::fs::write(
+            workspace.join(".miao/miao.json"),
+            r#"{ "references": { "docs": { "path": "../docs" } } }"#,
+        )
+        .expect("references");
+        let env = fixture_env(&root);
+        let argv = engine_argv_with(&root.join("miao.db"), &workspace, "", None, &env);
+        let position = argv
+            .iter()
+            .position(|arg| arg == "--references-config")
+            .expect("the manifest is handed to the engine");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&argv[position + 1]).expect("manifest"))
+                .expect("valid manifest");
+        assert_eq!(manifest[0]["path"], canonical(workspace.join("docs")));
+        assert_eq!(manifest[0]["description"], "docs");
+
+        let explicit = |name: &str| -> Option<String> {
+            match name {
+                "MIAO_ENGINE_REFERENCES_CONFIG" => Some("/host/references.json".into()),
+                other => env(other),
+            }
+        };
+        let argv = engine_argv_with(&root.join("miao.db"), &workspace, "", None, explicit);
+        let flags: Vec<&String> = argv
+            .iter()
+            .filter(|arg| *arg == "--references-config")
+            .collect();
+        assert_eq!(flags.len(), 1, "one manifest only: {argv:?}");
+        let position = argv
+            .iter()
+            .position(|arg| arg == "--references-config")
+            .expect("the explicit manifest is forwarded");
+        assert_eq!(argv[position + 1], "/host/references.json");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn more_than_sixteen_references_are_cut_to_the_engine_limit() {
+        let grants: Vec<serde_json::Value> = (0..17)
+            .map(|index| {
+                serde_json::json!({
+                    "path": format!("/tmp/reference-{index}"),
+                    "description": format!("r{index}"),
+                })
+            })
+            .collect();
+        let manifest = reference_manifest(grants);
+        let kept = manifest.as_array().expect("the manifest is an array");
+        assert_eq!(kept.len(), 16);
+        assert_eq!(kept[15]["description"], "r15");
     }
 }
 
