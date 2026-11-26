@@ -22,6 +22,8 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 - **tui**: tint the operator prompt with the theme's panel tone (#3394) (`0eac8a9e0c`)
 
 ### Fixed
+- **engine**: reclaim jobs a restarted runtime cannot own (#3397) (`95f018c795`)
+- **tui**: open the model picker before its catalog answers (#3396) (`464006e896`)
 - **tui**: stop drawing a wait the poll no longer observes (#3395) (`423fe88ab4`)
 - **engine**: shrink inline images to the provider's limits (#3393) (`f389215a95`)
 - **engine**: make the workspace read boundary actionable (#3392) (`464366f546`)
