@@ -8,13 +8,72 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::highlight::Highlighter;
 use crate::theme::Theme;
 
+/// How a table column aligns its cells, from the separator row
+/// (`:---`, `:---:`, `---:`; plain `---` is left).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// Which row of a table a line is, so the pane can draw the rule itself and
+/// offer a hover tip for the rows that carry cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableKind {
+    Header,
+    Rule,
+    Body,
+}
+
+/// A table line's structure, kept through projection so the pane can lay the
+/// table out at its own width instead of folding a pre-painted row.
+#[derive(Clone, PartialEq)]
+pub struct TableMeta {
+    /// Cells of the header row, used as labels in a hover tip.
+    pub header: Vec<String>,
+    /// Cells of this row (empty for the rule).
+    pub cells: Vec<String>,
+    /// The widest cell in each column across the whole table, in display
+    /// cells. Every row carries the same list, so each can be laid out on its
+    /// own without grouping the table back together.
+    pub natural: Vec<usize>,
+    pub aligns: Vec<TableAlign>,
+    pub kind: TableKind,
+    /// The ink the row paints with (header/secondary, rule/border, body/text).
+    pub style: Style,
+}
+
+/// A markdown line plus the table structure behind it, when it is a table row.
+pub struct MarkdownLine {
+    pub line: Line<'static>,
+    pub table: Option<TableMeta>,
+}
+
+impl MarkdownLine {
+    fn text(line: Line<'static>) -> Self {
+        Self { line, table: None }
+    }
+}
+
 /// Render a markdown document as styled transcript lines.
 pub fn lines(markdown: &str, theme: &Theme) -> Vec<Line<'static>> {
+    lines_meta(markdown, theme)
+        .into_iter()
+        .map(|line| line.line)
+        .collect()
+}
+
+/// Render a markdown document, keeping a table's structure alongside the
+/// pre-painted fallback line. The pane uses the structure to fit the table to
+/// the width it actually has; [`lines`] keeps the old fixed rendering for
+/// callers that only need the lines.
+pub fn lines_meta(markdown: &str, theme: &Theme) -> Vec<MarkdownLine> {
     let palette = theme.palette;
     let markdown = &crate::tool::scrub_output(markdown);
     let mut out = Vec::new();
@@ -28,7 +87,7 @@ pub fn lines(markdown: &str, theme: &Theme) -> Vec<Line<'static>> {
             continue;
         }
         if trimmed.is_empty() {
-            out.push(Line::default());
+            out.push(MarkdownLine::text(Line::default()));
             index += 1;
             continue;
         }
@@ -42,15 +101,15 @@ pub fn lines(markdown: &str, theme: &Theme) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD);
             let mut spans = Vec::new();
             parse_inline(heading_text(trimmed, level), style, theme, &mut spans);
-            out.push(Line::from(spans));
+            out.push(MarkdownLine::text(Line::from(spans)));
             index += 1;
             continue;
         }
         if is_rule(trimmed) {
-            out.push(Line::from(Span::styled(
+            out.push(MarkdownLine::text(Line::from(Span::styled(
                 "─".repeat(40),
                 Style::new().fg(palette.border),
-            )));
+            ))));
             index += 1;
             continue;
         }
@@ -58,7 +117,7 @@ pub fn lines(markdown: &str, theme: &Theme) -> Vec<Line<'static>> {
             let body = body.strip_prefix(' ').unwrap_or(body);
             let mut spans = vec![Span::styled("│ ", Style::new().fg(palette.border))];
             parse_inline(body, Style::new().fg(palette.text_muted), theme, &mut spans);
-            out.push(Line::from(spans));
+            out.push(MarkdownLine::text(Line::from(spans)));
             index += 1;
             continue;
         }
@@ -68,7 +127,7 @@ pub fn lines(markdown: &str, theme: &Theme) -> Vec<Line<'static>> {
                 Span::styled(marker, Style::new().fg(palette.primary)),
             ];
             parse_inline(body, Style::new().fg(palette.text), theme, &mut spans);
-            out.push(Line::from(spans));
+            out.push(MarkdownLine::text(Line::from(spans)));
             index += 1;
             continue;
         }
@@ -78,7 +137,7 @@ pub fn lines(markdown: &str, theme: &Theme) -> Vec<Line<'static>> {
         }
         let mut spans = Vec::new();
         parse_inline(line, Style::new().fg(palette.text), theme, &mut spans);
-        out.push(Line::from(spans));
+        out.push(MarkdownLine::text(Line::from(spans)));
         index += 1;
     }
     out
@@ -96,7 +155,7 @@ fn fence_marker(line: &str) -> Option<char> {
 }
 
 fn push_code(
-    out: &mut Vec<Line<'static>>,
+    out: &mut Vec<MarkdownLine>,
     source: &[&str],
     start: usize,
     fence: char,
@@ -108,37 +167,37 @@ fn push_code(
         .trim_start_matches(fence)
         .trim()
         .to_string();
-    out.push(Line::from(Span::styled(
+    out.push(MarkdownLine::text(Line::from(Span::styled(
         if info.is_empty() {
             "  ╭".to_string()
         } else {
             format!("  ╭ {info}")
         },
         Style::new().fg(palette.text_muted),
-    )));
+    ))));
     let closing = fence.to_string().repeat(3);
     let mut highlighter = Highlighter::new(&info, palette);
     let mut index = start + 1;
     while index < source.len() {
         let line = source[index];
         if line.trim_start().starts_with(&closing) {
-            out.push(Line::from(Span::styled(
+            out.push(MarkdownLine::text(Line::from(Span::styled(
                 "  ╰".to_string(),
                 Style::new().fg(palette.text_muted),
-            )));
+            ))));
             return index + 1;
         }
         let mut spans = vec![Span::styled("  │ ", Style::new().fg(palette.border))];
         spans.extend(highlighter.line(line));
-        out.push(Line::from(spans));
+        out.push(MarkdownLine::text(Line::from(spans)));
         index += 1;
     }
     // An unterminated fence is a half-written document, not an error; show its
     // body rather than swallowing the tail of the message.
-    out.push(Line::from(Span::styled(
+    out.push(MarkdownLine::text(Line::from(Span::styled(
         "  ╰".to_string(),
         Style::new().fg(palette.text_muted),
-    )));
+    ))));
     index
 }
 
@@ -211,9 +270,10 @@ fn split_row(line: &str) -> Vec<String> {
         .collect()
 }
 
-fn push_table(out: &mut Vec<Line<'static>>, source: &[&str], start: usize, theme: &Theme) -> usize {
+fn push_table(out: &mut Vec<MarkdownLine>, source: &[&str], start: usize, theme: &Theme) -> usize {
     let palette = theme.palette;
     let header = split_row(source[start]);
+    let aligns = table_aligns(source[start + 1], header.len());
     let mut rows = Vec::new();
     let mut index = start + 2;
     while index < source.len() {
@@ -227,53 +287,133 @@ fn push_table(out: &mut Vec<Line<'static>>, source: &[&str], start: usize, theme
     let columns = header
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    let mut widths: Vec<usize> = (0..columns)
+    let mut natural: Vec<usize> = (0..columns)
         .map(|column| header.get(column).map_or(0, |cell| cell.width()))
         .collect();
     for row in &rows {
         for (column, cell) in row.iter().enumerate() {
-            widths[column] = widths[column].max(cell.width());
+            natural[column] = natural[column].max(cell.width());
         }
     }
-    // A long cell would push every other column off screen; clip the column
-    // instead and let the viewport wrap the row.
-    for width in &mut widths {
-        *width = (*width).min(40);
-    }
-    push_table_row(
-        out,
-        &header,
-        &widths,
-        Style::new()
-            .fg(palette.secondary)
-            .add_modifier(Modifier::BOLD),
-    );
+    // The fallback painting (what [`lines`] returns) still caps a column at 40
+    // cells; the pane lays the table out against the width it really has.
+    let widths: Vec<usize> = natural.iter().map(|width| (*width).min(40)).collect();
+    let header_style = Style::new()
+        .fg(palette.secondary)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::new().fg(palette.text);
+    let rule_style = Style::new().fg(palette.border);
+    let header = padded(&header, columns);
+    out.push(MarkdownLine {
+        line: table_row_line(&header, &widths, &aligns, header_style),
+        table: Some(TableMeta {
+            header: header.clone(),
+            cells: header.clone(),
+            natural: natural.clone(),
+            aligns: aligns.clone(),
+            kind: TableKind::Header,
+            style: header_style,
+        }),
+    });
     let rule = widths
         .iter()
         .map(|width| "─".repeat(*width))
         .collect::<Vec<_>>()
         .join("─┼─");
-    out.push(Line::from(Span::styled(
-        rule,
-        Style::new().fg(palette.border),
-    )));
+    out.push(MarkdownLine {
+        line: Line::from(Span::styled(rule, rule_style)),
+        table: Some(TableMeta {
+            header: header.clone(),
+            cells: Vec::new(),
+            natural: natural.clone(),
+            aligns: aligns.clone(),
+            kind: TableKind::Rule,
+            style: rule_style,
+        }),
+    });
     for row in &rows {
-        push_table_row(out, row, &widths, Style::new().fg(palette.text));
+        let cells = padded(row, columns);
+        out.push(MarkdownLine {
+            line: table_row_line(&cells, &widths, &aligns, body_style),
+            table: Some(TableMeta {
+                header: header.clone(),
+                cells: cells.clone(),
+                natural: natural.clone(),
+                aligns: aligns.clone(),
+                kind: TableKind::Body,
+                style: body_style,
+            }),
+        });
     }
     index
 }
 
-fn push_table_row(out: &mut Vec<Line<'static>>, row: &[String], widths: &[usize], style: Style) {
+fn padded(cells: &[String], columns: usize) -> Vec<String> {
+    (0..columns)
+        .map(|column| cells.get(column).cloned().unwrap_or_default())
+        .collect()
+}
+
+fn table_aligns(separator: &str, columns: usize) -> Vec<TableAlign> {
+    let cells = split_row(separator);
+    (0..columns)
+        .map(|column| {
+            let cell = cells.get(column).map(String::as_str).unwrap_or("").trim();
+            match (cell.starts_with(':'), cell.ends_with(':')) {
+                (true, true) => TableAlign::Center,
+                (false, true) => TableAlign::Right,
+                _ => TableAlign::Left,
+            }
+        })
+        .collect()
+}
+
+fn table_row_line(
+    cells: &[String],
+    widths: &[usize],
+    aligns: &[TableAlign],
+    style: Style,
+) -> Line<'static> {
     let mut text = String::new();
     for (column, width) in widths.iter().enumerate() {
         if column > 0 {
             text.push_str(" │ ");
         }
-        let cell = row.get(column).map(String::as_str).unwrap_or("");
-        text.push_str(cell);
-        text.push_str(&" ".repeat(width.saturating_sub(cell.width())));
+        let cell = cells.get(column).map(String::as_str).unwrap_or("");
+        let cell = clip_cell(cell, *width);
+        let pad = width.saturating_sub(cell.width());
+        let (left, right) = match aligns.get(column).copied().unwrap_or(TableAlign::Left) {
+            TableAlign::Left => (0, pad),
+            TableAlign::Right => (pad, 0),
+            TableAlign::Center => (pad / 2, pad - pad / 2),
+        };
+        text.push_str(&" ".repeat(left));
+        text.push_str(&cell);
+        text.push_str(&" ".repeat(right));
     }
-    out.push(Line::from(Span::styled(text.trim_end().to_string(), style)));
+    Line::from(Span::styled(text.trim_end().to_string(), style))
+}
+
+/// Clip one cell to `width` display cells, marking the loss with `…`.
+pub(crate) fn clip_cell(cell: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if cell.width() <= width {
+        return cell.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for character in cell.chars() {
+        let cells = character.width().unwrap_or(0);
+        if used + cells > width.saturating_sub(1) {
+            break;
+        }
+        used += cells;
+        out.push(character);
+    }
+    out.push('…');
+    out
 }
 
 fn parse_inline(text: &str, style: Style, theme: &Theme, spans: &mut Vec<Span<'static>>) {
@@ -554,6 +694,46 @@ mod tests {
         assert!(rendered[1].contains('┼'));
         assert!(rendered[2].starts_with("a "));
         assert!(rendered[3].starts_with("longer"));
+    }
+
+    /// The pane fits the table to the width it has, so the parse keeps the
+    /// whole table's natural widths and each row's cells alongside the
+    /// fallback painting. Without that structure the pane can only wrap the
+    /// pre-painted line, which is what tore the grid apart.
+    #[test]
+    fn a_table_keeps_the_structure_the_pane_lays_out() {
+        let parsed = lines_meta(
+            "| name | value |\n| :--- | ---: |\n| a | 1 |\n| longer | 22 |",
+            &theme(),
+        );
+        assert_eq!(parsed.len(), 4);
+        let header = parsed[0].table.as_ref().expect("header structure");
+        assert_eq!(header.kind, TableKind::Header);
+        assert_eq!(header.header, vec!["name", "value"]);
+        assert_eq!(header.natural, vec![6, 5]);
+        assert_eq!(header.aligns, vec![TableAlign::Left, TableAlign::Right]);
+        assert_eq!(
+            parsed[1].table.as_ref().map(|row| row.kind),
+            Some(TableKind::Rule)
+        );
+        let body = parsed[3].table.as_ref().expect("body structure");
+        assert_eq!(body.kind, TableKind::Body);
+        assert_eq!(body.cells, vec!["longer", "22"]);
+        assert_eq!(body.header, vec!["name", "value"]);
+    }
+
+    /// A cell wider than the fallback's 40-cell cap is clipped with a visible
+    /// marker instead of running past its column.
+    #[test]
+    fn a_capped_table_cell_is_marked_as_clipped() {
+        let long = "x".repeat(60);
+        let rendered = lines(&format!("| a |\n| --- |\n| {long} |"), &theme());
+        let row = text(&rendered[2]);
+        assert!(row.ends_with('…'), "{row:?}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(row.trim_end()) <= 40,
+            "{row:?}"
+        );
     }
 
     #[test]
