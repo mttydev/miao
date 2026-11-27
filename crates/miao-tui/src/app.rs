@@ -1728,14 +1728,6 @@ impl App {
                     self.shell.composer.reroll_placeholder();
                 }
                 self.session = summary;
-                // The plan meter belongs to the account, not the Session, but
-                // it can move while this client is not looking. Ask when a
-                // Session opens so a restarted TUI paints the block before a
-                // turn settles, and when a different Session brings another
-                // account's plan into view.
-                if switched || self.quota.is_none() {
-                    self.request_quota(true);
-                }
                 if let Some(summary) = &self.session {
                     match self.catalog.iter_mut().find(|row| row.id == summary.id) {
                         Some(row) => *row = summary.clone(),
@@ -1794,6 +1786,15 @@ impl App {
                     if let Some(engine) = self.engine.as_ref() {
                         engine.reload_provider_routes();
                     }
+                }
+                // The plan meter belongs to the account, not the Session, but
+                // it can move while this client is not looking. Ask when a
+                // Session opens so a restarted TUI paints the block before a
+                // turn settles, and when a different Session brings another
+                // account's plan into view. Repeated projections ride the
+                // tick's cadence instead of asking again.
+                if self.session.is_some() && (switched || self.quota_requested_at.is_none()) {
+                    self.request_quota(true);
                 }
                 // A Session that already holds prompts may still be unnamed —
                 // resuming one must not leave the sidebar reading "New session".
@@ -7380,10 +7381,10 @@ mod tests {
         AppEvent::Mouse(MouseEvent::new(kind, 0, 0, KeyModifiers::NONE))
     }
 
-    /// The sidebar polls billed usage when a Session opens and again when a run
-    /// settles. A test that asserts the control request the UI sends steps over
-    /// that traffic instead of mistaking it for its own, and an empty answer
-    /// still proves nothing else was sent.
+    /// The sidebar polls billed usage and the plan meter when a Session opens
+    /// and again when a run settles. A test that asserts the control request
+    /// the UI sends steps over that traffic instead of mistaking it for its
+    /// own, and an empty answer still proves nothing else was sent.
     fn control_requests(
         requests: &mut tokio::sync::mpsc::UnboundedReceiver<engine::Request>,
     ) -> Vec<engine::Request> {
@@ -7391,7 +7392,9 @@ mod tests {
             .filter(|request| {
                 !matches!(
                     request,
-                    engine::Request::Usage { .. } | engine::Request::UsageHourly { .. }
+                    engine::Request::Usage { .. }
+                        | engine::Request::UsageHourly { .. }
+                        | engine::Request::Quota
                 )
             })
             .collect()
