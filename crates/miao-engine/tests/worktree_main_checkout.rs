@@ -23,7 +23,7 @@ fn a_checkout_shaped_root_costs_no_git_process() {
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("mode");
 
     let previous = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![bin.as_os_str().to_owned()];
+    let mut paths = vec![bin];
     paths.extend(std::env::split_paths(&previous));
     std::env::set_var("PATH", std::env::join_paths(paths).expect("path"));
     let answer = miao_engine::worktree::main_checkout(&root);
