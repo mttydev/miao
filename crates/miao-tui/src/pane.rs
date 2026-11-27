@@ -873,17 +873,23 @@ impl Shell {
     }
 }
 
-/// Paint the divider column and the empty column left of it.
+/// The two cells the divider is painted with.
 ///
-/// The rule is ASCII `|`, not the box-drawing `│` it used to be: `│` is an
-/// East Asian Ambiguous character — one column to `unicode-width`, two to a
-/// CJK console. That console stores the rule across its own cell and the
-/// sidebar's first cell, and overlaying or re-encoding the row drops the rule
-/// again. The gap, and the drift into the sidebar while scrolling, survived
-/// every earlier paint because each one changed the glyphs around the rule
-/// (a boundary cleanup, a frame split, a gutter column) and left the rule
-/// itself ambiguous. ASCII is one column under every width table, so the cell
-/// the buffer paints is the cell every console stores.
+/// `│` draws one rule: the terminal fonts' ink is taller than the line box,
+/// so consecutive rows connect. ASCII `|` is only as tall as the ascent, and
+/// the gap at every cell boundary reads as a dashed line.
+///
+/// The trailing space is part of the cell's symbol so that the buffer declares
+/// the rule two columns wide. `│` is East Asian Ambiguous — one column to
+/// `unicode-width`, two to a CJK console — and a console that lays it out over
+/// two cells must not then receive a write for the second one: that write
+/// covers half the glyph, which is what broke the rule before #3406. Declaring
+/// two cells makes the diff skip the second one, while the trailing space
+/// paints it on a terminal that lays the glyph out one column wide. Nothing is
+/// laid out over either cell, so the rule is solid on both.
+const DIVIDER_RULE: &str = "│ ";
+
+/// Paint the divider column and the empty column left of it.
 ///
 /// [`body_columns`] lays no pane out over the column left of the rule, so no
 /// glyph sits beside it. A terminal that lays a character out two columns wide
@@ -906,7 +912,7 @@ fn paint_divider(buffer: &mut ratatui::buffer::Buffer, area: Rect, style: Style)
             .set_symbol(" ")
             .set_style(Style::new().bg(style.bg.unwrap_or(Color::Reset)));
         buffer[(area.x, y)]
-            .set_symbol("|")
+            .set_symbol(DIVIDER_RULE)
             .set_style(style)
             .set_diff_option(CellDiffOption::AlwaysUpdate);
     }
@@ -8400,7 +8406,7 @@ mod tests {
         // placeholder naming a session that does not exist yet.
         assert_eq!(
             buffer[(97, 10)].symbol(),
-            "|",
+            DIVIDER_RULE,
             "the sidebar divider paints: {:?}",
             row(10)
         );
@@ -9499,7 +9505,10 @@ mod tests {
             left.trim_end().ends_with('…'),
             "the label clips at the column edge: {left:?}"
         );
-        assert_eq!(row[77], "|", "the sidebar's rule keeps its cell: row {y}");
+        assert_eq!(
+            row[77], DIVIDER_RULE,
+            "the sidebar's rule keeps its cell: row {y}"
+        );
     }
 
     #[test]
@@ -9775,7 +9784,7 @@ mod tests {
         for (y, row) in rows.iter().enumerate() {
             assert_eq!(
                 row[column as usize].symbol(),
-                "|",
+                DIVIDER_RULE,
                 "row {y} column {column} is the sidebar's rule"
             );
             assert_eq!(
@@ -9827,7 +9836,11 @@ mod tests {
                 " ",
                 "row {y} prints beside the rule"
             );
-            assert_eq!(row[column as usize].symbol(), "|", "row {y} lost the rule");
+            assert_eq!(
+                row[column as usize].symbol(),
+                DIVIDER_RULE,
+                "row {y} lost the rule"
+            );
         }
     }
 
@@ -12302,7 +12315,7 @@ mod layout_alignment_tests {
         let rule = rule_cell as usize;
         assert!(rule > 0, "the rule sits between the two columns: {rule}");
         assert!(
-            (0..24).any(|y| buffer[(rule_cell, y)].symbol() == "|"),
+            (0..24).any(|y| buffer[(rule_cell, y)].symbol() == DIVIDER_RULE),
             "the sidebar rule is painted: {rows:?}"
         );
         // The transcript's column ends where the rule begins, so no transcript
@@ -12439,6 +12452,16 @@ mod final_layout_check {
             let holes: Vec<(u16, u16)> = (0..h)
                 .flat_map(|y| (0..w).map(move |x| (x, y)))
                 .filter(|(x, y)| {
+                    // A wide symbol owns the cell after it: the rule's `│ `
+                    // is two columns, and the glyph (or its trailing space on
+                    // a narrower terminal) carries that cell's background.
+                    if *x > 0
+                        && buf
+                            .cell(ratatui::prelude::Position::new(*x - 1, *y))
+                            .is_some_and(|c| UnicodeWidthStr::width(c.symbol()) > 1)
+                    {
+                        return false;
+                    }
                     buf.cell(ratatui::prelude::Position::new(*x, *y))
                         .is_some_and(|c| c.bg == ratatui::style::Color::Reset)
                 })
@@ -12477,7 +12500,7 @@ mod final_layout_check {
         let buffer = terminal.backend().buffer();
         for y in 0..24 {
             let cell = &buffer[(rule, y)];
-            assert_eq!(cell.symbol(), "|", "row {y} lost the rule");
+            assert_eq!(cell.symbol(), DIVIDER_RULE, "row {y} lost the rule");
             assert_eq!(cell.bg, palette.background, "row {y} tinted the rule");
             assert_eq!(
                 cell.diff_option,
@@ -12519,9 +12542,9 @@ mod final_layout_check {
         let updates = previous.diff(second.backend().buffer());
         for y in 0..height {
             assert!(
-                updates
-                    .iter()
-                    .any(|(x, row, cell)| { *x == rule && *row == y && cell.symbol() == "|" }),
+                updates.iter().any(|(x, row, cell)| {
+                    *x == rule && *row == y && cell.symbol() == DIVIDER_RULE
+                }),
                 "row {y} kept the stale terminal instead of the rule"
             );
         }
@@ -12547,7 +12570,11 @@ mod final_layout_check {
                 " ",
                 "row {y} kept a glyph beside the rule"
             );
-            assert_eq!(buffer[(8, y)].symbol(), "|", "row {y} lost the rule");
+            assert_eq!(
+                buffer[(8, y)].symbol(),
+                DIVIDER_RULE,
+                "row {y} lost the rule"
+            );
         }
     }
 
@@ -12626,26 +12653,45 @@ mod final_layout_check {
             assert!(
                 moved
                     .iter()
-                    .any(|(x, row, cell)| *x == rule && *row == y && cell.symbol() == "|"),
+                    .any(|(x, row, cell)| *x == rule && *row == y && cell.symbol() == DIVIDER_RULE),
                 "row {y} was not carried while the body moved"
             );
         }
     }
 
-    /// The rule must occupy exactly one cell under every width table. The
-    /// box-drawing `│` was two columns to a CJK console while the buffer kept
-    /// one; every earlier divider fix (a wide-glyph cleanup, a frame split,
-    /// `AlwaysUpdate`, a gutter column) left that mismatch in place, which is
-    /// why the rule kept breaking on Windows.
+    /// The rule declares the two cells a CJK console may use, and the glyph
+    /// itself is the box-drawing line, not the dashed ASCII one.
     #[test]
-    fn the_rule_is_one_column_under_every_width_table() {
-        let glyph = '|';
+    fn the_rule_declares_the_two_cells_a_cjk_console_uses() {
+        assert_eq!(DIVIDER_RULE, "│ ");
+        assert_eq!(DIVIDER_RULE.width(), 2, "the buffer's declared width");
         assert!(
-            glyph.is_ascii(),
-            "the rule must not be an East Asian Ambiguous glyph"
+            !DIVIDER_RULE.contains('|'),
+            "the ASCII bar is dashed between cells"
         );
-        assert_eq!(glyph.width(), Some(1), "narrow width tables");
-        assert_eq!(glyph.width_cjk(), Some(1), "CJK width tables");
+    }
+
+    /// A CJK console lays `│` out over two cells. The rule declares both, so
+    /// the diff never carries a write for the second one: that write would
+    /// cover the glyph's second half and bring back the broken rule.
+    #[test]
+    fn the_diff_never_writes_over_the_rules_second_cell() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 1));
+        paint_divider(&mut buffer, Rect::new(8, 0, 12, 1), Style::new());
+        // Force a change on the cell a wide `│` would occupy.
+        buffer[(9, 0)].set_symbol("x");
+        let previous = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 1));
+        let updates = previous.diff(&buffer);
+        assert!(
+            updates
+                .iter()
+                .any(|(x, _, cell)| *x == 8 && cell.symbol() == DIVIDER_RULE),
+            "the rule itself is carried"
+        );
+        assert!(
+            !updates.iter().any(|(x, _, _)| *x == 9),
+            "a write on the rule's second cell covers half the glyph"
+        );
     }
 }
 
