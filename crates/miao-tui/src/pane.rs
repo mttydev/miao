@@ -12452,6 +12452,16 @@ mod final_layout_check {
             let holes: Vec<(u16, u16)> = (0..h)
                 .flat_map(|y| (0..w).map(move |x| (x, y)))
                 .filter(|(x, y)| {
+                    // A wide symbol owns the cell after it: the rule's `│ `
+                    // is two columns, and the glyph (or its trailing space on
+                    // a narrower terminal) carries that cell's background.
+                    if *x > 0
+                        && buf
+                            .cell(ratatui::prelude::Position::new(*x - 1, *y))
+                            .is_some_and(|c| UnicodeWidthStr::width(c.symbol()) > 1)
+                    {
+                        return false;
+                    }
                     buf.cell(ratatui::prelude::Position::new(*x, *y))
                         .is_some_and(|c| c.bg == ratatui::style::Color::Reset)
                 })
