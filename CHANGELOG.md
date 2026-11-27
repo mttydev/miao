@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-11-27
+
+### Fixed
+- **tui**: keep the sidebar rule solid on every console (#3428) (`bb007bdf94`)
+
 ## [0.5.11] - 2026-11-26
 
 ### Fixed
