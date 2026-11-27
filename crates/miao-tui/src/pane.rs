@@ -4198,6 +4198,7 @@ fn quota_lines(
     quota: Option<&crate::status::PlanQuota>,
     lang: Lang,
     palette: &crate::theme::Palette,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let Some(quota) = quota.filter(|quota| !quota.is_empty()) else {
         return Vec::new();
@@ -4226,18 +4227,73 @@ fn quota_lines(
                 .resets_at_ms
                 .map(|at| format!(" · {}", until_reset(lang, at)))
                 .unwrap_or_default();
-            let label = match window.label.is_empty() {
-                true => window.id.clone(),
-                false => window.label.clone(),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<6}", window.id), muted),
-                Span::styled(format!("{:>3.0}%", window.percent), Style::new().fg(ink)),
-                Span::styled(format!("  {label}{reset}"), muted),
-            ]));
+            // The id column is wide enough for `monthly`, and the bar takes
+            // what the figures and the countdown leave: a gauge and a number
+            // answer different halves of the same question, so both stay.
+            let cells = width
+                .saturating_sub(2 + 7 + 1 + 4 + reset.chars().count())
+                .clamp(6, 18);
+            let percent = window.percent.clamp(0.0, 100.0);
+            let filled = if percent > 0.0 {
+                ((percent / 100.0) * cells as f64).round() as usize
+            } else {
+                0
+            }
+            .min(cells);
+            let mut spans = vec![
+                Span::styled(format!("  {:<7}", window.id), muted),
+                Span::styled(
+                    CONTEXT_BAR_GLYPH.to_string().repeat(filled),
+                    Style::new().fg(ink),
+                ),
+                Span::styled(
+                    CONTEXT_BAR_EMPTY.to_string().repeat(cells - filled),
+                    Style::new().fg(palette.element),
+                ),
+                Span::styled(format!(" {:>3.0}%", percent), Style::new().fg(ink)),
+            ];
+            if !reset.is_empty() {
+                spans.push(Span::styled(reset, muted));
+            }
+            lines.push(Line::from(spans));
+            // A percentage hides the absolute figures a plan is bought in:
+            // keep them on their own row, the way the plan pages state them.
+            if window.unit != "percent" {
+                if let (Some(used), Some(limit)) = (window.used, window.limit) {
+                    lines.push(Line::from(Span::styled(
+                        format!("       {} / {}", plan_amount(used), plan_amount(limit)),
+                        muted,
+                    )));
+                }
+            }
         }
     }
     lines
+}
+
+/// An absolute plan figure: `9,179` for credits large enough that the fraction
+/// is noise, `89.3` when the plan counts in tens.
+fn plan_amount(value: f64) -> String {
+    let rounded = match value >= 100.0 || value.fract() == 0.0 {
+        true => format!("{value:.0}"),
+        false => format!("{value:.1}"),
+    };
+    let (whole, fraction) = match rounded.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (rounded.as_str(), None),
+    };
+    let mut grouped = String::new();
+    for (index, digit) in whole.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    let whole = grouped.chars().rev().collect::<String>();
+    match fraction {
+        Some(fraction) => format!("{whole}.{fraction}"),
+        None => whole,
+    }
 }
 
 /// How long a window has left, in the unit a reader would say it in. A reset
@@ -4612,7 +4668,7 @@ impl Pane for SidebarPane {
             // Plan quota answers a different question from the ledger below:
             // how much of the subscription is left, not what this workspace
             // already spent. It only appears when a provider published a meter.
-            let quota = quota_lines(self.quota.as_ref(), self.lang, &palette);
+            let quota = quota_lines(self.quota.as_ref(), self.lang, &palette, text_width);
             if !quota.is_empty() {
                 lines.push(Line::default());
                 lines.extend(quota);
@@ -6370,14 +6426,16 @@ mod tests {
             Some(&crate::status::PlanQuota::default()),
             Lang::En,
             &palette,
+            42,
         )
         .is_empty());
         let quota = crate::status::PlanQuota::from_value(&serde_json::json!({
             "providers": [{"provider":"zhipuai-coding-plan","plan":"lite","windows":[
-                {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null}
+                {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null},
+                {"id":"7d","label":"credits · Weekly","unit":"credits","used":10667.0,"limit":12000.0,"percent":88.9,"status":"warning","resets_at_ms":null}
             ]}]
         }));
-        let text = super::quota_lines(Some(&quota), Lang::En, &palette)
+        let text = super::quota_lines(Some(&quota), Lang::En, &palette, 42)
             .iter()
             .map(|line| {
                 line.spans
@@ -6389,8 +6447,11 @@ mod tests {
             .join("\n");
         assert!(text.contains("PLAN · QUOTA"), "{text}");
         assert!(text.contains("zhipuai-coding-plan lite"), "{text}");
-        assert!(text.contains("12%"), "{text}");
-        assert!(text.contains("credits · 5 Hours"), "{text}");
+        assert!(text.contains(" 12%"), "{text}");
+        assert!(text.contains(" 89%"), "{text}");
+        assert!(text.contains('█') && text.contains('░'), "{text}");
+        assert!(text.contains("1,438 / 12,000"), "{text}");
+        assert!(text.contains("10,667 / 12,000"), "{text}");
     }
 
     #[test]

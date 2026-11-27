@@ -1,11 +1,11 @@
 //! Subscription quota for providers that meter a coding plan.
 //!
 //! The sidebar's billed usage answers "what did this Session cost"; it cannot
-//! answer "how much of the plan is left". Two routes publish that meter: a
-//! Z.ai/智谱 coding plan under `/api/monitor/usage/quota/limit`, and
-//! opencode-go under `/zen/go/v1/usage`. Both are read with the same stored
-//! credential the provider turns already use, and neither is required for a
-//! turn to run.
+//! answer "how much of the plan is left". Three routes publish that meter: a
+//! Z.ai/智谱 coding plan under `/api/monitor/usage/quota/limit`, opencode-go
+//! under `/zen/go/v1/usage`, and Command Code under `/alpha/billing/credits`.
+//! All are read with the same stored credential the provider turns already
+//! use, and none is required for a turn to run.
 
 use crate::credential::Credential;
 use serde_json::{json, Value};
@@ -13,11 +13,15 @@ use std::time::Duration;
 
 const ZAI_QUOTA_PATH: &str = "/api/monitor/usage/quota/limit";
 const OPENCODE_GO_USAGE_PATH: &str = "/zen/go/v1/usage";
+const COMMANDCODE_CREDITS_PATH: &str = "/alpha/billing/credits";
+const COMMANDCODE_SUMMARY_PATH: &str = "/alpha/usage/summary";
+const COMMANDCODE_SUBSCRIPTION_PATH: &str = "/alpha/billing/subscriptions";
 
 #[derive(Clone, Copy)]
 enum Flavor {
     Zai,
     OpenCodeGo,
+    CommandCode,
 }
 
 /// Where a stored integration's plan meter lives. A credential for any other
@@ -29,6 +33,7 @@ fn plan_of(integration: &str) -> Option<(&'static str, Flavor)> {
         "zhipuai-coding-plan" => Some(("https://open.bigmodel.cn", Flavor::Zai)),
         "zai" | "z-ai" => Some(("https://api.z.ai", Flavor::Zai)),
         "opencode-go" => Some(("https://opencode.ai", Flavor::OpenCodeGo)),
+        "commandcode" => Some(("https://api.commandcode.ai", Flavor::CommandCode)),
         _ => None,
     }
 }
@@ -47,38 +52,204 @@ pub(crate) async fn fetch(
     credential: &Credential,
 ) -> Option<Value> {
     let (host, flavor) = plan_of(integration)?;
-    let (url, authorization) = match flavor {
-        Flavor::Zai => (
-            format!("{host}{ZAI_QUOTA_PATH}"),
-            credential.secret().to_owned(),
-        ),
-        Flavor::OpenCodeGo => (
-            format!("{host}{OPENCODE_GO_USAGE_PATH}"),
-            format!("Bearer {}", credential.secret()),
-        ),
-    };
-    let mut request = client
-        .get(&url)
+    let bearer = format!("Bearer {}", credential.secret());
+    match flavor {
+        Flavor::Zai => {
+            let response = meter_request(
+                client,
+                format!("{host}{ZAI_QUOTA_PATH}"),
+                credential.secret().to_owned(),
+                false,
+            )
+            .send()
+            .await
+            .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            parse_zai(integration, &response.json().await.ok()?)
+        }
+        Flavor::OpenCodeGo => {
+            let response = meter_request(
+                client,
+                format!("{host}{OPENCODE_GO_USAGE_PATH}"),
+                bearer,
+                true,
+            )
+            .send()
+            .await
+            .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            parse_opencode_go(integration, &response.json().await.ok()?)
+        }
+        Flavor::CommandCode => {
+            // The windows, the monthly pool and the day it renews live on
+            // three documents. The meter carries the 5-hour and weekly usage,
+            // the summary the month's spend, and the subscription the period's
+            // end; the monthly cap is the spend plus what remains.
+            let credits = meter_request(
+                client,
+                format!("{host}{COMMANDCODE_CREDITS_PATH}"),
+                bearer.clone(),
+                false,
+            )
+            .send()
+            .await
+            .ok()?;
+            if !credits.status().is_success() {
+                return None;
+            }
+            let credits: Value = credits.json().await.ok()?;
+            let summary = commandcode_optional(
+                client,
+                format!("{host}{COMMANDCODE_SUMMARY_PATH}"),
+                bearer.clone(),
+            )
+            .await;
+            let subscription = commandcode_optional(
+                client,
+                format!("{host}{COMMANDCODE_SUBSCRIPTION_PATH}"),
+                bearer,
+            )
+            .await;
+            parse_commandcode(
+                integration,
+                &credits,
+                summary.as_ref(),
+                subscription.as_ref(),
+            )
+        }
+    }
+}
+
+fn meter_request(
+    client: &reqwest::Client,
+    url: String,
+    authorization: String,
+    session: bool,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .get(url)
         .timeout(Duration::from_secs(8))
         .header("accept", "application/json")
         .header("authorization", authorization);
-    if matches!(flavor, Flavor::OpenCodeGo) {
+    if session {
         // The gateway attributes a background poll outside any conversation;
         // without this header it answers as an anonymous client.
-        request = request.header("x-opencode-session", "miao-quota");
+        return request.header("x-opencode-session", "miao-quota");
     }
-    let response = request.send().await.ok()?;
+    request
+}
+
+async fn commandcode_optional(
+    client: &reqwest::Client,
+    url: String,
+    authorization: String,
+) -> Option<Value> {
+    let response = meter_request(client, url, authorization, false)
+        .send()
+        .await
+        .ok()?;
     if !response.status().is_success() {
         return None;
     }
-    parse(integration, flavor, &response.json().await.ok()?)
+    response.json().await.ok()
 }
 
+/// The single-document parsers below read one shape each; Command Code needs
+/// three documents, so it is parsed by [`parse_commandcode`] instead.
+#[cfg(test)]
 fn parse(integration: &str, flavor: Flavor, body: &Value) -> Option<Value> {
     match flavor {
         Flavor::Zai => parse_zai(integration, body),
         Flavor::OpenCodeGo => parse_opencode_go(integration, body),
+        // Command Code reads three documents; see `parse_commandcode`.
+        Flavor::CommandCode => None,
     }
+}
+
+fn parse_commandcode(
+    integration: &str,
+    credits: &Value,
+    summary: Option<&Value>,
+    subscription: Option<&Value>,
+) -> Option<Value> {
+    let limits = &credits["windowLimits"];
+    let mut windows = [
+        (&limits["fiveHour"], "5h", "5 Hour"),
+        (&limits["weekly"], "7d", "Weekly"),
+    ]
+    .into_iter()
+    .filter_map(|(window, id, label)| commandcode_window(window, id, label))
+    .collect::<Vec<_>>();
+    // The monthly pool is not a rolling window: the summary says what the
+    // period has spent and the meter says what is left, so their sum is the
+    // cap even when the plan's name (Max 10x/20x) does not say which it is.
+    let used = summary
+        .and_then(|summary| summary["totalMonthlyCredits"].as_f64())
+        .filter(|used| *used >= 0.0);
+    let remaining = credits["credits"]["monthlyCredits"]
+        .as_f64()
+        .filter(|remaining| *remaining >= 0.0);
+    if let (Some(used), Some(remaining)) = (used, remaining) {
+        let cap = used + remaining;
+        if cap > 0.0 {
+            windows.push(window_json(
+                "monthly",
+                "Monthly",
+                "credits",
+                Some(used),
+                Some(cap),
+                used / cap * 100.0,
+                subscription.and_then(commandcode_period_end),
+            ));
+        }
+    }
+    if windows.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "provider": integration,
+        "plan": subscription
+            .and_then(|subscription| subscription["data"]["planId"].as_str())
+            .map(|plan| plan.strip_prefix("individual-").unwrap_or(plan))
+            .unwrap_or_default(),
+        "windows": windows,
+        "fetched_at_ms": crate::approval::now_ms(),
+    }))
+}
+
+fn commandcode_window(window: &Value, id: &str, label: &str) -> Option<Value> {
+    let used = window["used"].as_f64()?;
+    let cap = window["cap"].as_f64().filter(|cap| *cap > 0.0)?;
+    let percent = used / cap * 100.0;
+    // `resetAt` is 0 until the window opens on the first request; that is "not
+    // started", not "resets now".
+    let resets_at_ms = window["resetAt"].as_u64().filter(|at| *at > 0);
+    let status = if window["exceeded"] == json!(true) {
+        "exhausted"
+    } else {
+        status(percent)
+    };
+    Some(json!({
+        "id": id,
+        "label": label,
+        "unit": "credits",
+        "used": used,
+        "limit": cap,
+        "percent": percent.clamp(0.0, 100.0),
+        "status": status,
+        "resets_at_ms": resets_at_ms,
+    }))
+}
+
+fn commandcode_period_end(subscription: &Value) -> Option<u64> {
+    let end = subscription["data"]["currentPeriodEnd"].as_str()?;
+    chrono::DateTime::parse_from_rfc3339(end)
+        .ok()
+        .map(|end| end.timestamp_millis().max(0) as u64)
 }
 
 fn parse_zai(integration: &str, body: &Value) -> Option<Value> {
@@ -137,9 +308,15 @@ fn zai_window(limit: &Value) -> Option<Value> {
     };
     let used = limit["currentValue"].as_f64();
     let cap = limit["usage"].as_f64().filter(|cap| *cap > 0.0);
-    let percent = match (used, cap) {
-        (Some(used), Some(cap)) => used / cap * 100.0,
-        _ => limit["percentage"].as_f64()?,
+    // The account page paints its own percentage; prefer that reading so the
+    // sidebar and the site agree to the digit. The ratio is the fallback for
+    // responses that omit it.
+    let percent = match limit["percentage"].as_f64() {
+        Some(percent) => percent,
+        None => match (used, cap) {
+            (Some(used), Some(cap)) => used / cap * 100.0,
+            _ => return None,
+        },
     };
     Some(window_json(
         &id,
@@ -264,7 +441,7 @@ mod tests {
         let windows = report["windows"].as_array().unwrap();
         assert_eq!(windows[0]["id"], "5h");
         assert_eq!(windows[0]["label"], "credits · 5 Hours");
-        assert_eq!(windows[0]["percent"], 1438.0 / 12000.0 * 100.0);
+        assert_eq!(windows[0]["percent"], 12.0);
         assert_eq!(windows[0]["resets_at_ms"], 1_760_000_000_000u64);
         assert_eq!(windows[1]["id"], "1w");
         assert_eq!(windows[1]["label"], "credits · Weekly");
@@ -299,9 +476,57 @@ mod tests {
     }
 
     #[test]
+    fn commandcode_reads_both_rolling_windows_and_the_monthly_pool() {
+        let credits = json!({
+            "credits": {"monthlyCredits": 60.694672673, "purchasedCredits": 0.0},
+            "windowLimits": {
+                "limited": true,
+                "fiveHour": {"used": 0.0, "cap": 45.0, "exceeded": false, "resetAt": 0},
+                "weekly": {"used": 89.305327327, "cap": 90.0, "exceeded": false, "resetAt": 1_795_911_830_405u64}
+            }
+        });
+        let summary = json!({"totalMonthlyCredits": 89.305327327});
+        let subscription = json!({"data": {
+            "planId": "individual-max",
+            "currentPeriodEnd": "2026-12-21T16:11:07.000Z"
+        }});
+        let report =
+            parse_commandcode("commandcode", &credits, Some(&summary), Some(&subscription))
+                .expect("report");
+        assert_eq!(report["plan"], "max");
+        let windows = report["windows"].as_array().unwrap();
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0]["id"], "5h");
+        assert_eq!(windows[0]["used"], 0.0);
+        assert_eq!(windows[0]["resets_at_ms"], Value::Null);
+        assert_eq!(windows[1]["id"], "7d");
+        assert!((windows[1]["percent"].as_f64().unwrap() - 99.228).abs() < 0.01);
+        assert_eq!(windows[1]["status"], "warning");
+        assert_eq!(windows[1]["resets_at_ms"], 1_795_911_830_405u64);
+        assert_eq!(windows[2]["id"], "monthly");
+        assert!((windows[2]["percent"].as_f64().unwrap() - 59.537).abs() < 0.01);
+        assert_eq!(
+            windows[2]["resets_at_ms"],
+            chrono::DateTime::parse_from_rfc3339("2026-12-21T16:11:07Z")
+                .unwrap()
+                .timestamp_millis() as u64
+        );
+    }
+
+    #[test]
+    fn commandcode_still_paints_its_windows_when_the_month_is_unknown() {
+        let credits =
+            json!({"windowLimits": {"fiveHour": {"used": 3.0, "cap": 45.0, "resetAt": 0}}});
+        let report = parse_commandcode("commandcode", &credits, None, None).expect("report");
+        assert_eq!(report["windows"].as_array().unwrap().len(), 1);
+        assert_eq!(report["plan"], "");
+    }
+
+    #[test]
     fn an_unknown_integration_is_not_asked() {
         assert!(plan_of("openai").is_none());
         assert!(plan_of("zhipuai-coding-plan").is_some());
         assert!(plan_of("opencode-go").is_some());
+        assert!(plan_of("commandcode").is_some());
     }
 }

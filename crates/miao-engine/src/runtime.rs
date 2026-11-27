@@ -2033,7 +2033,10 @@ impl Runtime {
     /// whose answer this build does not parse contributes no row: the sidebar
     /// must not turn a missing meter into a failed turn.
     pub async fn quota(&self) -> Result<Value, Error> {
-        const REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+        // Shorter than the sidebar's own 60s cadence so an asking client never
+        // receives the answer of the previous minute, and a second reader
+        // (another window) cannot double the endpoint traffic.
+        const REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
         let mut cache = self.inner.quota.lock().await;
         if let Some((at, value)) = cache.as_ref() {
             if at.elapsed() < REFRESH {

@@ -1378,7 +1378,12 @@ impl App {
                     self.dialog = None;
                 }
                 match result {
-                    Ok(id) => self.after_credential_stored(&provider, &label, &id, "account"),
+                    Ok(id) => {
+                        self.after_credential_stored(&provider, &label, &id, "account");
+                        // A fresh subscription is exactly the account the meter
+                        // block is about; ask now instead of waiting for a turn.
+                        self.request_quota(true);
+                    }
                     Err(error) => self.notice(&format!("could not sign in to {provider}: {error}")),
                 }
             }
@@ -1723,6 +1728,14 @@ impl App {
                     self.shell.composer.reroll_placeholder();
                 }
                 self.session = summary;
+                // The plan meter belongs to the account, not the Session, but
+                // it can move while this client is not looking. Ask when a
+                // Session opens so a restarted TUI paints the block before a
+                // turn settles, and when a different Session brings another
+                // account's plan into view.
+                if switched || self.quota.is_none() {
+                    self.request_quota(true);
+                }
                 if let Some(summary) = &self.session {
                     match self.catalog.iter_mut().find(|row| row.id == summary.id) {
                         Some(row) => *row = summary.clone(),
@@ -5359,6 +5372,10 @@ impl App {
             self.scroll_repaint_due = None;
             self.repaint_all_requested = true;
         }
+        // The plan meter moves on its own clock: a subscription can be spent
+        // without this machine sending a turn (another device, a teammate).
+        // Ask on the loop's tick; `request_quota` keeps its own 60s cadence.
+        self.request_quota(false);
         if self.screen != Screen::Session {
             return;
         }
@@ -5645,10 +5662,23 @@ impl App {
             due.saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(1))
         });
-        [wait, poll, scroll, self.mtty_state.footer_heartbeat()]
-            .into_iter()
-            .flatten()
-            .min()
+        // The plan meter's own cadence: the block must age even when nothing
+        // on screen changes, so the loop wakes when the next read is due.
+        let quota = self.quota_requested_at.map(|at| {
+            (at + QUOTA_REFRESH)
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1))
+        });
+        [
+            wait,
+            poll,
+            scroll,
+            quota,
+            self.mtty_state.footer_heartbeat(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The approval fact, named in the mode it is in. It stays on screen in
@@ -6974,6 +7004,25 @@ mod tests {
             !std::iter::from_fn(|| requests.try_recv().ok())
                 .any(|request| matches!(request, engine::Request::Wake { .. })),
             "a refresh of the same queue does not ask again"
+        );
+    }
+
+    /// The meter is account-level and can move without a turn on this machine,
+    /// so opening a Session asks for it before anything settles.
+    #[test]
+    fn opening_a_session_asks_for_the_plan_meter() {
+        let mut app = app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_meter", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "opening a Session asks the engine for the plan meter"
         );
     }
 
