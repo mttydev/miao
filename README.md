@@ -3,7 +3,7 @@
 </p>
 <p align="center">Your models. Your workflow. Less wasted context.</p>
 <p align="center">
-  <a href="README.md">English</a> | <a href="README.zh.md">简体中文</a>
+  <a href="README.md">English</a> | <a href="README.zh.md">简体中文</a> | <a href="README.tr.md">Türkçe</a>
 </p>
 <p align="center">
   <a href="https://mtty.dev/miao">Website</a> · <a href="#quick-start">Quick start</a> · <a href="#why-miao">Why miao</a> · <a href="docs/guide.en.md">Guide</a> · <a href="https://github.com/mttydev/miao/releases">Releases</a> · <a href="#related-projects">Related projects</a>
