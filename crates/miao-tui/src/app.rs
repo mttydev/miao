@@ -170,6 +170,10 @@ const QUOTA_REFRESH: Duration = Duration::from_secs(60);
 /// sidebar blank meanwhile. Retry on this shorter beat until one answer lands.
 const QUOTA_RETRY: Duration = Duration::from_secs(5);
 
+/// How many settled input ids stay remembered. A projection that raced a
+/// promotion travels within one round trip, so a short window is enough.
+const SETTLED_INPUTS: usize = 256;
+
 fn quota_due(force: bool, last_requested: Option<Instant>, cadence: Duration) -> bool {
     if force {
         return true;
@@ -846,6 +850,10 @@ pub struct App {
     /// first. The engine's list only knows an input once it is admitted, and
     /// a cold store can hold that back for seconds.
     echoes: Vec<Echo>,
+    /// Inputs the engine has already promoted or cancelled. A projection built
+    /// before that boundary can arrive after the event and still list them as
+    /// pending; this keeps their rows out of the queue band for good.
+    settled_inputs: std::collections::VecDeque<String>,
     /// The launch policy in force, flipped at runtime from the strip.
     approval_auto: bool,
     startup: Startup,
@@ -1027,6 +1035,7 @@ impl App {
             clipboard_paste: false,
             held_prompt: None,
             echoes: Vec::new(),
+            settled_inputs: std::collections::VecDeque::new(),
             // The launch policy in force, flipped at runtime from the strip.
             approval_auto: startup.auto,
             startup,
@@ -1745,6 +1754,10 @@ impl App {
                     }
                 }
                 self.state = *state;
+                // A projection reads the store at one moment; a promotion that
+                // lands while it travels makes it name an input this client has
+                // already settled. Keep that row out of the band.
+                self.drop_settled_pending();
                 // The engine promotes queued input only at a boundary a client
                 // asks for, so a Session opened after a restart holds a message
                 // the operator already sent with nothing left to promote it:
@@ -1991,6 +2004,10 @@ impl App {
                 // band afterwards: the settled prompt stayed on screen until
                 // something else reopened the Session. A settled input leaves
                 // the band here, whatever the order of the two events.
+                // A settled input leaves the band here, whatever the order of
+                // the two events, and stays out when an older projection still
+                // lists it as pending.
+                self.settle_input(&input_id);
                 self.echoes
                     .retain(|echo| echo.session_id != session_id || echo.input_id != input_id);
                 // The snapshot's own copy has to go too: a projection that
@@ -6561,6 +6578,42 @@ impl App {
         self.drafts.remove(&session_id);
     }
 
+    /// Remember an input the engine has settled. Bounded because ids are
+    /// unique and only the recent few can still race an in-flight projection.
+    fn settle_input(&mut self, input_id: &str) {
+        if self.settled_inputs.iter().any(|id| id == input_id) {
+            return;
+        }
+        self.settled_inputs.push_back(input_id.to_owned());
+        if self.settled_inputs.len() > SETTLED_INPUTS {
+            self.settled_inputs.pop_front();
+        }
+    }
+
+    /// Remove pending rows whose input has already settled: a projection can
+    /// be built before the promotion and applied after it.
+    fn drop_settled_pending(&mut self) {
+        if self.settled_inputs.is_empty() {
+            return;
+        }
+        let mut index = 0;
+        while index < self.state.pending_input_ids.len() {
+            let settled = self
+                .settled_inputs
+                .iter()
+                .any(|id| id == &self.state.pending_input_ids[index]);
+            if settled {
+                self.state.pending_input_ids.remove(index);
+                if index < self.state.pending_prompts.len() {
+                    self.state.pending_prompts.remove(index);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        self.state.pending = self.state.pending_prompts.len();
+    }
+
     /// The queue band above the input: what the engine holds, then what was
     /// just sent and no projection has acknowledged yet.
     fn show_queued_prompts(&mut self) {
@@ -7060,6 +7113,39 @@ mod tests {
                 .any(|request| matches!(request, engine::Request::Quota)),
             "the landing screen asks the engine for the plan meter"
         );
+    }
+
+    /// A projection can be built before an input is promoted and applied after
+    /// the promotion event. Its pending row must not come back into the band.
+    #[test]
+    fn a_late_projection_cannot_revive_a_promoted_input() {
+        let mut app = session_app();
+        let (handle, _requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        let queued = || SessionState {
+            pending: 1,
+            pending_prompts: vec!["hello".into()],
+            pending_input_ids: vec!["in_late".into()],
+            ..SessionState::default()
+        };
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_late", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(queued()),
+        });
+        app.handle(AppEvent::InputSettled {
+            session_id: "ses_late".into(),
+            input_id: "in_late".into(),
+            cancelled: false,
+        });
+        // Built before the promotion, applied after it.
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_late", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(queued()),
+        });
+        let band = app.shell.queued_prompts().to_vec();
+        assert!(band.is_empty(), "the promoted input stays out: {band:?}");
     }
 
     /// The first ask can beat the engine child up. Until an answer lands the
