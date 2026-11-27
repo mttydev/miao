@@ -818,8 +818,12 @@ impl Shell {
             self.transcript.set_header(header);
         }
         self.transcript.render(frame, body_area);
+        // The plan block follows the provider this screen is running on, not
+        // every stored account: the strip already names it, and the block
+        // answers for that plan alone.
+        let active_provider = self.status.provider.as_deref().map(str::to_owned);
         if let (Some(sidebar), Some(sidebar_area)) = (self.sidebar.as_mut(), sidebar_area) {
-            sidebar.render(frame, sidebar_area);
+            sidebar.render_for(frame, sidebar_area, active_provider.as_deref());
         }
         if let Some(panel) = self.panel.as_ref() {
             panel.render(frame, panel_area, self.lang, &self.transcript.theme);
@@ -4193,9 +4197,13 @@ fn model_row(name: &str, input: u64, output: u64, hit: &str, width: usize) -> St
 
 /// Plan quota: the subscription the next request draws from, not this
 /// Session's spend. One row per window; a provider without a meter contributes
-/// nothing, so an empty answer leaves the sidebar as it was.
+/// nothing, so an empty answer leaves the sidebar as it was. Only the meter
+/// behind the provider the window runs on is painted: the block exists to
+/// answer "what is left of the plan this turn spends", and every other stored
+/// account's plan is a different question that would cost the column its rows.
 fn quota_lines(
     quota: Option<&crate::status::PlanQuota>,
+    active_provider: Option<&str>,
     lang: Lang,
     palette: &crate::theme::Palette,
     width: usize,
@@ -4203,12 +4211,16 @@ fn quota_lines(
     let Some(quota) = quota.filter(|quota| !quota.is_empty()) else {
         return Vec::new();
     };
+    let providers = active_plan_providers(quota, active_provider);
+    if providers.is_empty() {
+        return Vec::new();
+    }
     let muted = Style::new().fg(palette.text_muted);
     let mut lines = vec![section_header(
         lang.t("quota.title"),
         palette.syntax.variable,
     )];
-    for provider in &quota.providers {
+    for provider in providers {
         let mut name = provider.provider.clone();
         if !provider.plan.is_empty() {
             name.push(' ');
@@ -4276,6 +4288,48 @@ fn quota_lines(
         }
     }
     lines
+}
+
+/// The meters behind the plan block: the ones the open Session draws from.
+///
+/// `facts` is the status strip's provider tail (`provider · [account] ·
+/// protocol · [variant]`). The first segment is the integration id the quota
+/// report keys on, and an account rides before the protocol only when it is
+/// not the default one. A named account picks its own meter, the default
+/// account picks the unnamed one, and a provider the report does not meter
+/// answers with no rows rather than with every other plan this machine knows.
+/// A provider that is metered but whose account the report names differently
+/// still shows its meters, because hiding the block would read as "no plan
+/// left" when the truth is "one field did not line up".
+fn active_plan_providers<'a>(
+    quota: &'a crate::status::PlanQuota,
+    facts: Option<&str>,
+) -> Vec<&'a crate::status::PlanProvider> {
+    // Before the catalog answers there is no "current" provider, and painting
+    // every meter is better than painting none.
+    let Some(facts) = facts else {
+        return quota.providers.iter().collect();
+    };
+    let segments = facts.split(" · ").collect::<Vec<_>>();
+    let provider = segments.first().copied().unwrap_or_default();
+    // A tail of provider and protocol alone names the default account.
+    let account = segments.get(1).copied().filter(|_| segments.len() >= 3);
+    let of_provider = || {
+        quota
+            .providers
+            .iter()
+            .filter(|row| row.provider == provider)
+    };
+    let named = of_provider()
+        .filter(|row| match account {
+            Some(account) => row.label == account,
+            None => row.label.is_empty() || row.label == "default",
+        })
+        .collect::<Vec<_>>();
+    match named.is_empty() {
+        true => of_provider().collect(),
+        false => named,
+    }
 }
 
 /// An absolute plan figure: `9,179` for credits large enough that the fraction
@@ -4618,6 +4672,18 @@ pub struct SidebarPane {
 
 impl Pane for SidebarPane {
     fn render(&mut self, frame: &mut Frame, area: Rect) {
+        self.render_for(frame, area, None);
+    }
+}
+
+impl SidebarPane {
+    /// Paint the column for the provider the open Session runs on, as the
+    /// status strip names it (`provider · [account] · protocol · [variant]`).
+    /// The plan block answers for that account alone: a meter for a plan this
+    /// window is not spending from only costs rows in a column this narrow.
+    /// `None` is the state before the catalog answers, and then every meter
+    /// paints.
+    fn render_for(&mut self, frame: &mut Frame, area: Rect, active_provider: Option<&str>) {
         let palette = self.theme.palette;
         // A single hairline, the way the TypeScript layout separates this column
         // from the transcript: no frame around it, but the edge is visible.
@@ -4675,7 +4741,13 @@ impl Pane for SidebarPane {
             // Plan quota answers a different question from the ledger below:
             // how much of the subscription is left, not what this workspace
             // already spent. It only appears when a provider published a meter.
-            let quota = quota_lines(self.quota.as_ref(), self.lang, &palette, text_width);
+            let quota = quota_lines(
+                self.quota.as_ref(),
+                active_provider,
+                self.lang,
+                &palette,
+                text_width,
+            );
             if !quota.is_empty() {
                 lines.push(Line::default());
                 lines.extend(quota);
@@ -6431,6 +6503,7 @@ mod tests {
         let palette = home_theme().palette;
         assert!(super::quota_lines(
             Some(&crate::status::PlanQuota::default()),
+            None,
             Lang::En,
             &palette,
             42,
@@ -6447,7 +6520,7 @@ mod tests {
                 ]}
             ]
         }));
-        let text = super::quota_lines(Some(&quota), Lang::En, &palette, 42)
+        let text = super::quota_lines(Some(&quota), None, Lang::En, &palette, 42)
             .iter()
             .map(|line| {
                 line.spans
@@ -6465,6 +6538,104 @@ mod tests {
         assert!(text.contains('█') && text.contains('░'), "{text}");
         assert!(text.contains("1,438 / 12,000"), "{text}");
         assert!(text.contains("10,667 / 12,000"), "{text}");
+    }
+
+    /// The block answers for the plan the window is spending from, not for
+    /// every account the machine has stored. A column that stacked them all
+    /// pushed the Session's own usage off the bottom of the screen.
+    #[test]
+    fn the_plan_block_paints_only_the_provider_the_window_runs_on() {
+        let palette = home_theme().palette;
+        let quota = crate::status::PlanQuota::from_value(&serde_json::json!({
+            "providers": [
+                {"provider":"opencode-go","label":"dtee","plan":"","windows":[
+                    {"id":"5h","label":"5 Hour","unit":"percent","used":1.0,"limit":100.0,"percent":1.0,"status":"ok","resets_at_ms":null}
+                ]},
+                {"provider":"opencode-go","label":"default","plan":"","windows":[
+                    {"id":"7d","label":"Weekly","unit":"percent","used":42.0,"limit":100.0,"percent":42.0,"status":"ok","resets_at_ms":null}
+                ]},
+                {"provider":"zhipuai-coding-plan","label":"default","plan":"max","windows":[
+                    {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null}
+                ]}
+            ]
+        }));
+        let paint = |active: Option<&str>| {
+            super::quota_lines(Some(&quota), active, Lang::En, &palette, 42)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // The strip names the integration and the wire protocol only while the
+        // default account spends: the dtee meter belongs to another login.
+        let default = paint(Some("opencode-go · openai-chat"));
+        assert!(default.contains("opencode-go"), "{default}");
+        assert!(default.contains(" 42%"), "{default}");
+        assert!(!default.contains("dtee"), "{default}");
+        assert!(!default.contains("zhipuai"), "{default}");
+
+        // A named account picks its own meter, not the other login's.
+        let named = paint(Some("opencode-go · dtee · openai-chat"));
+        assert!(named.contains("opencode-go · dtee"), "{named}");
+        assert!(named.contains(" 1%"), "{named}");
+        assert!(!named.contains(" 42%"), "{named}");
+        assert!(!named.contains("zhipuai"), "{named}");
+
+        // The other plan paints when the window runs on it instead.
+        let zhipuai = paint(Some("zhipuai-coding-plan · openai-chat"));
+        assert!(zhipuai.contains("zhipuai-coding-plan max"), "{zhipuai}");
+        assert!(!zhipuai.contains("opencode-go"), "{zhipuai}");
+
+        // A provider with no meter adds no block at all.
+        assert!(paint(Some("anthropic · anthropic")).is_empty());
+
+        // Before the catalog answers, every meter is still reachable.
+        let unknown = paint(None);
+        assert!(unknown.contains("opencode-go"), "{unknown}");
+        assert!(unknown.contains("zhipuai-coding-plan"), "{unknown}");
+    }
+
+    /// The column follows the strip: the sidebar paints the meter of the
+    /// provider the window runs on and nothing else, however many accounts the
+    /// machine has stored.
+    #[test]
+    fn the_sidebar_plan_block_follows_the_provider_the_strip_names() {
+        let quota = crate::status::PlanQuota::from_value(&serde_json::json!({
+            "providers": [
+                {"provider":"opencode-go","label":"default","plan":"","windows":[
+                    {"id":"5h","label":"5 Hour","unit":"percent","used":42.0,"limit":100.0,"percent":42.0,"status":"ok","resets_at_ms":null}
+                ]},
+                {"provider":"zhipuai-coding-plan","label":"default","plan":"max","windows":[
+                    {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null}
+                ]}
+            ]
+        }));
+        let mut shell = Shell::new(Path::new("/tmp/pane-test"), home_theme());
+        shell.status.provider = Some("opencode-go · openai-chat".into());
+        shell.set_quota(Some(&quota));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).expect("terminal");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(140)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("opencode-go"), "{screen}");
+        assert!(screen.contains(" 42%"), "{screen}");
+        assert!(
+            !screen.contains("zhipuai-coding-plan"),
+            "the other stored plan is another question: {screen}"
+        );
     }
 
     #[test]
