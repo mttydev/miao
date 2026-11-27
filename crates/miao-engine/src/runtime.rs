@@ -2059,13 +2059,16 @@ impl Runtime {
         let client = reqwest::Client::new();
         let mut providers: Vec<Value> = Vec::new();
         for metadata in stored {
-            // One row per integration: several labeled keys for the same plan
-            // share its meter, so a second fetch would only repeat it.
+            // A meter belongs to one plan, and one integration can hold several
+            // accounts with separate meters (two logins, for example). Key the
+            // dedupe on the account label so each of them is painted instead of
+            // only the first row that sorts.
             if metadata.expired
                 || !crate::quota::metered(&metadata.integration)
-                || providers
-                    .iter()
-                    .any(|row| row["provider"].as_str() == Some(metadata.integration.as_str()))
+                || providers.iter().any(|row| {
+                    row["provider"].as_str() == Some(metadata.integration.as_str())
+                        && row["label"].as_str() == Some(metadata.label.as_str())
+                })
             {
                 continue;
             }
@@ -2077,9 +2080,10 @@ impl Runtime {
             let Ok(credential) = source.load().await else {
                 continue;
             };
-            if let Some(report) =
+            if let Some(mut report) =
                 crate::quota::fetch(&client, &metadata.integration, &credential).await
             {
+                report["label"] = json!(metadata.label);
                 providers.push(report);
             }
         }

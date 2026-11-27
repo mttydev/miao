@@ -4209,10 +4209,17 @@ fn quota_lines(
         palette.syntax.variable,
     )];
     for provider in &quota.providers {
-        let name = match provider.plan.is_empty() {
-            true => provider.provider.clone(),
-            false => format!("{} {}", provider.provider, provider.plan),
-        };
+        let mut name = provider.provider.clone();
+        if !provider.plan.is_empty() {
+            name.push(' ');
+            name.push_str(&provider.plan);
+        }
+        // The default account is the common case; name the others so two
+        // logins on one integration read as two rows, not one repeated plan.
+        if !provider.label.is_empty() && provider.label != "default" {
+            name.push_str(" · ");
+            name.push_str(&provider.label);
+        }
         lines.push(Line::from(Span::styled(
             format!("  {name}"),
             Style::new().fg(palette.text),
@@ -6430,10 +6437,15 @@ mod tests {
         )
         .is_empty());
         let quota = crate::status::PlanQuota::from_value(&serde_json::json!({
-            "providers": [{"provider":"zhipuai-coding-plan","plan":"lite","windows":[
-                {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null},
-                {"id":"7d","label":"credits · Weekly","unit":"credits","used":10667.0,"limit":12000.0,"percent":88.9,"status":"warning","resets_at_ms":null}
-            ]}]
+            "providers": [
+                {"provider":"zhipuai-coding-plan","label":"default","plan":"lite","windows":[
+                    {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"ok","resets_at_ms":null},
+                    {"id":"7d","label":"credits · Weekly","unit":"credits","used":10667.0,"limit":12000.0,"percent":88.9,"status":"warning","resets_at_ms":null}
+                ]},
+                {"provider":"opencode-go","label":"dtee","plan":"","windows":[
+                    {"id":"5h","label":"5 Hour","unit":"percent","used":0.0,"limit":100.0,"percent":0.0,"status":"ok","resets_at_ms":null}
+                ]}
+            ]
         }));
         let text = super::quota_lines(Some(&quota), Lang::En, &palette, 42)
             .iter()
@@ -6447,6 +6459,7 @@ mod tests {
             .join("\n");
         assert!(text.contains("PLAN · QUOTA"), "{text}");
         assert!(text.contains("zhipuai-coding-plan lite"), "{text}");
+        assert!(text.contains("opencode-go · dtee"), "{text}");
         assert!(text.contains(" 12%"), "{text}");
         assert!(text.contains(" 89%"), "{text}");
         assert!(text.contains('█') && text.contains('░'), "{text}");
