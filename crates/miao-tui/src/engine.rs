@@ -1890,7 +1890,7 @@ async fn run(
                     }
                 }
                 Request::Devices => {
-                    let result = client.request("devices", json!({})).await;
+                    let result = client.request("devices", Value::Null).await;
                     match result {
                         Ok(value) => bus.send(AppEvent::Devices(value)),
                         Err(error) => {
@@ -1963,7 +1963,11 @@ async fn run(
                     // engine that predates this read all answer the same way:
                     // nothing to draw. The billed-usage strip already shows
                     // what the Session actually spent.
-                    if let Ok(value) = client.request(QUOTA_METHOD, json!({})).await {
+                    //
+                    // `Quota` is a unit variant. A `{}` params object is not a
+                    // unit and the engine rejects the call, which is why this
+                    // block painted nothing in every build that shipped it.
+                    if let Ok(value) = client.request(QUOTA_METHOD, Value::Null).await {
                         bus.send(AppEvent::Quota(crate::status::PlanQuota::from_value(
                             &value,
                         )));

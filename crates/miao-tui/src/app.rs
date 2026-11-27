@@ -165,12 +165,17 @@ fn usage_due(force: bool, last_requested: Option<Instant>) -> bool {
 /// is deliberately slower than the ledger read.
 const QUOTA_REFRESH: Duration = Duration::from_secs(60);
 
-fn quota_due(force: bool, last_requested: Option<Instant>) -> bool {
+/// The first ask races the engine child's startup: a request sent before its
+/// RPC is listening fails silently, and waiting a whole minute would leave the
+/// sidebar blank meanwhile. Retry on this shorter beat until one answer lands.
+const QUOTA_RETRY: Duration = Duration::from_secs(5);
+
+fn quota_due(force: bool, last_requested: Option<Instant>, cadence: Duration) -> bool {
     if force {
         return true;
     }
     match last_requested {
-        Some(at) => at.elapsed() >= QUOTA_REFRESH,
+        Some(at) => at.elapsed() >= cadence,
         None => true,
     }
 }
@@ -713,6 +718,9 @@ pub struct App {
     /// When the plan meter was last asked for. A provider endpoint is a
     /// network round trip, so it runs on its own slower cadence.
     quota_requested_at: Option<Instant>,
+    /// Whether any answer has landed yet. Until it has, a failed ask is
+    /// retried on [`QUOTA_RETRY`] instead of the subscription cadence.
+    quota_answered: bool,
     /// When the usage report was last asked for, so a run that keeps settling
     /// steps cannot turn into a stream of ledger scans.
     usage_requested_at: Option<Instant>,
@@ -977,6 +985,7 @@ impl App {
             usage_hourly: None,
             quota: None,
             quota_requested_at: None,
+            quota_answered: false,
             usage_requested_at: None,
             stash: Vec::new(),
             prompt_history: Vec::new(),
@@ -1660,6 +1669,7 @@ impl App {
             }
             AppEvent::Quota(quota) => {
                 self.quota = Some(quota);
+                self.quota_answered = true;
                 self.shell.set_quota(self.quota.as_ref());
             }
             AppEvent::HistoryWindow {
@@ -3584,10 +3594,15 @@ impl App {
         engine.usage(&session_id);
     }
 
-    /// Ask for the plan meter on its own slower cadence. A provider endpoint is
-    /// a network round trip, so this never rides the per-step usage refresh.
+    /// Ask for the plan meter on its own cadence. A provider endpoint is a
+    /// network round trip, so this never rides the per-step usage refresh; the
+    /// first answer is retried faster because the ask can beat the engine up.
     fn request_quota(&mut self, force: bool) {
-        if !quota_due(force, self.quota_requested_at) {
+        let cadence = match self.quota_answered {
+            true => QUOTA_REFRESH,
+            false => QUOTA_RETRY,
+        };
+        if !quota_due(force, self.quota_requested_at, cadence) {
             return;
         }
         let Some(engine) = self.engine.clone() else {
@@ -5665,8 +5680,12 @@ impl App {
         });
         // The plan meter's own cadence: the block must age even when nothing
         // on screen changes, so the loop wakes when the next read is due.
+        let quota_cadence = match self.quota_answered {
+            true => QUOTA_REFRESH,
+            false => QUOTA_RETRY,
+        };
         let quota = self.quota_requested_at.map(|at| {
-            (at + QUOTA_REFRESH)
+            (at + quota_cadence)
                 .saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(1))
         });
@@ -7024,6 +7043,53 @@ mod tests {
             std::iter::from_fn(|| requests.try_recv().ok())
                 .any(|request| matches!(request, engine::Request::Quota)),
             "opening a Session asks the engine for the plan meter"
+        );
+    }
+
+    /// The landing screen has no Session to open, so its first tick is what
+    /// asks for the meter. Without it a restarted TUI showed no plan until a
+    /// turn settled in some Session.
+    #[test]
+    fn the_landing_screen_asks_for_the_plan_meter_on_its_first_tick() {
+        let mut app = app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.tick();
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "the landing screen asks the engine for the plan meter"
+        );
+    }
+
+    /// The first ask can beat the engine child up. Until an answer lands the
+    /// meter retries on the short beat; afterwards the subscription cadence
+    /// takes over, so a healthy install is not polled five times as often.
+    #[test]
+    fn a_meter_that_never_answered_is_asked_again_soon() {
+        let mut app = app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.tick();
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "the first tick asks"
+        );
+        app.quota_requested_at = Some(Instant::now() - QUOTA_RETRY - Duration::from_millis(1));
+        app.tick();
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "an unanswered ask is retried on the short beat"
+        );
+        app.handle(AppEvent::Quota(crate::status::PlanQuota::default()));
+        app.quota_requested_at = Some(Instant::now() - QUOTA_RETRY - Duration::from_millis(1));
+        app.tick();
+        assert!(
+            !std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "after an answer the slower cadence holds"
         );
     }
 
