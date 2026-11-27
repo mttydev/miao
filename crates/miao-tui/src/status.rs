@@ -198,10 +198,13 @@ impl PlanWindow {
 }
 
 /// One account's plan: `plan` is the tier the provider names (lite/pro/max),
-/// empty when the endpoint does not publish one.
+/// empty when the endpoint does not publish one. `label` is the stored
+/// credential's account name, because one integration can hold several
+/// accounts with separate meters.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlanProvider {
     pub provider: String,
+    pub label: String,
     pub plan: String,
     pub windows: Vec<PlanWindow>,
 }
@@ -235,6 +238,11 @@ impl PlanQuota {
                             Some(PlanProvider {
                                 provider: row
                                     .get("provider")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                label: row
+                                    .get("label")
                                     .and_then(Value::as_str)
                                     .unwrap_or_default()
                                     .to_owned(),
@@ -649,7 +657,7 @@ mod tests {
     fn plan_quota_reads_windows_and_drops_a_provider_without_one() {
         let quota = PlanQuota::from_value(&json!({
             "providers": [
-                {"provider":"zhipuai-coding-plan","plan":"lite","windows":[
+                {"provider":"zhipuai-coding-plan","label":"default","plan":"lite","windows":[
                     {"id":"5h","label":"credits · 5 Hours","unit":"credits","used":1438.0,"limit":12000.0,"percent":11.9,"status":"warning","resets_at_ms":1760000000000u64},
                     {"id":"1w","label":"credits · Weekly","unit":"credits","used":0.0,"limit":60000.0,"percent":0.0,"status":"ok"}
                 ]},
@@ -657,6 +665,7 @@ mod tests {
             ]
         }));
         assert_eq!(quota.providers.len(), 1);
+        assert_eq!(quota.providers[0].label, "default");
         assert_eq!(quota.providers[0].plan, "lite");
         assert_eq!(quota.providers[0].windows.len(), 2);
         assert_eq!(quota.providers[0].windows[0].percent, 11.9);

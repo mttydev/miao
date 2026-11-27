@@ -165,12 +165,17 @@ fn usage_due(force: bool, last_requested: Option<Instant>) -> bool {
 /// is deliberately slower than the ledger read.
 const QUOTA_REFRESH: Duration = Duration::from_secs(60);
 
-fn quota_due(force: bool, last_requested: Option<Instant>) -> bool {
+/// The first ask races the engine child's startup: a request sent before its
+/// RPC is listening fails silently, and waiting a whole minute would leave the
+/// sidebar blank meanwhile. Retry on this shorter beat until one answer lands.
+const QUOTA_RETRY: Duration = Duration::from_secs(5);
+
+fn quota_due(force: bool, last_requested: Option<Instant>, cadence: Duration) -> bool {
     if force {
         return true;
     }
     match last_requested {
-        Some(at) => at.elapsed() >= QUOTA_REFRESH,
+        Some(at) => at.elapsed() >= cadence,
         None => true,
     }
 }
@@ -713,6 +718,9 @@ pub struct App {
     /// When the plan meter was last asked for. A provider endpoint is a
     /// network round trip, so it runs on its own slower cadence.
     quota_requested_at: Option<Instant>,
+    /// Whether any answer has landed yet. Until it has, a failed ask is
+    /// retried on [`QUOTA_RETRY`] instead of the subscription cadence.
+    quota_answered: bool,
     /// When the usage report was last asked for, so a run that keeps settling
     /// steps cannot turn into a stream of ledger scans.
     usage_requested_at: Option<Instant>,
@@ -977,6 +985,7 @@ impl App {
             usage_hourly: None,
             quota: None,
             quota_requested_at: None,
+            quota_answered: false,
             usage_requested_at: None,
             stash: Vec::new(),
             prompt_history: Vec::new(),
@@ -1378,7 +1387,12 @@ impl App {
                     self.dialog = None;
                 }
                 match result {
-                    Ok(id) => self.after_credential_stored(&provider, &label, &id, "account"),
+                    Ok(id) => {
+                        self.after_credential_stored(&provider, &label, &id, "account");
+                        // A fresh subscription is exactly the account the meter
+                        // block is about; ask now instead of waiting for a turn.
+                        self.request_quota(true);
+                    }
                     Err(error) => self.notice(&format!("could not sign in to {provider}: {error}")),
                 }
             }
@@ -1655,6 +1669,7 @@ impl App {
             }
             AppEvent::Quota(quota) => {
                 self.quota = Some(quota);
+                self.quota_answered = true;
                 self.shell.set_quota(self.quota.as_ref());
             }
             AppEvent::HistoryWindow {
@@ -1781,6 +1796,15 @@ impl App {
                     if let Some(engine) = self.engine.as_ref() {
                         engine.reload_provider_routes();
                     }
+                }
+                // The plan meter belongs to the account, not the Session, but
+                // it can move while this client is not looking. Ask when a
+                // Session opens so a restarted TUI paints the block before a
+                // turn settles, and when a different Session brings another
+                // account's plan into view. Repeated projections ride the
+                // tick's cadence instead of asking again.
+                if self.session.is_some() && (switched || self.quota_requested_at.is_none()) {
+                    self.request_quota(true);
                 }
                 // A Session that already holds prompts may still be unnamed —
                 // resuming one must not leave the sidebar reading "New session".
@@ -3570,10 +3594,15 @@ impl App {
         engine.usage(&session_id);
     }
 
-    /// Ask for the plan meter on its own slower cadence. A provider endpoint is
-    /// a network round trip, so this never rides the per-step usage refresh.
+    /// Ask for the plan meter on its own cadence. A provider endpoint is a
+    /// network round trip, so this never rides the per-step usage refresh; the
+    /// first answer is retried faster because the ask can beat the engine up.
     fn request_quota(&mut self, force: bool) {
-        if !quota_due(force, self.quota_requested_at) {
+        let cadence = match self.quota_answered {
+            true => QUOTA_REFRESH,
+            false => QUOTA_RETRY,
+        };
+        if !quota_due(force, self.quota_requested_at, cadence) {
             return;
         }
         let Some(engine) = self.engine.clone() else {
@@ -5359,6 +5388,10 @@ impl App {
             self.scroll_repaint_due = None;
             self.repaint_all_requested = true;
         }
+        // The plan meter moves on its own clock: a subscription can be spent
+        // without this machine sending a turn (another device, a teammate).
+        // Ask on the loop's tick; `request_quota` keeps its own 60s cadence.
+        self.request_quota(false);
         if self.screen != Screen::Session {
             return;
         }
@@ -5645,10 +5678,27 @@ impl App {
             due.saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(1))
         });
-        [wait, poll, scroll, self.mtty_state.footer_heartbeat()]
-            .into_iter()
-            .flatten()
-            .min()
+        // The plan meter's own cadence: the block must age even when nothing
+        // on screen changes, so the loop wakes when the next read is due.
+        let quota_cadence = match self.quota_answered {
+            true => QUOTA_REFRESH,
+            false => QUOTA_RETRY,
+        };
+        let quota = self.quota_requested_at.map(|at| {
+            (at + quota_cadence)
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1))
+        });
+        [
+            wait,
+            poll,
+            scroll,
+            quota,
+            self.mtty_state.footer_heartbeat(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The approval fact, named in the mode it is in. It stays on screen in
@@ -6977,6 +7027,72 @@ mod tests {
         );
     }
 
+    /// The meter is account-level and can move without a turn on this machine,
+    /// so opening a Session asks for it before anything settles.
+    #[test]
+    fn opening_a_session_asks_for_the_plan_meter() {
+        let mut app = app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_meter", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        });
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "opening a Session asks the engine for the plan meter"
+        );
+    }
+
+    /// The landing screen has no Session to open, so its first tick is what
+    /// asks for the meter. Without it a restarted TUI showed no plan until a
+    /// turn settled in some Session.
+    #[test]
+    fn the_landing_screen_asks_for_the_plan_meter_on_its_first_tick() {
+        let mut app = app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.tick();
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "the landing screen asks the engine for the plan meter"
+        );
+    }
+
+    /// The first ask can beat the engine child up. Until an answer lands the
+    /// meter retries on the short beat; afterwards the subscription cadence
+    /// takes over, so a healthy install is not polled five times as often.
+    #[test]
+    fn a_meter_that_never_answered_is_asked_again_soon() {
+        let mut app = app();
+        let (handle, mut requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        app.tick();
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "the first tick asks"
+        );
+        app.quota_requested_at = Some(Instant::now() - QUOTA_RETRY - Duration::from_millis(1));
+        app.tick();
+        assert!(
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "an unanswered ask is retried on the short beat"
+        );
+        app.handle(AppEvent::Quota(crate::status::PlanQuota::default()));
+        app.quota_requested_at = Some(Instant::now() - QUOTA_RETRY - Duration::from_millis(1));
+        app.tick();
+        assert!(
+            !std::iter::from_fn(|| requests.try_recv().ok())
+                .any(|request| matches!(request, engine::Request::Quota)),
+            "after an answer the slower cadence holds"
+        );
+    }
+
     fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
         AppEvent::Key(KeyEvent::new(code, modifiers))
     }
@@ -7331,10 +7447,10 @@ mod tests {
         AppEvent::Mouse(MouseEvent::new(kind, 0, 0, KeyModifiers::NONE))
     }
 
-    /// The sidebar polls billed usage when a Session opens and again when a run
-    /// settles. A test that asserts the control request the UI sends steps over
-    /// that traffic instead of mistaking it for its own, and an empty answer
-    /// still proves nothing else was sent.
+    /// The sidebar polls billed usage and the plan meter when a Session opens
+    /// and again when a run settles. A test that asserts the control request
+    /// the UI sends steps over that traffic instead of mistaking it for its
+    /// own, and an empty answer still proves nothing else was sent.
     fn control_requests(
         requests: &mut tokio::sync::mpsc::UnboundedReceiver<engine::Request>,
     ) -> Vec<engine::Request> {
@@ -7342,7 +7458,9 @@ mod tests {
             .filter(|request| {
                 !matches!(
                     request,
-                    engine::Request::Usage { .. } | engine::Request::UsageHourly { .. }
+                    engine::Request::Usage { .. }
+                        | engine::Request::UsageHourly { .. }
+                        | engine::Request::Quota
                 )
             })
             .collect()
