@@ -873,18 +873,21 @@ impl Shell {
     }
 }
 
-/// The glyph the divider is painted with.
+/// The two cells the divider is painted with.
 ///
 /// `│` draws one rule: the terminal fonts' ink is taller than the line box,
 /// so consecutive rows connect. ASCII `|` is only as tall as the ascent, and
 /// the gap at every cell boundary reads as a dashed line.
 ///
-/// `│` is also East Asian Ambiguous — one column to `unicode-width`, two to a
-/// CJK console. That console stores the rule across its own cell and the
-/// sidebar's first cell, and overlaying or re-encoding the row drops it (#3406).
-/// Windows keeps the width-stable ASCII `|` for that console; on every other
-/// platform the box-drawing glyph keeps the rule solid.
-const DIVIDER_RULE: &str = if cfg!(windows) { "|" } else { "│" };
+/// The trailing space is part of the cell's symbol so that the buffer declares
+/// the rule two columns wide. `│` is East Asian Ambiguous — one column to
+/// `unicode-width`, two to a CJK console — and a console that lays it out over
+/// two cells must not then receive a write for the second one: that write
+/// covers half the glyph, which is what broke the rule before #3406. Declaring
+/// two cells makes the diff skip the second one, while the trailing space
+/// paints it on a terminal that lays the glyph out one column wide. Nothing is
+/// laid out over either cell, so the rule is solid on both.
+const DIVIDER_RULE: &str = "│ ";
 
 /// Paint the divider column and the empty column left of it.
 ///
@@ -12646,21 +12649,39 @@ mod final_layout_check {
         }
     }
 
-    /// The rule must occupy exactly one cell under the width table it is
-    /// measured with. Windows keeps ASCII `|`: a CJK console lays the
-    /// box-drawing `│` out over two cells, which is what broke the rule
-    /// before #3406. Elsewhere `│` connects across rows, and the width table
-    /// the buffer and the terminal consult counts it one cell.
+    /// The rule declares the two cells a CJK console may use, and the glyph
+    /// itself is the box-drawing line, not the dashed ASCII one.
     #[test]
-    fn the_rule_fits_the_width_table_of_its_platform() {
-        if cfg!(windows) {
-            assert_eq!(DIVIDER_RULE, "|");
-            assert_eq!('|'.width(), Some(1), "narrow width tables");
-            assert_eq!('|'.width_cjk(), Some(1), "CJK width tables");
-        } else {
-            assert_eq!(DIVIDER_RULE, "│");
-            assert_eq!('│'.width(), Some(1), "the buffer's width table");
-        }
+    fn the_rule_declares_the_two_cells_a_cjk_console_uses() {
+        assert_eq!(DIVIDER_RULE, "│ ");
+        assert_eq!(DIVIDER_RULE.width(), 2, "the buffer's declared width");
+        assert!(
+            !DIVIDER_RULE.contains('|'),
+            "the ASCII bar is dashed between cells"
+        );
+    }
+
+    /// A CJK console lays `│` out over two cells. The rule declares both, so
+    /// the diff never carries a write for the second one: that write would
+    /// cover the glyph's second half and bring back the broken rule.
+    #[test]
+    fn the_diff_never_writes_over_the_rules_second_cell() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 1));
+        paint_divider(&mut buffer, Rect::new(8, 0, 12, 1), Style::new());
+        // Force a change on the cell a wide `│` would occupy.
+        buffer[(9, 0)].set_symbol("x");
+        let previous = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 20, 1));
+        let updates = previous.diff(&buffer);
+        assert!(
+            updates
+                .iter()
+                .any(|(x, _, cell)| *x == 8 && cell.symbol() == DIVIDER_RULE),
+            "the rule itself is carried"
+        );
+        assert!(
+            !updates.iter().any(|(x, _, _)| *x == 9),
+            "a write on the rule's second cell covers half the glyph"
+        );
     }
 }
 
