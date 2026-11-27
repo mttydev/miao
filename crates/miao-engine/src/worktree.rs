@@ -47,6 +47,14 @@ pub fn list(root: &Path) -> Result<Vec<Tree>, Error> {
 /// worktree in the repository.
 pub fn main_checkout(root: &Path) -> Option<PathBuf> {
     let root = canonical(root);
+    // Only a linked worktree records `.git` as a file naming its gitdir. A
+    // checkout, a subdirectory and a non-git directory all have no such file,
+    // and `git rev-parse` would answer None for them anyway: asking cost two
+    // processes per historical Session, which is most of the placement walk
+    // on a long-lived workspace.
+    if !root.join(".git").is_file() {
+        return None;
+    }
     let top = git(&root, &["rev-parse", "--show-toplevel"]).ok()?;
     let top = canonical(Path::new(top.trim()));
     if top != root {

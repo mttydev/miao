@@ -1120,30 +1120,36 @@ impl Runtime {
             if root == engine_root {
                 continue;
             }
-            if let Err(error) = tools.register_session_root(&session, &root).await {
-                // A worktree removed outside miao must not fall back to the
-                // engine checkout: that checkout may belong to another
-                // Session. Re-home the Session in a fresh worktree before it
-                // can run a turn.
-                if let Ok(checkout) = crate::worktree::checkout(tools.engine_root()) {
-                    if let Ok(tree) = Self::session_worktree(&session, &checkout) {
-                        if store.set_session_root(&session, &tree).await.is_ok()
-                            && tools.register_session_root(&session, &tree).await.is_ok()
-                        {
-                            eprintln!(
-                                "miao-engine: Session {session} worktree {root} is gone; \
-                                 re-homed at {tree}. History is intact; uncommitted changes \
-                                 in the removed tree were not recovered."
-                            );
-                            continue;
-                        }
+            let error = match tools.register_session_root(&session, &root).await {
+                Ok(()) => continue,
+                // The process is quitting: the blocking pool cancelled the
+                // work, so this row says nothing about the Session. Stop the
+                // walk instead of printing one false error per remaining row.
+                Err(ToolError::ShuttingDown) => break,
+                Err(error) => error,
+            };
+            // A worktree removed outside miao must not fall back to the
+            // engine checkout: that checkout may belong to another
+            // Session. Re-home the Session in a fresh worktree before it
+            // can run a turn.
+            if let Ok(checkout) = crate::worktree::checkout(tools.engine_root()) {
+                if let Ok(tree) = Self::session_worktree(&session, &checkout) {
+                    if store.set_session_root(&session, &tree).await.is_ok()
+                        && tools.register_session_root(&session, &tree).await.is_ok()
+                    {
+                        eprintln!(
+                            "miao-engine: Session {session} worktree {root} is gone; \
+                             re-homed at {tree}. History is intact; uncommitted changes \
+                             in the removed tree were not recovered."
+                        );
+                        continue;
                     }
                 }
-                eprintln!(
-                    "miao-engine: Session {session} root {root} is unavailable ({error}); \
-                     leaving it at the engine root"
-                );
             }
+            eprintln!(
+                "miao-engine: Session {session} root {root} is unavailable ({error}); \
+                 leaving it at the engine root"
+            );
         }
         // Legacy databases predate the lease. Give the checkout to the oldest
         // live Session already there so a new Session is not the one that
