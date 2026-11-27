@@ -3,7 +3,7 @@
 </p>
 <p align="center">模型由你选，工作持续推进，少浪费上下文。</p>
 <p align="center">
-  <a href="README.md">English</a> | <a href="README.zh.md">简体中文</a>
+  <a href="README.md">English</a> | <a href="README.zh.md">简体中文</a> | <a href="README.tr.md">Türkçe</a>
 </p>
 <p align="center">
   <a href="https://mtty.dev/zh/miao">官网</a> · <a href="#快速开始">快速开始</a> · <a href="#为什么选择-miao">为什么选择 miao</a> · <a href="docs/guide.zh.md">使用指南</a> · <a href="https://github.com/mttydev/miao/releases">下载版本</a> · <a href="#相关项目">相关项目</a>
