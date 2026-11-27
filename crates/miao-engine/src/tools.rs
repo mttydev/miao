@@ -57,6 +57,11 @@ pub enum ToolError {
     /// corrected retry can succeed without a separate read turn.
     #[error("{0}")]
     AmbiguousFuzzy(String),
+    /// A blocking worker was cancelled because the process is shutting down.
+    /// The requested path is not at fault, so a caller restoring many rows
+    /// stops the walk instead of reporting each Session.
+    #[error("engine is shutting down")]
+    ShuttingDown,
     #[error("file IO failed: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -351,6 +356,17 @@ pub(crate) fn resolve_references(
         }
     }
     Ok((references, roots))
+}
+
+/// A blocking worker runs a filesystem syscall off the async threads. When the
+/// runtime shuts down it cancels that worker instead of running it, and the
+/// cancellation says nothing about the requested path.
+fn blocking_failure(error: tokio::task::JoinError) -> ToolError {
+    if error.is_cancelled() {
+        ToolError::ShuttingDown
+    } else {
+        ToolError::Io(std::io::Error::other("directory worker failed"))
+    }
 }
 
 impl Tools {
@@ -1591,14 +1607,18 @@ impl Tools {
     /// a linked worktree also records the main checkout it must not write.
     pub async fn register_session_root(&self, session: &str, root: &str) -> Result<(), ToolError> {
         let root = crate::placement::canonical(Path::new(root));
-        if !tokio::fs::metadata(&root).await?.is_dir() {
+        let path = root.clone();
+        let metadata = tokio::task::spawn_blocking(move || std::fs::metadata(&path))
+            .await
+            .map_err(blocking_failure)??;
+        if !metadata.is_dir() {
             return Err(ToolError::InvalidInput);
         }
         let path = root.clone();
         let directory =
             tokio::task::spawn_blocking(move || Dir::open_ambient_dir(path, ambient_authority()))
                 .await
-                .map_err(|_| ToolError::Io(std::io::Error::other("directory worker failed")))??;
+                .map_err(blocking_failure)??;
         let main_checkout = crate::worktree::main_checkout(&root);
         self.session_roots
             .write()
