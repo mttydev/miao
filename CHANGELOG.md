@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-11-27
+
+### Fixed
+- **engine**: restore placement without a git call per checkout row (#3430) (`7b00d5ba9e`)
+
 ## [0.5.12] - 2026-11-27
 
 ### Fixed
