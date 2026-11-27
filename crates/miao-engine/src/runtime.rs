@@ -264,6 +264,9 @@ pub struct Runtime {
     inner: Arc<Inner>,
 }
 
+/// How long a plan-meter answer stays fresh before a poll refreshes it.
+const QUOTA_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// An in-process adapter capability, never accepted as a client-supplied role.
 #[derive(Clone)]
 pub struct Controller {
@@ -302,6 +305,9 @@ struct Inner {
     /// this on its own cadence; a provider's meter does not move between two
     /// frames, so a minute of reuse keeps the network off the frame path.
     quota: Mutex<Option<(std::time::Instant, Value)>>,
+    /// Set while a background task owns the meter, so overlapping polls do not
+    /// start a second round trip.
+    quota_refreshing: std::sync::atomic::AtomicBool,
     timers: Mutex<HashMap<String, Background>>,
     crons: Mutex<HashMap<String, Background>>,
     job_pool: FairPool,
@@ -1181,6 +1187,7 @@ impl Runtime {
                 terminals: crate::terminal::Registry::default(),
                 credential_db: std::sync::OnceLock::new(),
                 quota: Mutex::new(None),
+                quota_refreshing: std::sync::atomic::AtomicBool::new(false),
                 timers: Mutex::new(HashMap::new()),
                 crons: Mutex::new(HashMap::new()),
                 job_pool: FairPool::new(JOB_SLOTS, JOBS_PER_SESSION),
@@ -2032,14 +2039,47 @@ impl Runtime {
     /// whose account has no coding plan, whose endpoint is unreachable, or
     /// whose answer this build does not parse contributes no row: the sidebar
     /// must not turn a missing meter into a failed turn.
+    ///
+    /// The reply is the last refresh, never a network round trip: the host
+    /// dispatches one command at a time, and fetching here delayed the first
+    /// prompt behind four provider calls. `pending` says a task is filling the
+    /// cache, so a polling client keeps its shorter retry.
     pub async fn quota(&self) -> Result<Value, Error> {
-        // Shorter than the sidebar's own 60s cadence so an asking client never
-        // receives the answer of the previous minute, and a second reader
-        // (another window) cannot double the endpoint traffic.
-        const REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
-        let mut cache = self.inner.quota.lock().await;
-        if let Some((at, value)) = cache.as_ref() {
-            if at.elapsed() < REFRESH {
+        let cached = self.inner.quota.lock().await.clone();
+        match cached {
+            Some((at, value)) => {
+                if at.elapsed() >= QUOTA_REFRESH {
+                    self.spawn_quota_refresh();
+                }
+                Ok(value)
+            }
+            None => {
+                self.spawn_quota_refresh();
+                Ok(json!({ "providers": [], "pending": true }))
+            }
+        }
+    }
+
+    fn spawn_quota_refresh(&self) {
+        use std::sync::atomic::Ordering;
+        if self.inner.quota_refreshing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let _ = runtime.refresh_quota().await;
+            runtime
+                .inner
+                .quota_refreshing
+                .store(false, Ordering::Release);
+        });
+    }
+
+    /// One refresh, on its own task so the command loop stays free.
+    async fn refresh_quota(&self) -> Result<Value, Error> {
+        let cached = self.inner.quota.lock().await.clone();
+        if let Some((at, value)) = cached.as_ref() {
+            if at.elapsed() < QUOTA_REFRESH {
                 return Ok(value.clone());
             }
         }
@@ -2057,7 +2097,7 @@ impl Runtime {
             return Ok(json!({ "providers": [] }));
         };
         let client = reqwest::Client::new();
-        let previous = cache.as_ref().map(|(_, value)| value.clone());
+        let previous = cached.map(|(_, value)| value);
         let mut providers: Vec<Value> = Vec::new();
         for metadata in stored {
             // A meter belongs to one plan, and one integration can hold several
@@ -2096,6 +2136,7 @@ impl Runtime {
             match report {
                 Some(mut report) => {
                     report["label"] = json!(metadata.label);
+                    report["credential_id"] = json!(metadata.id);
                     providers.push(report);
                 }
                 // Keep the last answer for this account instead of dropping
@@ -2125,7 +2166,7 @@ impl Runtime {
             }
         }
         let value = json!({ "providers": providers });
-        *cache = Some((std::time::Instant::now(), value.clone()));
+        *self.inner.quota.lock().await = Some((std::time::Instant::now(), value.clone()));
         Ok(value)
     }
 

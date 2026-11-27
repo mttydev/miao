@@ -205,6 +205,9 @@ impl PlanWindow {
 pub struct PlanProvider {
     pub provider: String,
     pub label: String,
+    /// The opaque credential the row was read with, so the TUI can keep only
+    /// the account the current model spends.
+    pub credential_id: String,
     pub plan: String,
     pub windows: Vec<PlanWindow>,
 }
@@ -243,6 +246,11 @@ impl PlanQuota {
                                     .to_owned(),
                                 label: row
                                     .get("label")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                credential_id: row
+                                    .get("credential_id")
                                     .and_then(Value::as_str)
                                     .unwrap_or_default()
                                     .to_owned(),

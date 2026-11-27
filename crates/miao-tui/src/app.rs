@@ -5739,6 +5739,66 @@ impl App {
         }
     }
 
+    /// The plan meters for the account the current model spends. A provider
+    /// with several stored accounts shows the bound one; without a binding the
+    /// default account stands in, because that is what the engine resolves.
+    fn quota_view(&self) -> Option<crate::status::PlanQuota> {
+        let quota = self.quota.as_ref()?;
+        let Some(provider) = self.shell.status.provider.as_deref() else {
+            return Some(quota.clone());
+        };
+        let mut rows: Vec<crate::status::PlanProvider> = quota
+            .providers
+            .iter()
+            .filter(|row| row.provider == provider)
+            .cloned()
+            .collect();
+        if let Some(credential) = self.active_credential_id() {
+            let exact: Vec<_> = rows
+                .iter()
+                .filter(|row| row.credential_id == credential)
+                .cloned()
+                .collect();
+            if !exact.is_empty() {
+                rows = exact;
+            }
+        }
+        // Two accounts on one provider and no binding: the engine spends the
+        // default, so that is the row worth painting.
+        if rows.len() > 1 {
+            if let Some(default) = rows.iter().find(|row| row.label == "default") {
+                rows = vec![default.clone()];
+            }
+        }
+        Some(crate::status::PlanQuota { providers: rows })
+    }
+
+    /// The credential the current model spends, when the catalog names it. The
+    /// Session's own pin wins; a fresh landing falls back to the remembered
+    /// model, exactly as the status strip resolves its provider.
+    fn active_credential_id(&self) -> Option<String> {
+        if let Some(id) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.credential_id.clone())
+        {
+            return Some(id);
+        }
+        let label = self
+            .session
+            .as_ref()
+            .and_then(|session| session.model.as_ref())
+            .map(crate::session::ModelPin::label)
+            .or_else(|| {
+                self.settings
+                    .as_ref()
+                    .map(|settings| settings.model.clone())
+                    .filter(|model| model != engine::UNROUTED_MODEL)
+            })
+            .or_else(|| self.remembered_model.clone())?;
+        ModelInfo::resolve(&self.models, &label).and_then(|info| info.credential_id.clone())
+    }
+
     fn update_status(&mut self) {
         // The composer mirrors the durable queue every frame so the count stays
         // live without the composer owning it.
@@ -6115,6 +6175,10 @@ impl App {
             .or(remembered);
         self.shell.status.model = facts.as_ref().map(|(model, _)| model.clone());
         self.shell.status.provider = facts.and_then(|(_, provider)| provider);
+        // The block answers for the account this model spends, not for every
+        // stored plan: list only the binding in use.
+        let view = self.quota_view();
+        self.shell.set_quota(view.as_ref());
         self.shell.status.usage =
             self.usage
                 .as_ref()
@@ -7177,6 +7241,37 @@ mod tests {
                 .any(|request| matches!(request, engine::Request::Quota)),
             "after an answer the slower cadence holds"
         );
+    }
+
+    /// The block lists the account the current model spends, not every stored
+    /// plan; a pinned account selects its own row.
+    #[test]
+    fn the_plan_block_is_scoped_to_the_model_in_use() {
+        let mut app = app();
+        app.quota = Some(crate::status::PlanQuota::from_value(&serde_json::json!({
+            "providers": [
+                {"provider":"opencode-go","label":"default","credential_id":"cred_default","windows":[{"id":"5h","percent":1.0}]},
+                {"provider":"opencode-go","label":"dtee","credential_id":"cred_dtee","windows":[{"id":"5h","percent":2.0}]},
+                {"provider":"commandcode","label":"default","credential_id":"cred_cc","windows":[{"id":"5h","percent":3.0}]}
+            ]
+        })));
+        app.shell.status.provider = Some("opencode-go".into());
+        let view = app.quota_view().expect("view");
+        assert_eq!(view.providers.len(), 1);
+        assert_eq!(view.providers[0].label, "default");
+        assert_eq!(view.providers[0].provider, "opencode-go");
+
+        let mut pinned = summary("ses_scope", 1);
+        pinned.credential_id = Some("cred_dtee".into());
+        app.session = Some(pinned);
+        let view = app.quota_view().expect("view");
+        assert_eq!(view.providers.len(), 1);
+        assert_eq!(view.providers[0].label, "dtee");
+
+        // Without a provider to scope by, the whole answer is shown.
+        app.shell.status.provider = None;
+        let view = app.quota_view().expect("view");
+        assert_eq!(view.providers.len(), 3);
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {

@@ -667,6 +667,9 @@ impl Shell {
 
     pub fn set_quota(&mut self, quota: Option<&crate::status::PlanQuota>) {
         if let Some(sidebar) = self.sidebar.as_mut() {
+            if sidebar.quota.as_ref() == quota {
+                return;
+            }
             sidebar.quota = quota.cloned();
         }
     }

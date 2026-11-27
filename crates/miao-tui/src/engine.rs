@@ -1968,9 +1968,14 @@ async fn run(
                     // unit and the engine rejects the call, which is why this
                     // block painted nothing in every build that shipped it.
                     if let Ok(value) = client.request(QUOTA_METHOD, Value::Null).await {
-                        bus.send(AppEvent::Quota(crate::status::PlanQuota::from_value(
-                            &value,
-                        )));
+                        // The engine answers `pending` while its background task
+                        // fills the cache. That is not an empty plan: keep the
+                        // short retry instead of marking the meter answered.
+                        if value["pending"].as_bool() != Some(true) {
+                            bus.send(AppEvent::Quota(crate::status::PlanQuota::from_value(
+                                &value,
+                            )));
+                        }
                     }
                 }
                 Request::SelectAccount {
