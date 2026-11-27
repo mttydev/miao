@@ -2057,6 +2057,7 @@ impl Runtime {
             return Ok(json!({ "providers": [] }));
         };
         let client = reqwest::Client::new();
+        let previous = cache.as_ref().map(|(_, value)| value.clone());
         let mut providers: Vec<Value> = Vec::new();
         for metadata in stored {
             // A meter belongs to one plan, and one integration can hold several
@@ -2077,14 +2078,50 @@ impl Runtime {
                 id: metadata.id.clone(),
                 integration: metadata.integration.clone(),
             };
-            let Ok(credential) = source.load().await else {
-                continue;
+            let report = match source.load().await {
+                Ok(credential) => {
+                    match crate::quota::fetch(&client, &metadata.integration, &credential).await {
+                        Some(report) => Some(report),
+                        // A startup or a busy proxy can drop one endpoint.
+                        // One retry separates a blip from a plan that is really
+                        // unreachable before a row is left out.
+                        None => {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            crate::quota::fetch(&client, &metadata.integration, &credential).await
+                        }
+                    }
+                }
+                Err(_) => None,
             };
-            if let Some(mut report) =
-                crate::quota::fetch(&client, &metadata.integration, &credential).await
-            {
-                report["label"] = json!(metadata.label);
-                providers.push(report);
+            match report {
+                Some(mut report) => {
+                    report["label"] = json!(metadata.label);
+                    providers.push(report);
+                }
+                // Keep the last answer for this account instead of dropping
+                // its row: a failed round trip is not a plan that ended, and a
+                // block that loses rows between polls reads as broken. Older
+                // than fifteen minutes is stale enough to leave out.
+                None => {
+                    let now = crate::approval::now_ms();
+                    let reused = previous
+                        .as_ref()
+                        .and_then(|value| value["providers"].as_array())
+                        .and_then(|rows| {
+                            rows.iter().find(|row| {
+                                row["provider"].as_str() == Some(metadata.integration.as_str())
+                                    && row["label"].as_str() == Some(metadata.label.as_str())
+                            })
+                        })
+                        .filter(|row| {
+                            row["fetched_at_ms"]
+                                .as_u64()
+                                .is_some_and(|at| now.saturating_sub(at) <= 15 * 60 * 1_000)
+                        });
+                    if let Some(row) = reused {
+                        providers.push(row.clone());
+                    }
+                }
             }
         }
         let value = json!({ "providers": providers });

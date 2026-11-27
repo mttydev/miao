@@ -132,7 +132,7 @@ fn meter_request(
 ) -> reqwest::RequestBuilder {
     let request = client
         .get(url)
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(4))
         .header("accept", "application/json")
         .header("authorization", authorization);
     if session {
