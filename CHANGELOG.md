@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-11-28
+
+### Fixed
+- **engine**: index a run's tools so finishing does not scan the table (#3447) (`3c8121cfd9`)
+
 ## [0.5.18] - 2026-11-28
 
 ### Fixed
