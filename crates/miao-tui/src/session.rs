@@ -392,6 +392,10 @@ pub struct SessionState {
     /// composer echoes a prompt before the engine has it, and matches its echo
     /// against these ids so one prompt is never on screen twice.
     pub pending_input_ids: Vec<String>,
+    /// The journal cursor this snapshot was built at. An input admitted at or
+    /// below it is already reflected in `pending`, so an echo missing from that
+    /// list was promoted before the snapshot.
+    pub cursor: u64,
     pub approvals: Vec<ApprovalView>,
     pub questions: Vec<QuestionView>,
     /// Messages a redo would restore. The engine keeps reverted rows in its
@@ -476,6 +480,7 @@ impl SessionState {
                         .collect()
                 })
                 .unwrap_or_default(),
+            cursor: snapshot.get("cursor").and_then(Value::as_u64).unwrap_or(0),
             approvals: snapshot
                 .get("approvals")
                 .and_then(Value::as_array)

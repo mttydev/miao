@@ -72,8 +72,18 @@ async fn stale_execution_ids_cannot_interrupt_the_new_run() {
     let first = active(&store, true).await.unwrap();
     assert!(!runtime.cancel_if("s", "wrong-run").await.unwrap());
     assert_eq!(store.active_run("s").await.unwrap(), Some(first.clone()));
-    assert!(runtime.cancel_if("s", &first).await.unwrap());
+    assert!(!runtime.interrupt_if("s", "wrong-run").await.unwrap());
+    assert!(runtime.interrupt_if("s", &first).await.unwrap());
     active(&store, false).await;
+    let requested = store.events("s", 0, 400).await.unwrap();
+    assert!(
+        requested
+            .iter()
+            .any(|event| event.kind == "run.cancel_requested"
+                && event.data["run_id"].as_str() == Some(first.as_str())
+                && event.data["reason"].as_str() == Some("operator")),
+        "an operator interrupt records its origin"
+    );
     assert!(!runtime.cancel_if("s", &first).await.unwrap());
     runtime.admit(input("second"), true).await.unwrap();
     let second = active(&store, true).await.unwrap();
@@ -82,5 +92,14 @@ async fn stale_execution_ids_cannot_interrupt_the_new_run() {
     assert_eq!(store.active_run("s").await.unwrap(), Some(second.clone()));
     assert!(runtime.cancel_if("s", &second).await.unwrap());
     active(&store, false).await;
+    let requested = store.events("s", 0, 400).await.unwrap();
+    assert!(
+        requested
+            .iter()
+            .any(|event| event.kind == "run.cancel_requested"
+                && event.data["run_id"].as_str() == Some(second.as_str())
+                && event.data["reason"].as_str() == Some("take_back")),
+        "a take-back keeps its own origin"
+    );
     runtime.shutdown().await;
 }

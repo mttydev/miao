@@ -601,6 +601,10 @@ struct Echo {
     session_id: String,
     input_id: String,
     text: String,
+    /// The journal sequence the admission landed at, once the engine answered.
+    /// A projection whose cursor covers it and no longer lists the input as
+    /// pending proves the promotion, so the echo retires without the event.
+    admitted_seq: Option<u64>,
     /// The engine promoted the input: the projection that carries its message
     /// is the one that drops the echo.
     settled: bool,
@@ -1886,7 +1890,8 @@ impl App {
                 self.shell.set_transcript(&transcript);
                 if let Some(session_id) = self.session.as_ref().map(|session| session.id.clone()) {
                     let pending = self.state.pending_input_ids.clone();
-                    self.settle_echoes(&session_id, &pending);
+                    let cursor = self.state.cursor;
+                    self.settle_echoes(&session_id, &pending, cursor);
                 }
                 self.show_queued_prompts();
                 // Opening a Session shows its newest turn: `follow` survives
@@ -2028,6 +2033,19 @@ impl App {
                     }
                 }
                 self.show_queued_prompts();
+            }
+            AppEvent::PromptAdmitted {
+                session_id,
+                input_id,
+                admitted_seq,
+            } => {
+                if let Some(echo) = self
+                    .echoes
+                    .iter_mut()
+                    .find(|echo| echo.session_id == session_id && echo.input_id == input_id)
+                {
+                    echo.admitted_seq = Some(admitted_seq);
+                }
             }
             AppEvent::InputRetrieved { prompt, delivery } => {
                 self.forget_echo(&prompt);
@@ -6656,6 +6674,7 @@ impl App {
             session_id: session_id.clone(),
             input_id,
             text: text.clone(),
+            admitted_seq: None,
             settled: false,
         });
         self.show_queued_prompts();
@@ -6746,9 +6765,24 @@ impl App {
     /// Drop the echoes this projection has answered: an input it lists as
     /// pending is the engine's to show from now on, and one the engine already
     /// promoted is the message this same projection carries.
-    fn settle_echoes(&mut self, session_id: &str, pending: &[String]) {
+    ///
+    /// The promotion itself is only known by the input's absence from `pending`
+    /// when the snapshot is new enough to have seen the admission. Without that
+    /// check an echo whose promotion event was lost or late outlived every
+    /// projection — it is absent from `pending` forever — and the band kept
+    /// naming a prompt already in the transcript.
+    fn settle_echoes(&mut self, session_id: &str, pending: &[String], cursor: u64) {
         self.echoes.retain(|echo| {
-            echo.session_id != session_id || (!echo.settled && !pending.contains(&echo.input_id))
+            if echo.session_id != session_id {
+                return true;
+            }
+            if echo.settled {
+                return false;
+            }
+            if pending.contains(&echo.input_id) {
+                return false;
+            }
+            !echo.admitted_seq.is_some_and(|seq| seq <= cursor)
         });
     }
 
@@ -6836,12 +6870,16 @@ impl App {
     /// running. Shared by Escape and by a take-back that found nothing to
     /// cancel, so both end in the same place.
     fn interrupt_or_leave(&mut self) {
-        if self.state.active_run.is_some() {
+        if let Some(run) = self.state.active_run.clone() {
             if let (Some(id), Some(engine)) = (
                 self.session.as_ref().map(|session| session.id.clone()),
                 self.engine.as_ref(),
             ) {
-                engine.cancel(&id);
+                // The run this screen shows, not whatever the engine is running
+                // by the time the request lands: a queued prompt starts a
+                // successor drain as soon as the shown run stops, and killing
+                // that one is what made a queued prompt look undelivered.
+                engine.interrupt_if(&id, &run);
             }
             return;
         }
@@ -8780,6 +8818,51 @@ mod tests {
         assert!(app.shell.queued_prompts().is_empty());
     }
 
+    /// A projection can prove a promotion without the promotion event: once the
+    /// snapshot cursor covers the admission and the input is no longer pending,
+    /// the echo has nothing left to say. Retiring it only on `input.promoted`
+    /// left a slow or resynced screen naming prompts already in the transcript.
+    #[test]
+    fn a_projection_past_the_admission_retires_an_unsettled_echo() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                active_run: Some("run".into()),
+                ..SessionState::default()
+            },
+        ));
+        let input_id = send(&mut app, "ship it", &mut requests);
+        assert_eq!(app.shell.queued_prompts(), ["ship it"]);
+        app.handle(AppEvent::PromptAdmitted {
+            session_id: "ses_a".into(),
+            input_id,
+            admitted_seq: 41,
+        });
+        // A snapshot that predates the admission cannot tell whether the input
+        // is in it, so the echo stays.
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                active_run: Some("run".into()),
+                cursor: 40,
+                ..SessionState::default()
+            },
+        ));
+        assert_eq!(app.shell.queued_prompts(), ["ship it"]);
+        // This snapshot covers it and does not list it as pending: promoted.
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                active_run: Some("run".into()),
+                cursor: 41,
+                ..SessionState::default()
+            },
+        ));
+        assert!(app.shell.queued_prompts().is_empty());
+        assert!(app.echoes.is_empty(), "the projection retired the echo");
+    }
+
     /// The snapshot's own copy of a pending input is dropped by the settlement
     /// too: a projection that raced the promotion painted the band from it, and
     /// only the echo was retired before.
@@ -9626,6 +9709,7 @@ mod tests {
             pending: 0,
             pending_prompts: Vec::new(),
             pending_input_ids: Vec::new(),
+            cursor: 0,
             approvals: vec![crate::session::ApprovalView {
                 request_id: "run-1/call_1".into(),
                 tool: "bash".into(),
@@ -11267,6 +11351,38 @@ mod tests {
         assert_eq!(app.screen, Screen::Session);
     }
 
+    /// Escape names the run the screen showed. A screen that lags a slow
+    /// ledger can still be painting a run that already stopped, and the next
+    /// Escape must not stop the successor drain delivering the prompt the
+    /// operator queued behind it.
+    #[test]
+    fn escape_interrupts_the_run_on_screen_by_id() {
+        let (mut app, mut requests) = recording_session("ses_a");
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                active_run: Some("run-1".into()),
+                ..SessionState::default()
+            },
+        ));
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+        let sent = control_requests(&mut requests);
+        assert!(
+            sent.iter().any(|request| matches!(
+                request,
+                engine::Request::InterruptIf { session_id, run_id }
+                    if session_id == "ses_a" && run_id == "run-1"
+            )),
+            "the run on screen is the one to stop"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|request| matches!(request, engine::Request::Cancel { .. })),
+            "an id-less cancel would also stop a successor run"
+        );
+    }
+
     fn running_app(run_id: &str) -> App {
         let mut app = session_app();
         app.handle(AppEvent::SessionOpened {
@@ -11949,8 +12065,10 @@ mod tests {
         // the cancel is named across the whole recording, not at its head.
         app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(
-            std::iter::from_fn(|| requests.try_recv().ok())
-                .any(|request| matches!(request, engine::Request::Cancel { .. })),
+            std::iter::from_fn(|| requests.try_recv().ok()).any(|request| matches!(
+                request,
+                engine::Request::InterruptIf { run_id, .. } if run_id == "run-1"
+            )),
             "Esc during a backlog still cancels the run"
         );
     }
@@ -12605,8 +12723,10 @@ mod tests {
         app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
         let sent: Vec<_> = std::iter::from_fn(|| requests.try_recv().ok()).collect();
         assert!(
-            sent.iter()
-                .any(|request| matches!(request, engine::Request::Cancel { .. })),
+            sent.iter().any(|request| matches!(
+                request,
+                engine::Request::InterruptIf { run_id, .. } if run_id == "run-1"
+            )),
             "Escape interrupts the running turn"
         );
         assert!(
@@ -12645,7 +12765,7 @@ mod tests {
         assert!(
             !sent
                 .iter()
-                .any(|request| matches!(request, engine::Request::Cancel { .. })),
+                .any(|request| matches!(request, engine::Request::InterruptIf { .. })),
             "there is no running turn to interrupt"
         );
         assert_eq!(app.screen, Screen::Session);
@@ -12694,7 +12814,7 @@ mod tests {
         // text was handed back, so nothing pretends it was.
         assert!(matches!(
             requests.try_recv(),
-            Ok(engine::Request::Cancel { .. })
+            Ok(engine::Request::InterruptIf { .. })
         ));
         assert!(app.shell.composer.editor.is_empty());
         assert_eq!(

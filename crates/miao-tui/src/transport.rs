@@ -518,6 +518,21 @@ impl EngineClient {
             .await
     }
 
+    /// Interrupt the run the screen showed, named by its execution id. A run
+    /// that already settled is ignored, so a screen that lagged a slow ledger
+    /// cannot stop the successor a queued prompt started.
+    pub async fn interrupt_if(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<Value, TransportError> {
+        self.request(
+            "interrupt_if",
+            json!({ "session_id": session_id, "run_id": run_id }),
+        )
+        .await
+    }
+
     pub async fn approve(
         &self,
         session_id: &str,

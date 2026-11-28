@@ -220,6 +220,10 @@ impl Host {
                 .cancel_if(&session_id, &run_id)
                 .await
                 .map(|accepted| json!({ "accepted": accepted })),
+            Command::InterruptIf { session_id, run_id } => runtime
+                .interrupt_if(&session_id, &run_id)
+                .await
+                .map(|accepted| json!({ "accepted": accepted })),
             Command::Compact {
                 session_id,
                 compaction_id,
