@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.18] - 2026-11-28
+
+### Fixed
+- **tui**: deliver the prompt queued behind an interrupt (#3445) (`ecff930e72`)
+
 ## [0.5.17] - 2026-11-28
 
 ### Fixed
