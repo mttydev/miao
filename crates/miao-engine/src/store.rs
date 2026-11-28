@@ -436,6 +436,7 @@ impl Store {
                     CREATE UNIQUE INDEX IF NOT EXISTS engine_pending_approval ON engine_approval(call_id) WHERE state='pending';
                     CREATE TABLE IF NOT EXISTS engine_lineage(session_id TEXT PRIMARY KEY REFERENCES engine_session(id),parent_session_id TEXT NOT NULL REFERENCES engine_session(id),message_seq INTEGER NOT NULL);
                     CREATE INDEX IF NOT EXISTS engine_pending_inputs ON engine_input(session_id,state,admitted_seq);
+                    CREATE INDEX IF NOT EXISTS engine_tool_run ON engine_tool(run_id,state);
                     CREATE TABLE IF NOT EXISTS engine_context(session_id TEXT NOT NULL REFERENCES engine_session(id),epoch INTEGER NOT NULL,fingerprint TEXT NOT NULL,system TEXT NOT NULL,sources TEXT NOT NULL,selected_seq INTEGER NOT NULL,PRIMARY KEY(session_id,epoch));
                     CREATE TABLE IF NOT EXISTS engine_job(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES engine_session(id),request_key TEXT UNIQUE NOT NULL REFERENCES engine_tool(id),state TEXT NOT NULL,input TEXT NOT NULL,result TEXT);
                     CREATE TABLE IF NOT EXISTS engine_compaction(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES engine_session(id),through_seq INTEGER NOT NULL,summary TEXT NOT NULL,created_seq INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS engine_lease(session_id TEXT PRIMARY KEY REFERENCES engine_session(id),interval_ms INTEGER NOT NULL,last_ms INTEGER NOT NULL,epoch INTEGER NOT NULL,owner_pid INTEGER);"))?;
@@ -7557,5 +7558,67 @@ mod owner_tests {
         // Sidecar naming has to follow the storage file the way the migration
         // lock does, or a waiting engine reads a file nobody wrote.
         assert!(directory.path().join("engine.engine-owner.json").exists());
+    }
+}
+
+#[cfg(test)]
+mod tool_index_tests {
+    use super::*;
+
+    /// `finish_run_tx` asks `reconcile_tools` for a run's pending tools on every
+    /// run finish. Without an index that query scans the whole tool table — in
+    /// the reported 3.5 GB ledger that was 95,829 rows and 64 MB, 3.25 s warm
+    /// and the bulk of a 10–16 s closing transaction under load.
+    #[tokio::test]
+    async fn reconcile_tools_looks_a_run_up_through_the_index() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let storage = directory.path().join("engine.db");
+        Store::open(&storage).await.expect("store");
+        let connection = rusqlite::Connection::open(&storage).expect("open");
+        let plan: Vec<String> = connection
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT input,state FROM engine_tool \
+                 WHERE run_id='run' AND state IN ('planned','dispatched')",
+            )
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("plan")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert!(
+            plan.iter().any(|line| line.contains("engine_tool_run")),
+            "a run finish must not scan the whole tool table: {plan:?}"
+        );
+    }
+
+    /// A ledger written before this index existed gets it on the next open.
+    /// The index belongs to the idempotent schema batch, not to a versioned
+    /// migration: adding a version would refuse every upgrade while another
+    /// miao window still holds the store, and an index is safe to build under
+    /// live readers.
+    #[tokio::test]
+    async fn an_existing_ledger_gets_the_tool_index_on_open() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let storage = directory.path().join("engine.db");
+        Store::open(&storage).await.expect("store");
+        let index_exists = |connection: &rusqlite::Connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                     WHERE type='index' AND name='engine_tool_run')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("index lookup")
+        };
+        let connection = rusqlite::Connection::open(&storage).expect("open");
+        connection
+            .execute("DROP INDEX engine_tool_run", [])
+            .expect("drop index");
+        assert!(!index_exists(&connection), "the old shape has no index");
+        drop(connection);
+        Store::open(&storage).await.expect("reopen");
+        let connection = rusqlite::Connection::open(&storage).expect("open");
+        assert!(index_exists(&connection), "opening the ledger builds it");
     }
 }
