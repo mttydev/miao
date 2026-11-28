@@ -1679,7 +1679,8 @@ impl App {
             AppEvent::Quota(quota) => {
                 self.quota = Some(quota);
                 self.quota_answered = true;
-                self.shell.set_quota(self.quota.as_ref());
+                // `update_status` paints the filtered view (the account the
+                // model spends); writing the whole answer here would undo it.
             }
             AppEvent::HistoryWindow {
                 next_before,
@@ -5744,7 +5745,21 @@ impl App {
     /// default account stands in, because that is what the engine resolves.
     fn quota_view(&self) -> Option<crate::status::PlanQuota> {
         let quota = self.quota.as_ref()?;
-        let Some(provider) = self.shell.status.provider.as_deref() else {
+        let provider =
+            self.active_model_label()
+                .and_then(|label| {
+                    label
+                        .split_once('/')
+                        .map(|(provider, _)| provider.to_string())
+                })
+                .or_else(|| {
+                    // The strip composes `provider · protocol`; the first segment is
+                    // the integration id the meter rows carry.
+                    self.shell.status.provider.as_deref().map(|provider| {
+                        provider.split(" · ").next().unwrap_or(provider).to_string()
+                    })
+                });
+        let Some(provider) = provider else {
             return Some(quota.clone());
         };
         let mut rows: Vec<crate::status::PlanProvider> = quota
@@ -5784,8 +5799,13 @@ impl App {
         {
             return Some(id);
         }
-        let label = self
-            .session
+        let label = self.active_model_label()?;
+        ModelInfo::resolve(&self.models, &label).and_then(|info| info.credential_id.clone())
+    }
+
+    /// The model a prompt would run on, as the catalogue spells it.
+    fn active_model_label(&self) -> Option<String> {
+        self.session
             .as_ref()
             .and_then(|session| session.model.as_ref())
             .map(crate::session::ModelPin::label)
@@ -5795,8 +5815,7 @@ impl App {
                     .map(|settings| settings.model.clone())
                     .filter(|model| model != engine::UNROUTED_MODEL)
             })
-            .or_else(|| self.remembered_model.clone())?;
-        ModelInfo::resolve(&self.models, &label).and_then(|info| info.credential_id.clone())
+            .or_else(|| self.remembered_model.clone())
     }
 
     fn update_status(&mut self) {
@@ -5869,6 +5888,10 @@ impl App {
             // `--auto` should not have to open a Session to find that out.
             self.shell.status.hints.push(self.approval_hint());
             self.mtty_state.update(crate::mtty_state::State::Idle);
+            // The landing screen already names the model, so it carries that
+            // model's plan meter through the same filter the Session view uses.
+            let view = self.quota_view();
+            self.shell.set_quota(view.as_ref());
             return;
         }
         self.refresh_job_wait();
@@ -7255,7 +7278,7 @@ mod tests {
                 {"provider":"commandcode","label":"default","credential_id":"cred_cc","windows":[{"id":"5h","percent":3.0}]}
             ]
         })));
-        app.shell.status.provider = Some("opencode-go".into());
+        app.shell.status.provider = Some("opencode-go · openai-chat".into());
         let view = app.quota_view().expect("view");
         assert_eq!(view.providers.len(), 1);
         assert_eq!(view.providers[0].label, "default");
