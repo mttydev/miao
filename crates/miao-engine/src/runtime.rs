@@ -3490,6 +3490,22 @@ impl Runtime {
     /// Check and cancel inside the owning actor. A stale UI execution ID must
     /// never cancel a new run admitted after the caller observed the old one.
     pub async fn cancel_if(&self, session: &str, run: &str) -> Result<bool, Error> {
+        self.cancel_if_with(session, run, "take_back").await
+    }
+
+    /// Interrupt the run the operator was looking at.
+    ///
+    /// Escape is aimed at what the screen showed, and a screen can lag the
+    /// journal: a slow ledger delays the projection that retires a finished
+    /// run, so the next Escape can arrive after a successor drain already
+    /// started with the queued prompt. Killing that successor is exactly what
+    /// makes the queued prompt look undelivered, so an id that is no longer
+    /// active is ignored.
+    pub async fn interrupt_if(&self, session: &str, run: &str) -> Result<bool, Error> {
+        self.cancel_if_with(session, run, "operator").await
+    }
+
+    async fn cancel_if_with(&self, session: &str, run: &str, origin: &str) -> Result<bool, Error> {
         let commands = {
             let actors = self.inner.actors.lock().await;
             actors.get(session).map(|actor| actor.commands.clone())
@@ -3500,17 +3516,13 @@ impl Runtime {
             }
             self.inner
                 .store
-                .request_cancel(session, run, "take_back")
+                .request_cancel(session, run, origin)
                 .await?;
             return Ok(true);
         };
         let (reply, result) = oneshot::channel();
         commands
-            .send(Command::CancelIf(
-                run.to_owned(),
-                "take_back".to_string(),
-                reply,
-            ))
+            .send(Command::CancelIf(run.to_owned(), origin.to_string(), reply))
             .await
             .map_err(|_| Error::Closed)?;
         result.await.map_err(|_| Error::Closed)?

@@ -151,6 +151,13 @@ pub enum Request {
     Cancel {
         session_id: String,
     },
+    /// Interrupt the run the screen showed. The engine ignores an id that has
+    /// already settled, so a stale Escape cannot stop the successor a queued
+    /// prompt started.
+    InterruptIf {
+        session_id: String,
+        run_id: String,
+    },
     /// Ask for one checkpoint at the next settled boundary. The request is
     /// durable and also closes the compaction breaker, so this is what makes an
     /// explicit `/compact` work on a Session whose summarizer kept failing.
@@ -457,6 +464,13 @@ impl Handle {
     pub fn cancel(&self, session_id: &str) {
         let _ = self.tx.send(Request::Cancel {
             session_id: session_id.to_string(),
+        });
+    }
+
+    pub fn interrupt_if(&self, session_id: &str, run_id: &str) {
+        let _ = self.tx.send(Request::InterruptIf {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
         });
     }
 
@@ -1429,9 +1443,18 @@ async fn run(
                         "delivery": "steer",
                     });
                     match client.admit(input, true, attachments.clone()).await {
-                        Ok(_) => {
+                        Ok(admission) => {
                             if open.as_ref().is_some_and(|state| state.id == session_id) {
                                 dirty.get_or_insert_with(Instant::now);
+                            }
+                            if let Some(admitted_seq) =
+                                admission.get("admitted_seq").and_then(Value::as_u64)
+                            {
+                                bus.send(AppEvent::PromptAdmitted {
+                                    session_id,
+                                    input_id,
+                                    admitted_seq,
+                                });
                             }
                         }
                         Err(error) => bus.send(AppEvent::PromptFailed {
@@ -1507,6 +1530,16 @@ async fn run(
                 },
                 Request::Cancel { session_id } => {
                     match client.cancel(&session_id).await {
+                        Ok(_) => {
+                            dirty.get_or_insert_with(Instant::now);
+                        }
+                        Err(error) => {
+                            bus.send(AppEvent::ActionFailed(format!("interrupt failed: {error}")))
+                        }
+                    }
+                }
+                Request::InterruptIf { session_id, run_id } => {
+                    match client.interrupt_if(&session_id, &run_id).await {
                         Ok(_) => {
                             dirty.get_or_insert_with(Instant::now);
                         }

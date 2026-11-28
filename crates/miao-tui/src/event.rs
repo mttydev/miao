@@ -267,6 +267,15 @@ pub enum AppEvent {
         input_id: String,
         cancelled: bool,
     },
+    /// The engine admitted the echo under an event cursor. A projection whose
+    /// own cursor covers that admission and no longer lists the input as
+    /// pending proves it was promoted, so the echo can retire even when the
+    /// promotion event itself was missed.
+    PromptAdmitted {
+        session_id: String,
+        input_id: String,
+        admitted_seq: u64,
+    },
     /// Nothing was cancellable: the newest input was already promoted, or the
     /// queue drained while the request was in flight. The caller may interrupt
     /// the run instead, but it must not claim the input was cancelled.

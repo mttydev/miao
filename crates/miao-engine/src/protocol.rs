@@ -481,6 +481,16 @@ pub enum Command {
         session_id: String,
         run_id: String,
     },
+    /// Interrupt the run a client last showed the operator.
+    ///
+    /// A screen can lag the journal — a slow ledger delays the projection that
+    /// retires a finished run — so a second Escape can arrive while a successor
+    /// drain is already carrying a queued prompt. The run id that is no longer
+    /// active is ignored instead of stopping that successor.
+    InterruptIf {
+        session_id: String,
+        run_id: String,
+    },
     Compact {
         session_id: String,
         compaction_id: String,
