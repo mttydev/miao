@@ -1121,8 +1121,31 @@ impl Runtime {
         // `file IO failed: background task failed` — an error about a Session
         // that was actually fine. Only worktree placements carry information
         // the fallback cannot reproduce.
+        // Peer mail and the Session list address a project: the checkout every
+        // worktree of a repository shares. Rows written before that identity
+        // existed carry an empty project, so fill it once from the placement
+        // root; a root outside a repository is its own project.
+        let placements = store.session_roots().await?;
+        let mut projects: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (session, root, project) in &placements {
+            if !project.is_empty() {
+                continue;
+            }
+            let project = match projects.get(root) {
+                Some(project) => project.clone(),
+                None => {
+                    let project = crate::worktree::project(std::path::Path::new(root));
+                    projects.insert(root.clone(), project.clone());
+                    project
+                }
+            };
+            if store.set_session_project(session, &project).await.is_err() {
+                continue;
+            }
+        }
         let engine_root = tools.engine_root().to_string_lossy().to_string();
-        for (session, root) in store.session_roots().await? {
+        for (session, root, _) in placements {
             if root == engine_root {
                 continue;
             }
@@ -1143,6 +1166,8 @@ impl Runtime {
                     if store.set_session_root(&session, &tree).await.is_ok()
                         && tools.register_session_root(&session, &tree).await.is_ok()
                     {
+                        let project = crate::worktree::project(std::path::Path::new(&tree));
+                        let _ = store.set_session_project(&session, &project).await;
                         eprintln!(
                             "miao-engine: Session {session} worktree {root} is gone; \
                              re-homed at {tree}. History is intact; uncommitted changes \
@@ -2708,6 +2733,7 @@ impl Runtime {
                 .register_session_root(session, &root)
                 .await
                 .map_err(|error| Error::Invalid(error.to_string()))?;
+            self.record_project(session, &root).await;
             return self.inner.store.initialize(session, title, &root).await;
         }
         let engine_root = self.inner.tools.engine_root().to_path_buf();
@@ -2724,6 +2750,7 @@ impl Runtime {
                     .register_session_root(session, &root)
                     .await
                     .map_err(|error| Error::Invalid(error.to_string()))?;
+                self.record_project(session, &root).await;
                 return Ok(value);
             }
         };
@@ -2748,6 +2775,7 @@ impl Runtime {
                     .register_session_root(session, &root)
                     .await
                     .map_err(|error| Error::Invalid(error.to_string()))?;
+                self.record_project(session, &root).await;
                 Ok(value)
             }
             Err(error) => {
@@ -2757,6 +2785,18 @@ impl Runtime {
                 Err(error)
             }
         }
+    }
+
+    /// Record the project identity peer mail and the Session list use. Best
+    /// effort: a root whose repository cannot be inspected keeps the placement
+    /// fallback instead of failing the placement that produced it.
+    async fn record_project(&self, session: &str, root: &str) {
+        let project = crate::worktree::project(std::path::Path::new(root));
+        let _ = self
+            .inner
+            .store
+            .set_session_project(session, &project)
+            .await;
     }
 
     /// The worktree a Session uses when the checkout is taken. A retry may
@@ -8141,14 +8181,43 @@ fn external(error: crate::protocol::Error) -> ToolError {
 ///
 /// A prefix is accepted only while it is unique: guessing between two Sessions
 /// would deliver mail to the wrong conversation, which is worse than refusing.
-async fn resolve_peer(inner: &Arc<Inner>, root: &str, to: &str) -> Result<String, ToolError> {
+/// The project a peer lookup is bounded to: the checkout every worktree of a
+/// repository shares. A Session placed before that identity existed falls back
+/// to its placement root until the runtime backfills it.
+async fn peer_scope(inner: &Inner, session: &str) -> Result<String, ToolError> {
+    let root = inner
+        .store
+        .location(session)
+        .await
+        .map_err(external)?
+        .unwrap_or_default();
+    let project = inner
+        .store
+        .session_project(session)
+        .await
+        .map_err(external)?;
+    Ok(project
+        .filter(|project| !project.is_empty())
+        .unwrap_or(root))
+}
+
+/// One catalog row's project, with the placement root as the fallback for a row
+/// written before project identity existed.
+fn row_project(row: &Value) -> Option<&str> {
+    row.get("project")
+        .and_then(Value::as_str)
+        .filter(|project| !project.is_empty())
+        .or_else(|| row.get("location").and_then(Value::as_str))
+}
+
+async fn resolve_peer(inner: &Arc<Inner>, scope: &str, to: &str) -> Result<String, ToolError> {
     let needle = to.trim().trim_start_matches('@');
     if needle.is_empty() {
         return Err(ToolError::InvalidInput);
     }
     let mut matches = Vec::new();
     for row in inner.store.session_catalog().await.map_err(external)? {
-        if row.get("location").and_then(Value::as_str) != Some(root) {
+        if row_project(&row) != Some(scope) {
             continue;
         }
         let Some(id) = row.get("session_id").and_then(Value::as_str) else {
@@ -8230,13 +8299,8 @@ async fn send_peer_message(
         .unwrap_or_default()
         .trim()
         .to_string();
-    let root = inner
-        .store
-        .location(session)
-        .await
-        .map_err(external)?
-        .unwrap_or_default();
-    let target = resolve_peer(inner, &root, to).await?;
+    let scope = peer_scope(inner, session).await?;
+    let target = resolve_peer(inner, &scope, to).await?;
     if target == session {
         return Err(ToolError::External(
             "a Session cannot send a coordination message to itself".into(),
@@ -8425,13 +8489,8 @@ async fn read_peer_context(
         .and_then(Value::as_u64)
         .unwrap_or(12)
         .clamp(1, 40) as usize;
-    let root = inner
-        .store
-        .location(session)
-        .await
-        .map_err(external)?
-        .unwrap_or_default();
-    let target = resolve_peer(inner, &root, to).await?;
+    let scope = peer_scope(inner, session).await?;
+    let target = resolve_peer(inner, &scope, to).await?;
     if let Err(denied) = peer_allowed(inner, "read_session_context", &target) {
         return Err(ToolError::External(denied));
     }
@@ -8510,6 +8569,15 @@ async fn list_peer_sessions(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    // Discovery spans one project: the checkout every worktree of a repository
+    // shares. A Session placed before that identity existed falls back to its
+    // placement root.
+    let project = me
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|project| !project.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| root.clone());
     let mut peers: Vec<Value> = Vec::new();
     for row in inner.store.session_catalog().await.map_err(external)? {
         let Some(id) = row.get("session_id").and_then(Value::as_str) else {
@@ -8520,7 +8588,7 @@ async fn list_peer_sessions(
         }
         // Cross-project coordination is out of scope, and an archived Session is
         // history rather than a peer.
-        if row.get("location").and_then(Value::as_str) != Some(root.as_str()) {
+        if row_project(&row) != Some(project.as_str()) {
             continue;
         }
         if !row.get("archived_at_ms").is_none_or(Value::is_null) {
@@ -8597,12 +8665,12 @@ async fn list_peer_sessions(
     });
     peers.truncate(PEER_LIMIT);
     // An empty list is not the same answer as "the store is empty": peers are
-    // deliberately limited to this Location, and a Session started elsewhere
+    // deliberately limited to this project, and a Session started elsewhere
     // lives in another ledger file. Saying so stops the caller from concluding
     // its own history was lost and going looking on the disk for it.
     let note = if peers.is_empty() {
         Some(format!(
-            "No peer sessions in this workspace ({root}). Other workspaces keep their own \
+            "No peer sessions in this project ({project}). Other projects keep their own \
              ledgers; `miao session find <id>` locates a session started elsewhere."
         ))
     } else {

@@ -8,10 +8,10 @@
 //! stays durable: an admitted row survives a restart exactly once and a
 //! promoted one never re-delivers, because the inbox row is the only truth.
 //!
-//! Same-project identity is the shared `engine_location` root. Mail between
-//! Sessions anchored to different roots is refused here, at the store
-//! boundary, so no caller can deliver across projects even by skipping the
-//! tool's own resolution.
+//! Same-project identity is the checkout every worktree of a repository
+//! shares. Mail between Sessions of different projects is refused here, at the
+//! store boundary, so no caller can deliver across projects even by skipping
+//! the tool's own resolution.
 use crate::{
     protocol::{Admission, Error, Input},
     store::{admit_input, append, write_tx, Store},
@@ -148,21 +148,27 @@ fn admit_peer(
     reply_to: Option<&str>,
     input: &Input,
 ) -> Result<Admission, Error> {
-    let sender_root: Option<String> = tx
+    let sender_project: Option<String> = tx
         .query_row(
-            "SELECT root FROM engine_location WHERE session_id=?1",
+            "SELECT COALESCE(NULLIF(p.project,''), l.root) \
+             FROM engine_location l \
+             LEFT JOIN engine_session_project p ON p.session_id=l.session_id \
+             WHERE l.session_id=?1",
             [sender],
             |row| row.get(0),
         )
         .optional()?;
-    let Some(sender_root) = sender_root else {
+    let Some(sender_project) = sender_project else {
         return Err(Error::Invalid(
             "peer message sender has no project anchor".into(),
         ));
     };
-    let recipient_root: Option<String> = tx
+    let recipient_project: Option<String> = tx
         .query_row(
-            "SELECT root FROM engine_location WHERE session_id=?1",
+            "SELECT COALESCE(NULLIF(p.project,''), l.root) \
+             FROM engine_location l \
+             LEFT JOIN engine_session_project p ON p.session_id=l.session_id \
+             WHERE l.session_id=?1",
             [&input.session_id],
             |row| row.get(0),
         )
@@ -170,8 +176,10 @@ fn admit_peer(
     // A recipient without an anchor has no project identity, so the
     // shared-project test cannot pass; refuse rather than guess. This also
     // keeps `admit_input` from auto-creating a Session the sender only
-    // misspelled.
-    if recipient_root.as_deref() != Some(sender_root.as_str()) {
+    // misspelled. The project is the checkout every worktree of one
+    // repository shares, so a placement root is only the fallback for a
+    // Session that predates the identity.
+    if recipient_project.as_deref() != Some(sender_project.as_str()) {
         return Err(Error::Invalid(format!(
             "peer message recipient {} does not share this Session's project",
             input.session_id

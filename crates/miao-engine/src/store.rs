@@ -430,6 +430,7 @@ impl Store {
                     CREATE TABLE IF NOT EXISTS engine_cache_prefix(session_id TEXT PRIMARY KEY REFERENCES engine_session(id), affinity_session TEXT NOT NULL, route_hash TEXT NOT NULL, parameters_hash TEXT NOT NULL, history_hash TEXT NOT NULL, message_count INTEGER NOT NULL, session_seq INTEGER NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_tool(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES engine_run(id), name TEXT NOT NULL, input TEXT NOT NULL, state TEXT NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_location(session_id TEXT PRIMARY KEY REFERENCES engine_session(id),root TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS engine_session_project(session_id TEXT PRIMARY KEY REFERENCES engine_session(id), project TEXT NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_checkout_lease(root TEXT PRIMARY KEY, session_id TEXT NOT NULL, pid INTEGER, acquired_at_ms INTEGER NOT NULL);
                     CREATE TABLE IF NOT EXISTS engine_approval(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES engine_session(id),run_id TEXT NOT NULL REFERENCES engine_run(id),call_id TEXT NOT NULL REFERENCES engine_tool(id),binding TEXT NOT NULL,expires_at INTEGER NOT NULL,state TEXT NOT NULL);
                     CREATE UNIQUE INDEX IF NOT EXISTS engine_pending_approval ON engine_approval(call_id) WHERE state='pending';
@@ -1296,15 +1297,58 @@ impl Store {
     }
 
     /// Every recorded Session root, so a restarted runtime can keep resumed
-    /// Sessions in the worktree they were placed in.
-    pub async fn session_roots(&self) -> Result<Vec<(String, String)>, Error> {
+    /// Sessions in the worktree they were placed in. `project` is empty for a
+    /// Session placed before project identity existed; the runtime fills it.
+    pub async fn session_roots(&self) -> Result<Vec<(String, String, String)>, Error> {
         self.call(move |conn| {
-            let mut statement =
-                conn.prepare("SELECT session_id,root FROM engine_location ORDER BY session_id")?;
+            let mut statement = conn.prepare(
+                "SELECT l.session_id, l.root, COALESCE(p.project,'') \
+                 FROM engine_location l \
+                 LEFT JOIN engine_session_project p ON p.session_id=l.session_id \
+                 ORDER BY l.session_id",
+            )?;
             let rows = statement.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    /// The project one Session belongs to: the checkout every worktree of the
+    /// repository shares. `None` until the runtime records it.
+    pub async fn session_project(&self, session: &str) -> Result<Option<String>, Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT project FROM engine_session_project WHERE session_id=?1",
+                    [&session],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    /// Record the project identity beside the placement root. Peer mail and
+    /// the Session list use it, so every worktree of one checkout takes part
+    /// even though each Session keeps a distinct writable root.
+    pub async fn set_session_project(&self, session: &str, project: &str) -> Result<(), Error> {
+        let (session, project) = (session.to_owned(), project.to_owned());
+        self.call(move |conn| {
+            let tx = write_tx(conn)?;
+            tx.execute(
+                "INSERT INTO engine_session_project(session_id,project) VALUES(?1,?2) \
+                 ON CONFLICT(session_id) DO UPDATE SET project=excluded.project",
+                params![session, project],
+            )?;
+            tx.commit()?;
+            Ok(())
         })
         .await
     }
@@ -1599,6 +1643,13 @@ impl Store {
                     |row| row.get(0),
                 )
                 .optional()?;
+            let project: Option<String> = tx
+                .query_row(
+                    "SELECT project FROM engine_session_project WHERE session_id=?1",
+                    [&session],
+                    |row| row.get(0),
+                )
+                .optional()?;
             let parent: Option<String> = tx
                 .query_row(
                     "SELECT parent_session_id FROM engine_lineage WHERE session_id=?1",
@@ -1655,6 +1706,7 @@ impl Store {
                 "session_id": session,
                 "parent_session_id": parent,
                 "location": location,
+                "project": project,
                 "title": title,
                 "updated_at_ms": updated_at_ms,
                 "archived_at_ms": archived_at_ms,
@@ -1793,6 +1845,7 @@ impl Store {
                 "DELETE FROM engine_compaction WHERE session_id=?1",
                 "DELETE FROM engine_context WHERE session_id=?1",
                 "DELETE FROM engine_input WHERE session_id=?1",
+                "DELETE FROM engine_session_project WHERE session_id=?1",
                 "DELETE FROM engine_location WHERE session_id=?1",
                 "DELETE FROM engine_checkout_lease WHERE session_id=?1",
                 "DELETE FROM engine_event WHERE session_id=?1",
@@ -2305,6 +2358,7 @@ impl Store {
             let tx=conn.transaction()?;
             let cursor:u64=tx.query_row("SELECT next_seq FROM engine_session WHERE id=?1",[&session],|r|r.get(0)).optional()?.ok_or_else(||Error::Invalid("Session does not exist".into()))?;
             let location:Option<String>=tx.query_row("SELECT root FROM engine_location WHERE session_id=?1",[&session],|r|r.get(0)).optional()?;
+            let project:Option<String>=tx.query_row("SELECT project FROM engine_session_project WHERE session_id=?1",[&session],|r|r.get(0)).optional()?;
             let messages=if metadata_only { Vec::new() } else { projected(&tx,&session,cursor,true)? };
             // The projection's own size. A client compares it with the messages
             // it received to tell a complete snapshot from one an older engine
@@ -2356,7 +2410,7 @@ impl Store {
             let staged_revert=staged_revert.map(|(boundary_seq,snapshot_id,scope)|json!({"boundary_seq":boundary_seq,"snapshot_id":snapshot_id,"scope":scope}));
             let event_base:u64=tx.query_row("SELECT CASE WHEN json_extract(bundle,'$.source.engine')='rust' THEN COALESCE(json_extract(bundle,'$.source.sequence'),0) ELSE 0 END FROM engine_transfer_import WHERE session_id=?1",[&session],|row|row.get(0)).optional()?.unwrap_or(0);
             let transfer_import:Option<String>=tx.query_row("SELECT id FROM engine_transfer_import WHERE session_id=?1",[&session],|row|row.get(0)).optional()?;
-            let mut snapshot=json!({"event_base":event_base,"transfer_import":transfer_import,"session_id":session,"parent_session_id":parent,"cursor":cursor,"message_count":message_count,"reverted_count":reverted_count,"location":location,"mode":mode,"title":title,"tag":tag,"created_at_ms":created_at_ms,"updated_at_ms":updated_at_ms,"archived_at_ms":archived_at_ms,"pinned_at_ms":pinned_at_ms,"preview":preview,"messages":messages,"selection":selection,"pending":pending,"active_run":active,"approvals":approvals,"context":context,"state":state,"questions":questions,"wakeups":wakeups,"crons":crons,"model_selection":model_selection,"account_selection":account_selection,"agent":agent,"staged_revert":staged_revert});
+            let mut snapshot=json!({"event_base":event_base,"transfer_import":transfer_import,"session_id":session,"parent_session_id":parent,"cursor":cursor,"message_count":message_count,"reverted_count":reverted_count,"location":location,"project":project,"mode":mode,"title":title,"tag":tag,"created_at_ms":created_at_ms,"updated_at_ms":updated_at_ms,"archived_at_ms":archived_at_ms,"pinned_at_ms":pinned_at_ms,"preview":preview,"messages":messages,"selection":selection,"pending":pending,"active_run":active,"approvals":approvals,"context":context,"state":state,"questions":questions,"wakeups":wakeups,"crons":crons,"model_selection":model_selection,"account_selection":account_selection,"agent":agent,"staged_revert":staged_revert});
             if metadata_only {
                 snapshot.as_object_mut().unwrap().remove("messages");
             }
@@ -2506,6 +2560,7 @@ impl Store {
             )?;
             tx.execute("INSERT INTO engine_lineage(session_id,parent_session_id,message_seq) VALUES(?1,?2,?3)",params![target,parent,seq])?;
             tx.execute("INSERT INTO engine_location SELECT ?1,root FROM engine_location WHERE session_id=?2",params![target,parent])?;
+            tx.execute("INSERT INTO engine_session_project SELECT ?1,project FROM engine_session_project WHERE session_id=?2",params![target,parent])?;
             append(&tx,&target,"session.forked",json!({"parent_session_id":parent,"message_seq":seq}))?;
             let mut message_map=std::collections::HashMap::new();
             for message in messages {

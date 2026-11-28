@@ -82,6 +82,20 @@ pub fn checkout(root: &Path) -> Result<PathBuf, Error> {
     Ok(main_checkout(&top).unwrap_or(top))
 }
 
+/// The project a Session root belongs to: the checkout a linked worktree was
+/// added from, or the root itself when it is not inside a git repository.
+///
+/// Every worktree of one checkout answers the same project even though each
+/// Session keeps its own writable root, so peer mail and the Session list span
+/// them instead of stopping at the tree a Session happens to be placed in.
+pub fn project(root: &Path) -> String {
+    let root = canonical(root);
+    checkout(&root)
+        .unwrap_or(root)
+        .to_string_lossy()
+        .to_string()
+}
+
 /// Add a worktree named `name`, creating or resetting the branch of that name.
 pub fn create(root: &Path, name: &str) -> Result<Tree, Error> {
     validate(name)?;
@@ -311,6 +325,22 @@ mod tests {
         assert_eq!(trees[1].branch.as_deref(), Some("work"));
         remove(&root, "work").expect("remove");
         assert_eq!(list(&root).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn a_worktree_and_its_checkout_share_one_project() {
+        let root = repository();
+        let tree = create(&root, "work").expect("create");
+        let checkout = canonical(&root);
+        assert_eq!(project(&root), project(&checkout));
+        assert_eq!(
+            project(Path::new(&tree.path)),
+            project(&checkout),
+            "a linked worktree belongs to the checkout that added it"
+        );
+        let outside = std::env::temp_dir().join(format!("miao-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).expect("outside");
+        assert_eq!(project(&outside), canonical(&outside).to_string_lossy());
     }
 
     #[test]
