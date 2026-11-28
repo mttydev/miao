@@ -169,6 +169,19 @@ pub struct ApprovalView {
     pub policy_revision: String,
     pub matcher: Option<Value>,
     pub expires_at_ms: Option<u64>,
+    /// The deterministic reviewer's reading of this ask. Present on every ask;
+    /// `None` only for a request the engine recorded before the reviewer
+    /// existed, which must not read as "safe".
+    pub review: Option<ApprovalReview>,
+}
+
+/// What the engine's reviewer concluded, in the words the panel paints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalReview {
+    /// `safe` or `unknown`.
+    pub verdict: String,
+    /// Why — the operation class the classifier settled on.
+    pub reason: String,
 }
 
 impl ApprovalView {
@@ -186,6 +199,12 @@ impl ApprovalView {
             policy_revision: value.get("policy_revision")?.as_str()?.to_string(),
             matcher: value.get("matcher").cloned(),
             expires_at_ms: value.get("expires_at_ms").and_then(Value::as_u64),
+            review: value.get("review").and_then(|review| {
+                Some(ApprovalReview {
+                    verdict: review.get("verdict")?.as_str()?.to_string(),
+                    reason: review.get("reason")?.as_str()?.to_string(),
+                })
+            }),
         })
     }
 

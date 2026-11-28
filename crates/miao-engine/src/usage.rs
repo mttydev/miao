@@ -356,6 +356,90 @@ pub fn hit_ratio(input_tokens: u64, cache_read: u64) -> Option<f64> {
     (input_tokens > 0).then(|| cache_read.min(input_tokens) as f64 / input_tokens as f64)
 }
 
+/// The prefix length below which providers cache nothing, so a read-less short
+/// prompt is not evidence of a miss. The retired host runner used the same
+/// floor; keeping the number here keeps the two readings comparable.
+pub const MIN_CACHEABLE_TOKENS: u64 = 1_024;
+
+/// Whether a settled turn missed the prompt cache.
+///
+/// Anthropic and Bedrock bill a cache write, so a positive write is the miss.
+/// Implicit caches (OpenAI Chat and Responses, Gemini) only report what they
+/// read, so the signal is the other side of the same coin: a prompt long enough
+/// to cache anything, answered with nothing read. A route that reports no cache
+/// axis at all stays unknown rather than reading as a miss.
+pub fn cache_missed(usage: &Value) -> bool {
+    let read = usage.get("cacheReadInputTokens").and_then(Value::as_u64);
+    let write = usage
+        .get("cacheWriteInputTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if write > 0 {
+        return true;
+    }
+    read == Some(0)
+        && usage
+            .get("inputTokens")
+            .and_then(Value::as_u64)
+            .is_some_and(|input| input >= MIN_CACHEABLE_TOKENS)
+}
+
+/// Why a turn missed, when it did.
+///
+/// `rebuild` is a miss we asked for (compaction rewrote the prefix); `cold` is
+/// a miss after the warm window or on the first turn; `prefix-change` is a miss
+/// inside the warm window with the same model, i.e. something else in the
+/// prefix moved.
+pub fn cache_miss_cause(missed: bool, warm: bool, expected_rebuild: bool) -> &'static str {
+    if !missed {
+        return "none";
+    }
+    if expected_rebuild {
+        return "rebuild";
+    }
+    if !warm {
+        return "cold";
+    }
+    "prefix-change"
+}
+
+/// The per-turn lineage plus this turn's cache outcome, recorded beside the
+/// billed axes so a report never has to re-derive heat from timestamps.
+pub fn cache_ledger(usage: &Value, warm: bool, expected_rebuild: bool) -> Value {
+    let mut out = cache_lineage(usage);
+    if let Some(map) = out.as_object_mut() {
+        let missed = cache_missed(usage);
+        map.insert("warm".into(), json!(warm));
+        map.insert("miss".into(), json!(missed));
+        map.insert(
+            "cause".into(),
+            json!(cache_miss_cause(missed, warm, expected_rebuild)),
+        );
+        map.insert("expectedRebuild".into(), json!(expected_rebuild));
+    }
+    out
+}
+
+/// What a recorded prefix change means to the operator. The request
+/// diagnostics keep the precise field name; this is the reading a report can
+/// group by, and `other` keeps an unfamiliar change visible instead of
+/// dropping it.
+pub fn invalidation_cause(change: &str) -> &'static str {
+    match change {
+        "model-changed" => "model-switch",
+        "route-changed" | "protocol-changed" | "transport-changed" => "endpoint-change",
+        "tools-changed" => "tool-set-change",
+        "parameters-changed" => "parameter-change",
+        "system-changed" => "system-context-change",
+        "permissions-changed" => "permission-change",
+        "history-rewritten" | "history-shortened" => "history-rewrite",
+        "cache-key-changed" | "account-changed" => "cache-identity-change",
+        "context-epoch-changed" => "context-epoch-change",
+        "version-changed" => "upgrade",
+        _ => "other",
+    }
+}
+
 /// The combined spend of a delegation: the child's usage added to the
 /// delegating Session's own (AGT-03). Both sides are `providerUsage` shapes
 /// (`tokens` beside `coverage`). An axis either side never observed stays
@@ -493,6 +577,65 @@ mod tests {
             cache_lineage(&json!({"inputTokens": 10, "outputTokens": 1})),
             json!({})
         );
+    }
+
+    #[test]
+    fn a_cache_miss_needs_a_billed_write_or_a_read_less_cacheable_prompt() {
+        // Anthropic and Bedrock bill the write.
+        assert!(cache_missed(&json!({
+            "inputTokens": 4000, "cacheWriteInputTokens": 4000, "cacheReadInputTokens": 0,
+        })));
+        // Implicit caches only report reads: a long prompt answered with
+        // nothing read is the miss.
+        assert!(cache_missed(&json!({
+            "inputTokens": 4000, "cacheReadInputTokens": 0,
+        })));
+        // Below the floor the provider could not have cached anything.
+        assert!(!cache_missed(&json!({
+            "inputTokens": 300, "cacheReadInputTokens": 0,
+        })));
+        // A silent route is unknown, not a miss.
+        assert!(!cache_missed(&json!({"inputTokens": 4000})));
+        // A read is a hit.
+        assert!(!cache_missed(&json!({
+            "inputTokens": 4000, "cacheReadInputTokens": 3900,
+        })));
+    }
+
+    #[test]
+    fn a_miss_names_the_prefix_that_moved() {
+        let cause = cache_miss_cause;
+        assert_eq!(cause(false, true, false), "none");
+        assert_eq!(cause(true, false, false), "cold");
+        assert_eq!(cause(true, true, true), "rebuild");
+        // A rebuild outranks the warm window: we asked for that rewrite.
+        assert_eq!(cause(true, false, true), "rebuild");
+        assert_eq!(cause(true, true, false), "prefix-change");
+    }
+
+    #[test]
+    fn the_ledger_keeps_the_billed_axes_and_adds_the_outcome() {
+        let usage = json!({
+            "inputTokens": 2000, "outputTokens": 10,
+            "nonCachedInputTokens": 2000, "cacheReadInputTokens": 0,
+        });
+        let ledger = cache_ledger(&usage, true, false);
+        assert_eq!(ledger["read"], 0);
+        assert_eq!(ledger["nonCached"], 2000);
+        assert_eq!(ledger["warm"], true);
+        assert_eq!(ledger["miss"], true);
+        assert_eq!(ledger["cause"], "prefix-change");
+        assert_eq!(ledger["expectedRebuild"], false);
+    }
+
+    #[test]
+    fn an_invalidation_is_named_for_the_person_reading_it() {
+        assert_eq!(invalidation_cause("model-changed"), "model-switch");
+        assert_eq!(invalidation_cause("tools-changed"), "tool-set-change");
+        assert_eq!(invalidation_cause("history-rewritten"), "history-rewrite");
+        assert_eq!(invalidation_cause("version-changed"), "upgrade");
+        // An unfamiliar change stays visible instead of being dropped.
+        assert_eq!(invalidation_cause("something-new"), "other");
     }
 
     #[test]

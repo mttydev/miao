@@ -4826,6 +4826,31 @@ impl Pane for SidebarPane {
                         Style::new().fg(palette.text_muted),
                         text_width,
                     );
+                    // The hit share says how warm the route was; this line says
+                    // how much of the prompt was billed again and why.
+                    if usage.cache_misses.turns > 0 {
+                        let why = match usage.cache_misses.last_cause.as_deref() {
+                            Some("rebuild") => self.lang.t("cache.rebuild"),
+                            Some("cold") => self.lang.t("cache.cold"),
+                            Some("prefix-change") => self.lang.t("cache.prefix_change"),
+                            _ => self.lang.t("cache.miss"),
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("{} ", self.lang.t("cache.miss")),
+                                Style::new().fg(palette.warning),
+                            ),
+                            Span::styled(
+                                format!(
+                                    "{} · {} · {}",
+                                    usage.cache_misses.turns,
+                                    crate::status::compact_tokens(usage.cache_misses.tokens),
+                                    why
+                                ),
+                                Style::new().fg(palette.text_muted),
+                            ),
+                        ]));
+                    }
                     // A retry is billed work: saying "1 turn" while three
                     // attempts were made hides where the money went. A
                     // subagent bills on its own Session, so a parent screen
@@ -6068,7 +6093,13 @@ impl Panel {
 
     pub fn height(&self) -> u16 {
         let rows = match &self.kind {
-            PanelKind::Approval(_) => 4,
+            PanelKind::Approval(view) => {
+                if view.review.is_some() {
+                    5
+                } else {
+                    4
+                }
+            }
             PanelKind::Question(progress) => {
                 progress.view.questions[progress.focus].options.len() + 4
             }
@@ -6264,24 +6295,45 @@ impl Panel {
 fn panel_lines(panel: &Panel, lang: Lang, theme: &Theme) -> Vec<Line<'static>> {
     let palette = theme.palette;
     match &panel.kind {
-        PanelKind::Approval(view) => vec![
-            Line::from(vec![
-                Span::styled(view.tool.clone(), Style::new().fg(palette.secondary)),
-                Span::styled(
-                    format!("  {}", compact(&view.resource)),
-                    Style::new().fg(palette.text_muted),
-                ),
-            ]),
-            Line::from(Span::styled(
-                compact(&view.input.to_string()),
-                Style::new().fg(palette.text),
-            )),
-            Line::default(),
-            Line::from(Span::styled(
+        PanelKind::Approval(view) => {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(view.tool.clone(), Style::new().fg(palette.secondary)),
+                    Span::styled(
+                        format!("  {}", compact(&view.resource)),
+                        Style::new().fg(palette.text_muted),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    compact(&view.input.to_string()),
+                    Style::new().fg(palette.text),
+                )),
+            ];
+            // The reviewer's reading is the difference between "I have to work
+            // out whether this is dangerous" and "a machine already checked".
+            if let Some(review) = &view.review {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", lang.t("panel.review")),
+                        Style::new().fg(palette.text_muted),
+                    ),
+                    Span::styled(
+                        format!("{} · {}", review.verdict, review.reason),
+                        Style::new().fg(if review.verdict == "safe" {
+                            palette.secondary
+                        } else {
+                            palette.warning
+                        }),
+                    ),
+                ]));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
                 lang.t("panel.approval_keys"),
                 Style::new().fg(palette.text_muted),
-            )),
-        ],
+            )));
+            lines
+        }
         PanelKind::Question(progress) => {
             let question = &progress.view.questions[progress.focus];
             let heading = if question.header.is_empty() {
@@ -7014,6 +7066,10 @@ mod tests {
             policy_revision: "rev-1".into(),
             matcher: None,
             expires_at_ms: None,
+            review: Some(crate::session::ApprovalReview {
+                verdict: "unknown".into(),
+                reason: "command-not-proven-safe".into(),
+            }),
         };
         for width in [40u16, 80, 120] {
             let mut panel = Panel::approval(approval.clone());
@@ -7025,6 +7081,10 @@ mod tests {
             assert!(
                 text.contains("allow once"),
                 "the keys are readable at {width}: {text}"
+            );
+            assert!(
+                text.contains("review") && text.contains("command-not-proven-safe"),
+                "the reviewer's reading is visible at {width}: {text}"
             );
 
             let mut panel = Panel::question(question(false));
@@ -12029,6 +12089,7 @@ mod tests {
             policy_revision: "rev-2".into(),
             matcher: Some(serde_json::json!({"kind": "builtin"})),
             expires_at_ms: None,
+            review: None,
         };
         let response = view.response("allow");
         assert_eq!(response["request_id"], "run-1/call_1");

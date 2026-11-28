@@ -200,7 +200,16 @@ impl Context {
                 return Ok(record);
             }
             let outcome = context.evaluate_request(transaction, &source, &input)?;
-            let auto = outcome.effect == Decision::Ask && source.context.authority.auto && crate::product_permission_request::classify(&source.context, &input);
+            // The shared channel asks on the same terms as the product channel:
+            // a reviewer reading accompanies the ask even when no machine will
+            // settle it.
+            let ask = outcome.effect == Decision::Ask;
+            let reviewed = ask.then(|| {
+                crate::product_permission_request::reviewer(&source.context, &input)
+            });
+            let auto = ask
+                && source.context.authority.auto
+                && reviewed.is_some_and(|(safe, _)| safe);
             let state = if auto { State::Allowed } else { match outcome.effect { Decision::Allow => State::Allowed, Decision::Deny => State::Denied, Decision::Ask => State::Pending } };
             if state == State::Pending {
                 let count: usize = transaction.query_row("SELECT count(*) FROM permission_request WHERE owner=?1 AND session=?2 AND state='pending'",params![source.context.owner,source.context.source.session_id],|row|row.get(0))?;
@@ -213,6 +222,10 @@ impl Context {
                 expires_at_ms:input.timeout_ms.map(|timeout|created_at_ms.saturating_add(timeout)),request:input,state,reply:None,
                 reason: if auto {Some("auto_allowed".into())} else {(state==State::Denied).then(||"policy_denied".into())},feedback:None,
                 denial:(outcome.effect==Decision::Deny).then_some(outcome),
+                review: reviewed.map(|(safe, reason)| json!({
+                    "verdict": if safe { "safe" } else { "unknown" },
+                    "reason": reason,
+                })),
             };
             transaction.execute("INSERT INTO permission_request(id,project,location,owner,session,binding,state,data,origin) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![record.id,context.project.project,context.location,source.context.owner,record.source.session_id,binding,crate::product_permission_request::state_name(record.state),serde_json::to_string(&record)?,serde_json::to_string(&source.origin())?])?;
             request_event(transaction,&record)?;

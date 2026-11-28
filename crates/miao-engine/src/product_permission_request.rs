@@ -76,6 +76,10 @@ pub struct Record {
     pub feedback: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denial: Option<Outcome>,
+    /// What the deterministic reviewer concluded about an ask, and why. `None`
+    /// for a policy allow/deny that never reached the reviewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -125,7 +129,12 @@ impl Store {
                 return Ok(record);
             }
             let outcome = evaluate(transaction, &context, &input.facts)?;
-            let auto = outcome.effect == Decision::Ask && context.authority.auto && classify(&context, &input);
+            // Every ask gets a reviewer verdict, whether or not auto mode is on:
+            // the operator sitting in front of a prompt deserves the same
+            // reading a machine decision would have used.
+            let ask = outcome.effect == Decision::Ask;
+            let reviewed = ask.then(|| reviewer(&context, &input));
+            let auto = ask && context.authority.auto && reviewed.is_some_and(|(safe, _)| safe);
             let state = if auto { State::Allowed } else { match outcome.effect { Decision::Allow => State::Allowed, Decision::Deny => State::Denied, Decision::Ask => State::Pending } };
             if state == State::Pending {
                 let pending: usize = transaction.query_row("SELECT COUNT(*) FROM engine_product_permission_request WHERE session_id=?1 AND state='pending'", [&context.source.session_id], |row| row.get(0))?;
@@ -138,9 +147,16 @@ impl Store {
                 input_hash: hash, authority_revision: outcome.authority_revision.clone(), created_at_ms: now, state,
                 reply: None, reason: if auto { Some("auto_allowed".into()) } else { (state == State::Denied).then(|| "policy_denied".into()) }, feedback: None,
                 denial: (outcome.effect == Decision::Deny).then_some(outcome),
+                review: reviewed.map(|(safe, reason)| json!({
+                    "verdict": if safe { "safe" } else { "unknown" },
+                    "reason": reason,
+                })),
             };
             transaction.execute("INSERT INTO engine_product_permission_request(id,session_id,run_id,call_id,workspace,owner,state,data) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![record.id, context.source.session_id, context.authority.run_id, format!("{}/{}",context.authority.run_id,context.source.call_id), context.workspace,context.owner,state_name(state),serde_json::to_string(&record)?])?;
             if state == State::Pending { append(transaction, &context.source.session_id, "product.permission.requested", serde_json::to_value(&record)?)?; }
+            // An auto-approval is a decision taken without the operator, so it
+            // leaves the same audit trail: what was allowed, and on what basis.
+            if auto { append(transaction, &context.source.session_id, "permission.auto_allowed", serde_json::to_value(&record)?)?; }
             Ok(record)
         })).await
     }
@@ -500,13 +516,27 @@ fn evaluate(connection: &Connection, context: &Context, facts: &Request) -> Resu
     Ok(outcome)
 }
 
-pub(crate) fn classify(context: &Context, input: &Input) -> bool {
+/// The deterministic reviewer behind auto mode. Returns whether every affected
+/// operation is proven safe, and the reason for that reading — the reason is
+/// recorded on the ask so a machine decision and a human prompt explain
+/// themselves the same way.
+pub(crate) fn reviewer(context: &Context, input: &Input) -> (bool, &'static str) {
     use crate::agent_classifier::{host_edit, Verdict};
     // Only the Unix classifier is consulted, so the import follows it.
     #[cfg(unix)]
     use crate::agent_classifier::bash;
     match input.facts.actions.first().map(String::as_str) {
-        Some("edit") => host_edit(&input.facts.resources, &context.authority.host) == Verdict::Safe,
+        Some("edit") => {
+            let safe = host_edit(&input.facts.resources, &context.authority.host) == Verdict::Safe;
+            (
+                safe,
+                if safe {
+                    "edit-inside-workspace"
+                } else {
+                    "edit-outside-workspace"
+                },
+            )
+        }
         // A shell string is only classifiable where the shell semantics the
         // parser assumes hold. On Windows `git status` parses as safe while the
         // command line it becomes is not the same thing (cmd/PowerShell quoting,
@@ -520,13 +550,24 @@ pub(crate) fn classify(context: &Context, input: &Input) -> bool {
                 .and_then(|metadata| metadata.get("stdin"))
                 .is_none() =>
         {
-            input
+            let safe = input
                 .facts
                 .resources
                 .iter()
-                .all(|command| bash(command) == Verdict::Safe)
+                .all(|command| bash(command) == Verdict::Safe);
+            (
+                safe,
+                if safe {
+                    "read-only-command"
+                } else {
+                    "command-not-proven-safe"
+                },
+            )
         }
-        _ => false,
+        #[cfg(unix)]
+        Some("bash") => (false, "command-with-stdin"),
+        Some(_) => (false, "tool-not-classified"),
+        None => (false, "no-action"),
     }
 }
 
