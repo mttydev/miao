@@ -480,15 +480,6 @@ impl Provider for ToolContinuation {
                 .await
                 .unwrap();
         }
-        if turn % 2 == 1 {
-            assert!(
-                request
-                    .messages
-                    .iter()
-                    .any(|message| message.content.to_string().contains("FILE-CONTENT")),
-                "tool results must reach the continuation"
-            );
-        }
         Ok(Reply {
             content: if turn.is_multiple_of(2) {
                 json!([{"type":"tool_use","id":format!("read-{turn}"),"name":"read_file","input":{"path":"file"}}])
@@ -502,7 +493,7 @@ impl Provider for ToolContinuation {
 }
 
 #[tokio::test]
-async fn tool_continuations_compact_only_closed_answers_before_promoting_steers() {
+async fn a_tool_continuation_compacts_at_its_settled_boundary() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("file"), "FILE-CONTENT").unwrap();
     let store = Store::open(dir.path().join("engine.db")).await.unwrap();
@@ -538,17 +529,29 @@ async fn tool_continuations_compact_only_closed_answers_before_promoting_steers(
     let summaries = provider.summaries.lock().unwrap().clone();
     assert_eq!(
         summaries.len(),
-        2,
-        "no summary requests for open tool continuations"
+        4,
+        "every settled turn compacts while the usage stays over the limit"
     );
-    assert!(summaries[0].contains("FILE-CONTENT"));
-    assert!(summaries[0].contains("completed-1"));
+    // The turn-0 pass cuts after the tool result, so its content rides the cut;
+    // and it cut before the text answer, which is the boundary the old rule
+    // waited for. A prompt admitted during turn 1 stays out.
+    assert!(summaries[0].contains("FILE-CONTENT"), "{}", summaries[0]);
+    assert!(
+        !summaries[0].contains("completed-1"),
+        "the first pass must cut at the tool boundary, before the text answer: {}",
+        summaries[0]
+    );
     assert!(
         !summaries[0].contains("NEWER-PROMPT"),
-        "newer prompts must not be summarized ahead of the cut"
+        "newer prompts must not be summarized ahead of the cut: {}",
+        summaries[0]
     );
-    assert!(summaries[1].contains("NEWER-PROMPT"));
-    assert!(summaries[1].contains("completed-3"));
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.contains("NEWER-PROMPT")),
+        "the steer reaches a later checkpoint: {summaries:?}"
+    );
     let events = store.events("s", 0, 1000).await.unwrap();
     let cuts: Vec<_> = events
         .iter()
@@ -556,8 +559,8 @@ async fn tool_continuations_compact_only_closed_answers_before_promoting_steers(
         .collect();
     assert_eq!(
         cuts.len(),
-        2,
-        "multiple checkpoints in the same run must not conflict"
+        4,
+        "every settled turn commits a checkpoint: {cuts:?}"
     );
     assert_eq!(
         events
@@ -566,9 +569,9 @@ async fn tool_continuations_compact_only_closed_answers_before_promoting_steers(
             .count(),
         1
     );
-    assert!(
-        cuts[0].data["through_message_seq"].as_u64() < cuts[1].data["through_message_seq"].as_u64()
-    );
+    assert!(cuts.windows(2).all(|pair| {
+        pair[0].data["through_message_seq"].as_u64() < pair[1].data["through_message_seq"].as_u64()
+    }));
     while let Ok(notice) = progress.try_recv() {
         assert_ne!(notice["kind"], "compaction.failed", "{notice}");
     }

@@ -110,12 +110,19 @@ impl Store {
             if let Some((owner,cut,text))=existing {if owner!=session||cut!=through||text!=summary{return Err(Error::Conflict);}return Ok(json!({"compaction_id":id,"through_message_seq":through,"duplicate":true}));}
             if run.is_none() && tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_run WHERE session_id=?1 AND state='running')",[&session],|r|r.get::<_,bool>(0))? {return Err(Error::Invalid("compaction requires an idle Session".into()));}
             let role:Option<String>=tx.query_row("SELECT role FROM engine_message WHERE session_id=?1 AND seq=?2",params![session,through],|r|r.get(0)).optional()?;
-            if role.as_deref()!=Some("assistant"){return Err(Error::Invalid("compaction needs an assistant message boundary".into()));}
             let mut pending=std::collections::HashSet::new();let mut settled=std::collections::HashSet::new();let mut last=None;
             {let mut stmt=tx.prepare("SELECT content FROM engine_message WHERE session_id=?1 AND seq<=?2 ORDER BY seq")?;let mut rows=stmt.query(params![session,through])?;
                 while let Some(row)=rows.next()?{let content:Value=serde_json::from_str(&row.get::<_,String>(0)?)?;track_tools(&mut pending,&mut settled,&content)?;last=Some(content);}
             }
-            if !pending.is_empty()||!last.is_some_and(|content|content.as_array().is_some_and(|parts|parts.iter().any(|p|p["type"]=="text"&&p["text"].as_str().is_some_and(|s|!s.is_empty())))){return Err(Error::Invalid("compaction cannot cut a tool continuation".into()));}
+            // A cut lands on an assistant answer or on the tool result that
+            // settles a tool continuation. Both are complete blocks: `pending`
+            // proves no call is still open, and the summary replaces the call
+            // and its result together.
+            let closes=last.as_ref().and_then(Value::as_array).is_some_and(|parts|{
+                if role.as_deref()==Some("assistant"){parts.iter().any(|p|p["type"]=="text"&&p["text"].as_str().is_some_and(|s|!s.is_empty()))}
+                else{parts.iter().any(|p|p["type"]=="tool_result")}
+            });
+            if !pending.is_empty()||!closes{return Err(Error::Invalid("compaction cannot cut a tool continuation".into()));}
             let previous:Option<u64>=tx.query_row("SELECT through_seq FROM engine_compaction WHERE session_id=?1 ORDER BY created_seq DESC LIMIT 1",[&session],|r|r.get(0)).optional()?;
             if previous.is_some_and(|previous|through<previous){return Err(Error::Invalid("checkpoint cannot move backwards".into()));}
             append(&tx,&session,crate::events::Lifecycle::PreCompact.name(),json!({"compaction_id":id,"through_message_seq":through}))?;

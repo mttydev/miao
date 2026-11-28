@@ -6532,10 +6532,11 @@ command: None,
         if cancel.is_cancelled() {
             return Ok(());
         }
-        // Settled tools do not close a provider continuation: its assistant
-        // message still contains tool_use blocks whose results follow the cut.
-        // Compact only a completed answer, before admitting newer prompts into
-        // the selected history summarized by this checkpoint.
+        // Settled tools do not close a provider continuation, but they are a
+        // boundary: every tool call of this reply has returned by the time this
+        // point is reached. The cut must land after the last result, though —
+        // the assistant message that carries `tool_use` sits before its
+        // results, so cutting at `assistant_boundary` would orphan them.
         let closed_answer = !reply.needs_tools
             && reply.content.as_array().is_some_and(|parts| {
                 parts.iter().any(|part| {
@@ -6543,13 +6544,23 @@ command: None,
                         && part["text"].as_str().is_some_and(|text| !text.is_empty())
                 })
             });
+        let settled = if closed_answer {
+            Some(assistant_boundary)
+        } else if reply.needs_tools {
+            inner
+                .store
+                .last_tool_result_seq(session)
+                .await?
+                .map(|seq| seq.max(assistant_boundary))
+        } else {
+            None
+        };
         // Automatic compaction needs configured limits; an operator request is
         // itself the trigger, so one forced pass runs without them. Both use the
         // same settled boundary and the same summarizer.
-        let requested = if closed_answer {
-            inner.store.pending_compaction_request(session).await?
-        } else {
-            None
+        let requested = match settled {
+            Some(_) => inner.store.pending_compaction_request(session).await?,
+            None => None,
         };
         // Which window this Session plans against, most specific first: the
         // operator's explicit `engine.context_limits`, the window the product
@@ -6627,7 +6638,7 @@ command: None,
         // switch only governs the automatic checkpoint.
         let compaction = requested.is_some()
             || inner.optimization(crate::optimization::Mechanism::AutoCompaction);
-        if let Some(limits) = limits.filter(|_| closed_answer && compaction) {
+        if let Some(limits) = limits.filter(|_| settled.is_some() && compaction) {
             let primary = Arc::clone(&provider);
             let bindings = inner.roles.lock().await.clone();
             let (role_provider, resolution) =
@@ -6781,7 +6792,7 @@ command: None,
                 crate::context_trigger::CompactRequest {
                     session,
                     run,
-                    boundary: assistant_boundary,
+                    boundary: settled.unwrap_or(assistant_boundary),
                     forced: requested.is_some(),
                     through: requested.as_ref().and_then(|request| request.through),
                     focus: requested.as_ref().and_then(|request| request.focus.clone()),
