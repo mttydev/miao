@@ -1212,6 +1212,24 @@ pub fn epilogue(session: &SessionSummary) -> String {
     format!("{head}\n  Continue  miao -s {}\n", session.id)
 }
 
+/// The epilogue as the terminal receives it.
+///
+/// The rows it lands on can still hold text from before the alternate screen
+/// (engine notices, an earlier transcript). The banner is shorter than those
+/// lines, so their tails stayed visible beside it and a copied `miao -s`
+/// carried them as part of the Session ID (`ses_…1980` became `ses_…19800e`,
+/// which names no Session). Every row it writes is erased to its end, and the
+/// block comes back as one string so it can be written in a single call.
+pub fn epilogue_on_screen(session: &SessionSummary) -> String {
+    // `\r\n`, not `\n`: after the alternate screen is gone the terminal may
+    // still be raw, where a bare line feed keeps the column and the next banner
+    // row would start beside the stale text instead of over it.
+    let mut text = epilogue(session).replace('\n', "\x1b[K\r\n");
+    text.insert_str(0, "\x1b[K\r\n");
+    text.push_str("\x1b[K");
+    text
+}
+
 /// The drain's own error text, which `stop_failure` carries. A payload without
 /// one must not render an empty block.
 fn failure_of(seq: u64, data: &Value) -> Option<(u64, String)> {
@@ -1361,6 +1379,39 @@ mod tests {
             epilogue(&untitled),
             "  Session   ses_b\n  Continue  miao -s ses_b\n"
         );
+    }
+
+    #[test]
+    fn the_on_screen_epilogue_erases_every_row_it_writes() {
+        let session =
+            SessionSummary::from_snapshot(&snapshot("ses_a", "修复退出提示", 10, None, None))
+                .expect("row");
+        assert_eq!(
+            epilogue_on_screen(&session),
+            "\x1b[K\r\n  Session   修复退出提示\x1b[K\r\n  ID        ses_a\x1b[K\r\n  \
+             Continue  miao -s ses_a\x1b[K\r\n\x1b[K"
+        );
+    }
+
+    /// Text the restored screen still held on the banner's rows used to survive
+    /// to the right of the shorter line, and scanning the terminal selected it
+    /// as part of the Session ID (`ses_…1980` + `0e`). The block now erases each
+    /// row it writes.
+    #[test]
+    fn a_stale_tail_cannot_survive_beside_the_banner() {
+        let session =
+            SessionSummary::from_snapshot(&snapshot("ses_a", "修复退出提示", 10, None, None))
+                .expect("row");
+        let mut screen = vt100::Parser::new(8, 80, 0);
+        screen.process(b"row0\r\nSTALE-TAIL-0e\r\nSTALE-TAIL-0e\r\nSTALE-TAIL-0e\r\n\x1b[H");
+        screen.process(epilogue_on_screen(&session).as_bytes());
+        let rendered = screen.screen().contents();
+        let banner: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.contains("Continue  miao -s"))
+            .collect();
+        assert_eq!(banner, ["  Continue  miao -s ses_a"]);
+        assert!(!rendered.contains("STALE-TAIL"));
     }
 
     /// #1969: the pending plan is the third durable state row, and the view

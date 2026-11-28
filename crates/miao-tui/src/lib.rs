@@ -38,7 +38,7 @@ pub mod workspace_changes;
 pub mod worktrees;
 
 use std::error::Error;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -170,8 +170,21 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn Error>> {
     if let Some(session) = app.session.as_ref() {
         // The restored screen cursor sits on the shell's old prompt line, so
         // the epilogue opens a line of its own instead of appending to it.
-        print!("\n{}", session::epilogue(session));
-        let _ = io::stdout().flush();
+        //
+        // Rows below can still hold text the screen carried before the
+        // alternate buffer existed (engine notices, an earlier transcript).
+        // The banner is shorter than those lines, so their tails used to stay
+        // beside it and a copied `miao -s` picked them up as part of the
+        // Session ID. The terminal variant erases every row it writes, and the
+        // whole block goes out in one call so a concurrent notice cannot land
+        // inside it.
+        let text = match io::stdout().is_terminal() {
+            true => session::epilogue_on_screen(session),
+            false => format!("\n{}", session::epilogue(session)),
+        };
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
     }
     result
 }

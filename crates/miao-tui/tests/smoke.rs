@@ -520,6 +520,12 @@ fn the_exit_hands_the_screen_back_once_before_the_epilogue() {
     );
     let raw = harness.text();
     let epilogue = raw.find("Continue  miao -s ses_a").expect("the epilogue");
+    // The banner erases each row it writes, so text the restored screen still
+    // held beside it cannot be selected as part of the Session ID.
+    assert!(
+        raw.contains("miao -s ses_a\u{1b}[K"),
+        "the epilogue did not erase its row: {raw:?}"
+    );
     let leaves = raw.matches("\x1b[?1049l").count();
     assert_eq!(leaves, 1, "the screen was handed back {leaves} times");
     let last_leave = raw.rfind("\x1b[?1049l").expect("the leave");
