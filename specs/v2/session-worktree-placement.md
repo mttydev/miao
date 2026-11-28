@@ -1,6 +1,15 @@
 # 会话工作树 placement
 
-状态：已实现（2026-11-23）。取代“多个 Session 自己在共享检出里判断能不能改”的做法。
+状态：已更新（2026-11-28）。默认不再自动建树；隔离是显式选择。
+
+## 2026-11-28 更新：默认 Local，worktree 显式
+
+0.5.0 的自动 worktree 回退已取消，对齐 Claude Code 的本地会话：Session 默认使用启动
+目录（engine root），多个 Session 可以共享同一检出。只有显式 `worktree_enter` 才把
+Session 迁到 `.miao-worktrees/<name>`，并检出真实分支 `miao/<name>`；提交因此可达、
+可 review、可 merge，不再是 detached。隔离检查仍然强制，但只作用于已进入工作树的
+Session。启动时丢失的工作树优先在原分支重建（已有分支不 reset），detached 仅作兜底。
+并发共享检出是操作者的选择；需要隔离时用 `worktree_enter`，或先开一个工作树。
 
 ## 问题
 
@@ -14,12 +23,13 @@
 
 ## 不变量
 
-1. 一个 git 检出最多一个写者。主检出由 `engine_checkout_lease` 绑定到唯一 Session；
-   其余 Session 由引擎放进自己的工作树。
+1. 一个 git 检出默认可以被多个 Session 使用；隔离是显式选择。`worktree_enter` 把
+   Session 放到 `.miao-worktrees/<name>` 的分支 `miao/<name>`。`engine_checkout_lease`
+   不再决定 placement，表保留给旧库和工具兼容。
 2. Session 的读写根由 placement 决定。`engine_location.root` 是每 Session 的工作根；
    `Tools` 的 scoped 克隆用该 root 解析路径、bash cwd、后台作业和快照。
-3. 隔离是强制的。工作树 Session 不能写主检出，也不能用 `git -C`、`--git-dir`、
-   `GIT_DIR`、`GIT_WORK_TREE` 或 `cd` 把 git 指回主检出。
+3. 隔离是强制的，但只作用于工作树 Session。工作树 Session 不能写主检出，也不能用
+   `git -C`、`--git-dir`、`GIT_DIR`、`GIT_WORK_TREE` 或 `cd` 把 git 指回主检出。
 
 ## 实现
 
@@ -35,6 +45,9 @@
   Session 抢走老会话正在使用的检出。
 
 ### placement
+
+> 以下为 0.5.0 的历史实现，已被 2026-11-28 更新取代：新 Session 不再自动建树，默认
+> 留在启动目录；`worktree_enter` 才是显式隔离，且使用真实分支。
 
 `Runtime::initialize` 在 `placement` 锁内：
 
@@ -67,7 +80,7 @@
 - 启动时把 `engine_location` 的全部 root 注册到 `Tools`。
 - 记录的工作树被外部删除时，启动时重新建树并更新 root，不静默回落到主检出。
 - 工作树 Session 的系统提示追加 `<worktree root=...>`，明确它写的是哪棵树、哪棵检出
-  属于另一条 Session。
+  是它分离出来的。
 
 ## 验收
 

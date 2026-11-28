@@ -425,9 +425,9 @@
         "type": "array"
       },
       "timeout_ms": {
-        "default": 60000,
-        "maximum": 600000,
-        "minimum": 1,
+        "default": 0,
+        "maximum": 604800000,
+        "minimum": 0,
         "type": "integer"
       }
     },

@@ -39,14 +39,14 @@ pub struct Input {
     pub timeout_ms: u64,
 }
 fn timeout() -> u64 {
-    60000
+    0
 }
 impl Input {
     pub fn parse(value: Value) -> Result<Self, ToolError> {
         let input: Self = serde_json::from_value(value).map_err(|_| ToolError::InvalidInput)?;
         if input.questions.is_empty()
             || input.questions.len() > 4
-            || !(1..=600000).contains(&input.timeout_ms)
+            || !(input.timeout_ms == 0 || (1..=604_800_000).contains(&input.timeout_ms))
         {
             return Err(ToolError::InvalidInput);
         }
@@ -139,7 +139,10 @@ impl Store {
             }
             let active = active_source(&tx, &session, &data)?;
             if !active { return Err(Error::Invalid("question source tool is no longer active".into())); }
-            if now_ms() >= data["expires_at_ms"].as_u64().unwrap_or(0) {
+            if data["expires_at_ms"]
+                .as_u64()
+                .is_some_and(|deadline| now_ms() >= deadline)
+            {
                 append(&tx,&session,"question.resolved",json!({"question_id":rejection.question_id,"state":"expired"}))?;
                 tx.commit()?;
                 return Err(Error::Invalid("question has expired".into()));
@@ -178,7 +181,14 @@ impl Store {
             // source tool intent keeps its original run/call identity.
             let seq: u64 = tx.query_row("SELECT next_seq+1 FROM engine_session WHERE id=?1", [&session], |row| row.get(0))?;
             let question_id=format!("{key}/{seq}");
-            let data=json!({"question_id":question_id,"run_id":run,"call_id":call,"location":location,"input_hash":hash,"input":input,"expires_at_ms":now_ms().saturating_add(input["timeout_ms"].as_u64().unwrap_or(60000))});
+            // A question waits for the operator, as Claude Code's does: no
+            // default deadline. An explicit timeout stays available for
+            // headless callers, and a question without one never expires.
+            let expires_at = input["timeout_ms"]
+                .as_u64()
+                .filter(|timeout| *timeout > 0)
+                .map(|timeout| now_ms().saturating_add(timeout));
+            let data=json!({"question_id":question_id,"run_id":run,"call_id":call,"location":location,"input_hash":hash,"input":input,"expires_at_ms":expires_at});
             append(&tx,&session,"question.requested",data.clone())?;tx.commit()?;Ok(data)
         }).await
     }
@@ -214,7 +224,10 @@ impl Store {
             }
             let active = active_source(&tx, &session, &data)?;
             if !active{return Err(Error::Invalid("question source tool is no longer active".into()));}
-            if now_ms()>=data["expires_at_ms"].as_u64().unwrap_or(0){
+            if data["expires_at_ms"]
+                .as_u64()
+                .is_some_and(|deadline| now_ms() >= deadline)
+            {
                 append(&tx,&session,"question.resolved",json!({"question_id":answer.question_id,"state":"expired"}))?;tx.commit()?;return Err(Error::Invalid("question has expired".into()));
             }
             let input=Input::parse(data["input"].clone()).map_err(|_|Error::Invalid("invalid question input".into()))?;
@@ -498,5 +511,27 @@ mod lifetime_tests {
             .answer_question("s", answer(&requests[1]))
             .await
             .unwrap();
+    }
+
+    /// A question waits for the operator by default, as Claude Code's does.
+    /// Only an explicit timeout creates a deadline; seven days is the cap.
+    #[test]
+    fn a_question_without_an_explicit_timeout_has_no_deadline() {
+        let input = Input::parse(json!({
+            "questions": [{
+                "question": "which?",
+                "options": [{"label": "a"}, {"label": "b"}]
+            }]
+        }))
+        .expect("question");
+        assert_eq!(input.timeout_ms, 0);
+        assert!(Input::parse(json!({
+            "questions": [{
+                "question": "which?",
+                "options": [{"label": "a"}, {"label": "b"}]
+            }],
+            "timeout_ms": 604_800_001u64
+        }))
+        .is_err());
     }
 }

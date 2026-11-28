@@ -113,6 +113,47 @@ pub fn create(root: &Path, name: &str) -> Result<Tree, Error> {
     })
 }
 
+/// Add a worktree named `name` on `branch`, which stays checked out there.
+///
+/// A Session that asks for isolation lands on a real branch, as a Claude Code
+/// worktree does: the commits are reachable, can be reviewed, and can be merged
+/// back. An existing branch is checked out instead of reset, so a retry after a
+/// failed placement cannot discard its commits.
+pub fn create_branch(root: &Path, name: &str, branch: &str) -> Result<Tree, Error> {
+    validate(name)?;
+    git(root, &["check-ref-format", "--branch", branch])?;
+    // A tree deleted outside miao leaves its registration behind; prune it
+    // before adding the replacement, or git refuses the same path.
+    let _ = git(root, &["worktree", "prune"]);
+    let path = root.join(DIRECTORY).join(name);
+    let exists = git(
+        root,
+        &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+    )
+    .is_ok();
+    let path = path.display().to_string();
+    if exists {
+        git(root, &["worktree", "add", &path, branch])?;
+    } else {
+        git(root, &["worktree", "add", "-b", branch, &path])?;
+    }
+    ensure_excluded(root);
+    Ok(Tree {
+        name: name.to_string(),
+        path: canonical(&root.join(DIRECTORY).join(name))
+            .display()
+            .to_string(),
+        branch: Some(branch.to_string()),
+        main: false,
+    })
+}
+
+/// The branch a tree has checked out, `None` for a detached HEAD.
+pub fn branch_of(root: &Path) -> Option<String> {
+    let name = git(root, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    (name != "HEAD").then_some(name)
+}
+
 /// Add a detached worktree named `name`. A detached tree carries the starting
 /// commit without claiming a branch, so several Sessions can start from one
 /// HEAD without one of them moving the branch the others are based on.
@@ -174,15 +215,22 @@ fn ensure_excluded(root: &Path) {
 pub fn remove(root: &Path, name: &str) -> Result<(), Error> {
     validate(name)?;
     let path = canonical(&root.join(DIRECTORY).join(name));
+    // Delete the branch the tree actually held. An entered worktree is on
+    // `miao/<name>`, a created one on `<name>`, and a detached one on none.
+    let branch = list(root)
+        .ok()
+        .and_then(|trees| trees.into_iter().find(|tree| tree.name == name))
+        .and_then(|tree| tree.branch);
     git(
         root,
         &["worktree", "remove", "--force", &path.display().to_string()],
     )?;
-    // The branch git created with the tree goes with it. A branch something
-    // else still holds stays: git refuses, and the removal itself already
-    // happened, so a stale branch is reported by `list`, not by a failed
-    // removal.
-    let _ = git(root, &["branch", "-D", name]);
+    // A branch something else still holds stays: git refuses, and the removal
+    // itself already happened, so a stale branch is reported by `list`, not by
+    // a failed removal.
+    if let Some(branch) = branch {
+        let _ = git(root, &["branch", "-D", &branch]);
+    }
     Ok(())
 }
 
@@ -325,6 +373,26 @@ mod tests {
         assert_eq!(trees[1].branch.as_deref(), Some("work"));
         remove(&root, "work").expect("remove");
         assert_eq!(list(&root).expect("list").len(), 1);
+    }
+
+    /// An entered worktree is on `miao/<name>`, not `<name>`; removal has to
+    /// delete the branch the tree actually held or the work is left behind.
+    #[test]
+    fn an_entered_worktree_is_removed_with_its_named_branch() {
+        let root = repository();
+        let tree = create_branch(&root, "session", "miao/session").expect("create");
+        assert_eq!(tree.branch.as_deref(), Some("miao/session"));
+        assert_eq!(
+            git(
+                Path::new(&tree.path),
+                &["rev-parse", "--abbrev-ref", "HEAD"]
+            )
+            .expect("branch")
+            .trim(),
+            "miao/session"
+        );
+        remove(&root, "session").expect("remove");
+        assert!(git(&root, &["rev-parse", "--verify", "refs/heads/miao/session"]).is_err());
     }
 
     #[test]

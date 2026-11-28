@@ -702,6 +702,10 @@ pub struct App {
     /// that already happened ("copied 120 characters"); leaving it on screen
     /// until the next event turns it into permanent clutter.
     notice_until: Option<Instant>,
+    /// The placement notice this client last painted. Only this text may be
+    /// replaced on a Session switch; a notice the operator just earned (a
+    /// stored key, a failed action) outranks placement context.
+    placement_notice: Option<String>,
     /// Escape pressed on an idle Session: the next Escape returns to Home. The
     /// deadline is what expires the confirmation, so a press minutes later asks
     /// again instead of leaving on a notice nobody is looking at.
@@ -979,6 +983,7 @@ impl App {
             leader_since: None,
             last_click: None,
             notice_until: None,
+            placement_notice: None,
             leave_armed: None,
             leader_timeout: Duration::from_millis(2000),
             keys,
@@ -1735,6 +1740,21 @@ impl App {
                 // transcript is read.
                 let switched = self.session.as_ref().map(|session| session.id.as_str())
                     != summary.as_ref().map(|session| session.id.as_str());
+                // A Session may live outside the launched checkout (an explicit
+                // worktree), and two Sessions may share the checkout now that
+                // placement is local by default. Name whichever the operator
+                // just opened, instead of leaving the launch path on screen as
+                // the only clue.
+                let placement = summary
+                    .as_ref()
+                    .and_then(|session| session.directory.clone());
+                let shared = summary.as_ref().is_some_and(|session| {
+                    self.catalog.iter().any(|row| {
+                        row.id != session.id
+                            && row.directory.is_some()
+                            && row.directory == session.directory
+                    })
+                });
                 // The job rows belong to the Session that was open. Carrying
                 // them across a switch let a finished job from the last
                 // Session keep drawing its wait under the next one, and no
@@ -1905,6 +1925,35 @@ impl App {
                 self.screen = Screen::Session;
                 self.sync_panel();
                 self.update_status();
+                if switched {
+                    let ours = self.placement_notice.is_some()
+                        && self.shell.composer.notice.as_deref()
+                            == self.placement_notice.as_deref();
+                    if ours {
+                        self.shell.composer.notice = None;
+                    }
+                    self.placement_notice = None;
+                    // Placement is context, not an alert: never replace a
+                    // notice the operator just earned (a stored key, a failed
+                    // action) with it.
+                    if self.shell.composer.notice.is_none() {
+                        let text = match placement {
+                            Some(root)
+                                if std::path::Path::new(&root) != self.workspace.as_path() =>
+                            {
+                                Some(self.shell.lang().tf("notice.worktree_root", &[&root]))
+                            }
+                            Some(_) if shared => {
+                                Some(self.shell.lang().t("notice.shared_checkout").to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(text) = text {
+                            self.placement_notice = Some(text.clone());
+                            self.notice(&text);
+                        }
+                    }
+                }
                 self.continue_prompt();
             }
             AppEvent::RevertPreview {
@@ -1986,7 +2035,22 @@ impl App {
                 self.request_quota(true);
                 self.notice("context cleared · the next prompt starts fresh");
             }
-            AppEvent::Notice(message) => self.notice(&message),
+            AppEvent::Notice(message) => {
+                // An engine restart is routine housekeeping. It must not erase
+                // the notice that names the operator action which caused it —
+                // the key store and the route reload arrive in the same batch,
+                // and the useful line was otherwise never painted.
+                let restart = message.starts_with("engine restarted");
+                let action = self
+                    .shell
+                    .composer
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.starts_with("stored the "));
+                if !(restart && action) {
+                    self.notice(&message);
+                }
+            }
             AppEvent::RuntimeContext(context) => self.mtty_state.set_runtime_context(context),
             AppEvent::PromptFailed {
                 text,
@@ -7364,6 +7428,34 @@ mod tests {
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
         AppEvent::Key(KeyEvent::new(code, modifiers))
+    }
+
+    /// Placement is local by default, so the launch path is usually the
+    /// Session's root. An explicit worktree must name its real root, and a
+    /// second Session on the same checkout must say that the checkout is
+    /// shared instead of leaving the operator to discover it after a collision.
+    #[test]
+    fn opening_a_session_names_a_worktree_root_or_a_shared_checkout() {
+        let mut app = app_with(Startup::default());
+        let opened = |id: &str, directory: &str| AppEvent::SessionOpened {
+            summary: Some(SessionSummary {
+                directory: Some(directory.to_string()),
+                ..summary(id, 1)
+            }),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        };
+        app.handle(opened("ses_w", "/repo/.miao-worktrees/w"));
+        assert_eq!(
+            app.shell.composer.notice.as_deref(),
+            Some("working in /repo/.miao-worktrees/w")
+        );
+        app.handle(opened("ses_a", "."));
+        app.handle(opened("ses_b", "."));
+        assert_eq!(
+            app.shell.composer.notice.as_deref(),
+            Some("another Session is also using this checkout; worktree_enter isolates")
+        );
     }
 
     /// End-to-end: the exact frame shapes the engine publishes must reach the
