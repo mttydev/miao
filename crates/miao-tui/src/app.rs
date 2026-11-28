@@ -6703,13 +6703,40 @@ impl App {
 
     /// The queue band above the input: what the engine holds, then what was
     /// just sent and no projection has acknowledged yet.
+    ///
+    /// An idle Session promotes the operator's steer at once, so painting it as
+    /// queued showed a prompt waiting behind nothing. The echo still exists to
+    /// reconcile the projection; it is only hidden from this band while the
+    /// Session has no run. A busy Session (a real steer) and inputs admitted
+    /// before it keep their rows.
     fn show_queued_prompts(&mut self) {
-        let mut prompts = self.state.pending_prompts.clone();
-        if let Some(session) = self.session.as_ref() {
+        let busy = self.state.active_run.is_some();
+        let Some(session) = self.session.as_ref().map(|session| session.id.clone()) else {
+            self.shell.set_pending_prompts(&[]);
+            return;
+        };
+        let in_flight: Vec<&str> = match busy {
+            true => Vec::new(),
+            false => self
+                .echoes
+                .iter()
+                .filter(|echo| echo.session_id == session && !echo.settled)
+                .map(|echo| echo.input_id.as_str())
+                .collect(),
+        };
+        let mut prompts = Vec::new();
+        for (index, text) in self.state.pending_prompts.iter().enumerate() {
+            let id = self.state.pending_input_ids.get(index).map(String::as_str);
+            if id.is_some_and(|id| in_flight.contains(&id)) {
+                continue;
+            }
+            prompts.push(text.clone());
+        }
+        if busy {
             prompts.extend(
                 self.echoes
                     .iter()
-                    .filter(|echo| echo.session_id == session.id)
+                    .filter(|echo| echo.session_id == session && !echo.settled)
                     .map(|echo| echo_preview(&echo.text)),
             );
         }
@@ -8700,16 +8727,19 @@ mod tests {
     }
 
     #[test]
-    fn a_sent_prompt_is_queued_on_screen_before_the_engine_admits_it() {
+    fn an_idle_prompt_is_not_painted_as_queued() {
         let (mut app, mut requests) = recording_session("ses_a");
         let input_id = send(&mut app, "fix the flaky test", &mut requests);
-        assert_eq!(app.shell.queued_prompts(), ["fix the flaky test"]);
+        // An idle Session promotes the steer at once; there is nothing to wait
+        // behind, so the band stays empty while the admission round trip runs.
+        assert!(app.shell.queued_prompts().is_empty());
         // A projection that knows nothing about the input yet keeps the echo:
         // the rename of a first prompt lands before its admission.
         app.handle(projection("ses_a", SessionState::default()));
-        assert_eq!(app.shell.queued_prompts(), ["fix the flaky test"]);
-        // Once the engine lists the input, its row is the engine's to show.
+        assert!(app.shell.queued_prompts().is_empty());
+        // A run turns the same input into a real steer: the band names it.
         let state = SessionState {
+            active_run: Some("run".into()),
             pending_prompts: vec!["fix the flaky test".into()],
             pending_input_ids: vec![input_id],
             ..SessionState::default()
@@ -8727,6 +8757,18 @@ mod tests {
     fn a_promoted_prompt_leaves_the_queue_when_it_settles() {
         let (mut app, mut requests) = recording_session("ses_a");
         let input_id = send(&mut app, "ship it", &mut requests);
+        // A busy Session really queues the steer, so the band shows it first.
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                active_run: Some("run".into()),
+                pending: 1,
+                pending_prompts: vec!["ship it".into()],
+                pending_input_ids: vec![input_id.clone()],
+                ..SessionState::default()
+            },
+        ));
+        assert_eq!(app.shell.queued_prompts(), ["ship it"]);
         app.handle(AppEvent::InputSettled {
             session_id: "ses_a".into(),
             input_id,
@@ -8748,6 +8790,7 @@ mod tests {
         app.handle(projection(
             "ses_a",
             SessionState {
+                active_run: Some("run".into()),
                 pending: 1,
                 pending_prompts: vec!["ship it".into()],
                 pending_input_ids: vec![input_id.clone()],
@@ -8791,12 +8834,26 @@ mod tests {
     #[test]
     fn an_echo_is_capped_like_the_engine_inbox_preview() {
         let (mut app, mut requests) = recording_session("ses_a");
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                active_run: Some("run".into()),
+                ..SessionState::default()
+            },
+        ));
         send(&mut app, &"x".repeat(240), &mut requests);
         assert_eq!(
             app.shell.queued_prompts(),
             [format!("{}…", "x".repeat(200))]
         );
         let (mut app, mut requests) = recording_session("ses_b");
+        app.handle(projection(
+            "ses_b",
+            SessionState {
+                active_run: Some("run".into()),
+                ..SessionState::default()
+            },
+        ));
         send(&mut app, &"y".repeat(200), &mut requests);
         assert_eq!(app.shell.queued_prompts(), ["y".repeat(200)]);
     }
@@ -8805,9 +8862,22 @@ mod tests {
     fn an_echo_of_another_session_is_not_in_this_queue() {
         let (mut app, mut requests) = recording_session("ses_a");
         send(&mut app, "for the first Session", &mut requests);
-        app.handle(projection("ses_b", SessionState::default()));
+        app.handle(projection(
+            "ses_b",
+            SessionState {
+                active_run: Some("run".into()),
+                ..SessionState::default()
+            },
+        ));
+        // The echo belongs to ses_a, so a busy ses_b has nothing to show.
         assert!(app.shell.queued_prompts().is_empty());
-        app.handle(projection("ses_a", SessionState::default()));
+        app.handle(projection(
+            "ses_a",
+            SessionState {
+                active_run: Some("run".into()),
+                ..SessionState::default()
+            },
+        ));
         assert_eq!(app.shell.queued_prompts(), ["for the first Session"]);
     }
 
