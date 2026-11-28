@@ -16,6 +16,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-11-28
+
+### Fixed
+- **engine**: address peers by project, not by worktree root (#3438) (`ea31464230`)
+- **tui**: keep stale screen text out of the exit epilogue (#3437) (`64a8c27336`)
+
 ## [0.5.14] - 2026-11-28
 
 ### Added
