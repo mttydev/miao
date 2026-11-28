@@ -1680,6 +1680,28 @@ impl Store {
         .await
     }
 
+    /// The newest settled tool result, when the turn called tools. A
+    /// tool-settled compaction cuts here: the assistant `tool_use` and its
+    /// results are both in the prefix, so neither side of the cut is orphaned.
+    /// A later synthetic notice does not move the boundary away from the pair.
+    pub async fn last_tool_result_seq(&self, session: &str) -> Result<Option<u64>, Error> {
+        let session = session.to_owned();
+        self.call(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT m.seq FROM engine_message m \
+                     WHERE m.session_id=?1 AND m.reverted=0 \
+                       AND EXISTS (SELECT 1 FROM json_each(m.content) p \
+                                   WHERE json_extract(p.value,'$.type')='tool_result') \
+                     ORDER BY m.seq DESC LIMIT 1",
+                    [&session],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+        .await
+    }
+
     /// The gate-① anchor: the newest usage event's normalized context tokens
     /// plus the highest message seq that report counted. An event without the
     /// marker predates the anchor, so it reports `None` rather than inventing
