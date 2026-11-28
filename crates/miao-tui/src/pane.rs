@@ -667,6 +667,9 @@ impl Shell {
 
     pub fn set_quota(&mut self, quota: Option<&crate::status::PlanQuota>) {
         if let Some(sidebar) = self.sidebar.as_mut() {
+            if sidebar.quota.as_ref() == quota {
+                return;
+            }
             sidebar.quota = quota.cloned();
         }
     }
@@ -4230,17 +4233,29 @@ fn quota_lines(
                 "warning" => palette.warning,
                 _ => palette.secondary,
             };
-            let reset = window
-                .resets_at_ms
-                .map(|at| format!(" · {}", until_reset(lang, at)))
-                .unwrap_or_default();
-            // The id column is wide enough for `monthly`, and the bar takes
-            // what the figures and the countdown leave: a gauge and a number
-            // answer different halves of the same question, so both stay.
-            let cells = width
-                .saturating_sub(2 + 7 + 1 + 4 + reset.chars().count())
-                .clamp(6, 18);
             let percent = window.percent.clamp(0.0, 100.0);
+            let id = match window.id.as_str() {
+                "monthly" => "mo",
+                other => other,
+            };
+            let mut reset = window
+                .resets_at_ms
+                .map(|at| format!("· {}", until_reset(lang, at)))
+                .unwrap_or_default();
+            // Every window is one row: the percentage, the absolute figures a
+            // plan is bought in, and the countdown share it. When the column is
+            // too narrow the amount goes first and the countdown second.
+            let mut amount = quota_amount(window);
+            let mut cells = quota_bar_cells(width, amount.as_deref(), &reset);
+            if cells < 4 {
+                amount = None;
+                cells = quota_bar_cells(width, None, &reset);
+            }
+            if cells < 4 {
+                reset.clear();
+                cells = quota_bar_cells(width, None, "");
+            }
+            let cells = cells.clamp(4, 14);
             let filled = if percent > 0.0 {
                 ((percent / 100.0) * cells as f64).round() as usize
             } else {
@@ -4248,7 +4263,7 @@ fn quota_lines(
             }
             .min(cells);
             let mut spans = vec![
-                Span::styled(format!("  {:<7}", window.id), muted),
+                Span::styled(format!("  {id:<3}"), muted),
                 Span::styled(
                     CONTEXT_BAR_GLYPH.to_string().repeat(filled),
                     Style::new().fg(ink),
@@ -4259,47 +4274,49 @@ fn quota_lines(
                 ),
                 Span::styled(format!(" {:>3.0}%", percent), Style::new().fg(ink)),
             ];
+            if let Some(amount) = &amount {
+                spans.push(Span::styled(format!(" {amount}"), muted));
+            }
             if !reset.is_empty() {
-                spans.push(Span::styled(reset, muted));
+                spans.push(Span::styled(format!(" {reset}"), muted));
             }
             lines.push(Line::from(spans));
-            // A percentage hides the absolute figures a plan is bought in:
-            // keep them on their own row, the way the plan pages state them.
-            if window.unit != "percent" {
-                if let (Some(used), Some(limit)) = (window.used, window.limit) {
-                    lines.push(Line::from(Span::styled(
-                        format!("       {} / {}", plan_amount(used), plan_amount(limit)),
-                        muted,
-                    )));
-                }
-            }
         }
     }
     lines
 }
 
-/// An absolute plan figure: `9,179` for credits large enough that the fraction
-/// is noise, `89.3` when the plan counts in tens.
-fn plan_amount(value: f64) -> String {
-    let rounded = match value >= 100.0 || value.fract() == 0.0 {
+/// How many cells the bar may claim once the row's fixed columns and the
+/// optional amount/countdown have taken theirs.
+fn quota_bar_cells(width: usize, amount: Option<&str>, reset: &str) -> usize {
+    let extra = amount.map_or(0, |amount| 1 + amount.chars().count())
+        + if reset.is_empty() {
+            0
+        } else {
+            1 + reset.chars().count()
+        };
+    width.saturating_sub(5 + 5 + extra)
+}
+
+/// The absolute figures a plan is bought in, when the window publishes them.
+fn quota_amount(window: &crate::status::PlanWindow) -> Option<String> {
+    if window.unit == "percent" {
+        return None;
+    }
+    match (window.used, window.limit) {
+        (Some(used), Some(limit)) => Some(format!("{}/{}", plan_figure(used), plan_figure(limit))),
+        (Some(used), None) => Some(plan_figure(used)),
+        (None, Some(limit)) => Some(format!("/{}", plan_figure(limit))),
+        (None, None) => None,
+    }
+}
+
+/// An absolute plan figure without separators, so it fits beside the bar:
+/// `9215`, `89.3`, `45`.
+fn plan_figure(value: f64) -> String {
+    match value.fract() == 0.0 {
         true => format!("{value:.0}"),
         false => format!("{value:.1}"),
-    };
-    let (whole, fraction) = match rounded.split_once('.') {
-        Some((whole, fraction)) => (whole, Some(fraction)),
-        None => (rounded.as_str(), None),
-    };
-    let mut grouped = String::new();
-    for (index, digit) in whole.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    let whole = grouped.chars().rev().collect::<String>();
-    match fraction {
-        Some(fraction) => format!("{whole}.{fraction}"),
-        None => whole,
     }
 }
 
@@ -6463,8 +6480,16 @@ mod tests {
         assert!(text.contains(" 12%"), "{text}");
         assert!(text.contains(" 89%"), "{text}");
         assert!(text.contains('█') && text.contains('░'), "{text}");
-        assert!(text.contains("1,438 / 12,000"), "{text}");
-        assert!(text.contains("10,667 / 12,000"), "{text}");
+        assert!(text.contains("1438/12000"), "{text}");
+        assert!(text.contains("10667/12000"), "{text}");
+        // One row per window: the amount sits beside the bar, not below it.
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains('█') || line.contains('░'))
+                .count(),
+            3,
+            "{text}"
+        );
     }
 
     #[test]

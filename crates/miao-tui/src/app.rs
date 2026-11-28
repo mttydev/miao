@@ -170,6 +170,10 @@ const QUOTA_REFRESH: Duration = Duration::from_secs(60);
 /// sidebar blank meanwhile. Retry on this shorter beat until one answer lands.
 const QUOTA_RETRY: Duration = Duration::from_secs(5);
 
+/// How many settled input ids stay remembered. A projection that raced a
+/// promotion travels within one round trip, so a short window is enough.
+const SETTLED_INPUTS: usize = 256;
+
 fn quota_due(force: bool, last_requested: Option<Instant>, cadence: Duration) -> bool {
     if force {
         return true;
@@ -846,6 +850,10 @@ pub struct App {
     /// first. The engine's list only knows an input once it is admitted, and
     /// a cold store can hold that back for seconds.
     echoes: Vec<Echo>,
+    /// Inputs the engine has already promoted or cancelled. A projection built
+    /// before that boundary can arrive after the event and still list them as
+    /// pending; this keeps their rows out of the queue band for good.
+    settled_inputs: std::collections::VecDeque<String>,
     /// The launch policy in force, flipped at runtime from the strip.
     approval_auto: bool,
     startup: Startup,
@@ -1027,6 +1035,7 @@ impl App {
             clipboard_paste: false,
             held_prompt: None,
             echoes: Vec::new(),
+            settled_inputs: std::collections::VecDeque::new(),
             // The launch policy in force, flipped at runtime from the strip.
             approval_auto: startup.auto,
             startup,
@@ -1670,7 +1679,8 @@ impl App {
             AppEvent::Quota(quota) => {
                 self.quota = Some(quota);
                 self.quota_answered = true;
-                self.shell.set_quota(self.quota.as_ref());
+                // `update_status` paints the filtered view (the account the
+                // model spends); writing the whole answer here would undo it.
             }
             AppEvent::HistoryWindow {
                 next_before,
@@ -1745,6 +1755,10 @@ impl App {
                     }
                 }
                 self.state = *state;
+                // A projection reads the store at one moment; a promotion that
+                // lands while it travels makes it name an input this client has
+                // already settled. Keep that row out of the band.
+                self.drop_settled_pending();
                 // The engine promotes queued input only at a boundary a client
                 // asks for, so a Session opened after a restart holds a message
                 // the operator already sent with nothing left to promote it:
@@ -1991,6 +2005,10 @@ impl App {
                 // band afterwards: the settled prompt stayed on screen until
                 // something else reopened the Session. A settled input leaves
                 // the band here, whatever the order of the two events.
+                // A settled input leaves the band here, whatever the order of
+                // the two events, and stays out when an older projection still
+                // lists it as pending.
+                self.settle_input(&input_id);
                 self.echoes
                     .retain(|echo| echo.session_id != session_id || echo.input_id != input_id);
                 // The snapshot's own copy has to go too: a projection that
@@ -5722,6 +5740,84 @@ impl App {
         }
     }
 
+    /// The plan meters for the account the current model spends. A provider
+    /// with several stored accounts shows the bound one; without a binding the
+    /// default account stands in, because that is what the engine resolves.
+    fn quota_view(&self) -> Option<crate::status::PlanQuota> {
+        let quota = self.quota.as_ref()?;
+        let provider =
+            self.active_model_label()
+                .and_then(|label| {
+                    label
+                        .split_once('/')
+                        .map(|(provider, _)| provider.to_string())
+                })
+                .or_else(|| {
+                    // The strip composes `provider · protocol`; the first segment is
+                    // the integration id the meter rows carry.
+                    self.shell.status.provider.as_deref().map(|provider| {
+                        provider.split(" · ").next().unwrap_or(provider).to_string()
+                    })
+                });
+        let Some(provider) = provider else {
+            return Some(quota.clone());
+        };
+        let mut rows: Vec<crate::status::PlanProvider> = quota
+            .providers
+            .iter()
+            .filter(|row| row.provider == provider)
+            .cloned()
+            .collect();
+        if let Some(credential) = self.active_credential_id() {
+            let exact: Vec<_> = rows
+                .iter()
+                .filter(|row| row.credential_id == credential)
+                .cloned()
+                .collect();
+            if !exact.is_empty() {
+                rows = exact;
+            }
+        }
+        // Two accounts on one provider and no binding: the engine spends the
+        // default, so that is the row worth painting.
+        if rows.len() > 1 {
+            if let Some(default) = rows.iter().find(|row| row.label == "default") {
+                rows = vec![default.clone()];
+            }
+        }
+        Some(crate::status::PlanQuota { providers: rows })
+    }
+
+    /// The credential the current model spends, when the catalog names it. The
+    /// Session's own pin wins; a fresh landing falls back to the remembered
+    /// model, exactly as the status strip resolves its provider.
+    fn active_credential_id(&self) -> Option<String> {
+        if let Some(id) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.credential_id.clone())
+        {
+            return Some(id);
+        }
+        let label = self.active_model_label()?;
+        ModelInfo::resolve(&self.models, &label).and_then(|info| info.credential_id.clone())
+    }
+
+    /// The model a prompt would run on, as the catalogue spells it.
+    fn active_model_label(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .and_then(|session| session.model.as_ref())
+            .map(crate::session::ModelPin::label)
+            .or_else(|| {
+                self.settings
+                    .as_ref()
+                    .map(|settings| settings.model.clone())
+                    .filter(|model| model != engine::UNROUTED_MODEL)
+            })
+            .or_else(|| self.remembered_model.clone())
+    }
+
     fn update_status(&mut self) {
         // The composer mirrors the durable queue every frame so the count stays
         // live without the composer owning it.
@@ -5792,6 +5888,10 @@ impl App {
             // `--auto` should not have to open a Session to find that out.
             self.shell.status.hints.push(self.approval_hint());
             self.mtty_state.update(crate::mtty_state::State::Idle);
+            // The landing screen already names the model, so it carries that
+            // model's plan meter through the same filter the Session view uses.
+            let view = self.quota_view();
+            self.shell.set_quota(view.as_ref());
             return;
         }
         self.refresh_job_wait();
@@ -6098,6 +6198,10 @@ impl App {
             .or(remembered);
         self.shell.status.model = facts.as_ref().map(|(model, _)| model.clone());
         self.shell.status.provider = facts.and_then(|(_, provider)| provider);
+        // The block answers for the account this model spends, not for every
+        // stored plan: list only the binding in use.
+        let view = self.quota_view();
+        self.shell.set_quota(view.as_ref());
         self.shell.status.usage =
             self.usage
                 .as_ref()
@@ -6559,6 +6663,42 @@ impl App {
         // would restore text the Session already sent if the operator switched
         // away and back.
         self.drafts.remove(&session_id);
+    }
+
+    /// Remember an input the engine has settled. Bounded because ids are
+    /// unique and only the recent few can still race an in-flight projection.
+    fn settle_input(&mut self, input_id: &str) {
+        if self.settled_inputs.iter().any(|id| id == input_id) {
+            return;
+        }
+        self.settled_inputs.push_back(input_id.to_owned());
+        if self.settled_inputs.len() > SETTLED_INPUTS {
+            self.settled_inputs.pop_front();
+        }
+    }
+
+    /// Remove pending rows whose input has already settled: a projection can
+    /// be built before the promotion and applied after it.
+    fn drop_settled_pending(&mut self) {
+        if self.settled_inputs.is_empty() {
+            return;
+        }
+        let mut index = 0;
+        while index < self.state.pending_input_ids.len() {
+            let settled = self
+                .settled_inputs
+                .iter()
+                .any(|id| id == &self.state.pending_input_ids[index]);
+            if settled {
+                self.state.pending_input_ids.remove(index);
+                if index < self.state.pending_prompts.len() {
+                    self.state.pending_prompts.remove(index);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        self.state.pending = self.state.pending_prompts.len();
     }
 
     /// The queue band above the input: what the engine holds, then what was
@@ -7062,6 +7202,39 @@ mod tests {
         );
     }
 
+    /// A projection can be built before an input is promoted and applied after
+    /// the promotion event. Its pending row must not come back into the band.
+    #[test]
+    fn a_late_projection_cannot_revive_a_promoted_input() {
+        let mut app = session_app();
+        let (handle, _requests) = engine::Handle::recording();
+        app.attach_engine(handle);
+        let queued = || SessionState {
+            pending: 1,
+            pending_prompts: vec!["hello".into()],
+            pending_input_ids: vec!["in_late".into()],
+            ..SessionState::default()
+        };
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_late", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(queued()),
+        });
+        app.handle(AppEvent::InputSettled {
+            session_id: "ses_late".into(),
+            input_id: "in_late".into(),
+            cancelled: false,
+        });
+        // Built before the promotion, applied after it.
+        app.handle(AppEvent::SessionOpened {
+            summary: Some(summary("ses_late", 1)),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(queued()),
+        });
+        let band = app.shell.queued_prompts().to_vec();
+        assert!(band.is_empty(), "the promoted input stays out: {band:?}");
+    }
+
     /// The first ask can beat the engine child up. Until an answer lands the
     /// meter retries on the short beat; afterwards the subscription cadence
     /// takes over, so a healthy install is not polled five times as often.
@@ -7091,6 +7264,37 @@ mod tests {
                 .any(|request| matches!(request, engine::Request::Quota)),
             "after an answer the slower cadence holds"
         );
+    }
+
+    /// The block lists the account the current model spends, not every stored
+    /// plan; a pinned account selects its own row.
+    #[test]
+    fn the_plan_block_is_scoped_to_the_model_in_use() {
+        let mut app = app();
+        app.quota = Some(crate::status::PlanQuota::from_value(&serde_json::json!({
+            "providers": [
+                {"provider":"opencode-go","label":"default","credential_id":"cred_default","windows":[{"id":"5h","percent":1.0}]},
+                {"provider":"opencode-go","label":"dtee","credential_id":"cred_dtee","windows":[{"id":"5h","percent":2.0}]},
+                {"provider":"commandcode","label":"default","credential_id":"cred_cc","windows":[{"id":"5h","percent":3.0}]}
+            ]
+        })));
+        app.shell.status.provider = Some("opencode-go · openai-chat".into());
+        let view = app.quota_view().expect("view");
+        assert_eq!(view.providers.len(), 1);
+        assert_eq!(view.providers[0].label, "default");
+        assert_eq!(view.providers[0].provider, "opencode-go");
+
+        let mut pinned = summary("ses_scope", 1);
+        pinned.credential_id = Some("cred_dtee".into());
+        app.session = Some(pinned);
+        let view = app.quota_view().expect("view");
+        assert_eq!(view.providers.len(), 1);
+        assert_eq!(view.providers[0].label, "dtee");
+
+        // Without a provider to scope by, the whole answer is shown.
+        app.shell.status.provider = None;
+        let view = app.quota_view().expect("view");
+        assert_eq!(view.providers.len(), 3);
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
