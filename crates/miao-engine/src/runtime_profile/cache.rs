@@ -64,6 +64,11 @@ pub(super) fn observe(
         .transpose()?;
     let snapshot = json!({
         "protocol":protocol, "transport":"http", "routeHash":fingerprint(&route)?,
+        // The build that assembled this prefix. A release changes the engine's
+        // own system context and tool text, so an upgrade is one more reason a
+        // warm prefix stops matching; recording it names that reason instead of
+        // hiding it in `system-changed`.
+        "version":env!("MIAO_ENGINE_VERSION"),
         "model":profile["model"], "parametersHash":profile["modelParametersHash"],
         "systemHash":fingerprint(&system)?, "toolsHash":profile["toolSurfaceHash"],
         "permissionsHash":profile["permissionHash"], "contextEpoch":context_epoch,
@@ -99,6 +104,7 @@ pub(super) fn observe(
         ("protocol", "protocol-changed"),
         ("transport", "transport-changed"),
         ("routeHash", "route-changed"),
+        ("version", "version-changed"),
         ("model", "model-changed"),
         ("parametersHash", "parameters-changed"),
         ("systemHash", "system-changed"),

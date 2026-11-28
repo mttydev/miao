@@ -9811,6 +9811,7 @@ mod tests {
                 policy_revision: "rev-1".into(),
                 matcher: None,
                 expires_at_ms: None,
+                review: None,
             }],
             questions: Vec::new(),
             reverted: 0,
@@ -10429,6 +10430,7 @@ mod tests {
             policy_revision: "rev-1".into(),
             matcher: None,
             expires_at_ms: None,
+            review: None,
         };
         let question = |id: &str| crate::session::QuestionView {
             question_id: id.into(),
@@ -10882,6 +10884,7 @@ mod tests {
             policy_revision: "rev-1".into(),
             matcher: None,
             expires_at_ms: None,
+            review: None,
         });
         app.update_status();
         assert_eq!(
@@ -11136,6 +11139,7 @@ mod tests {
                 policy_revision: "rev-1".into(),
                 matcher: None,
                 expires_at_ms: None,
+                review: None,
             }],
             ..SessionState::default()
         };
@@ -12084,6 +12088,7 @@ mod tests {
                     policy_revision: "rev-1".into(),
                     matcher: None,
                     expires_at_ms: None,
+                    review: None,
                 }],
                 ..SessionState::default()
             }),

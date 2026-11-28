@@ -98,3 +98,60 @@ async fn cache_health_names_what_is_missing_before_it_names_a_ratio() {
         "{invalid}"
     );
 }
+
+#[tokio::test]
+async fn cache_misses_are_counted_by_the_prefix_that_moved() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    admitted(&store, "ledger").await;
+
+    // Three settled turns: a hit, a miss inside the warm window, and the
+    // rebuild a compaction asked for.
+    store
+        .record(
+            "ledger",
+            "usage",
+            json!({"run_id":"r1","step":0,
+                   "usage":{"inputTokens":4000,"outputTokens":10,"cacheReadInputTokens":3900},
+                   "cache":{"read":3900,"hitRatio":0.975,"warm":true,"miss":false,"cause":"none","expectedRebuild":false}}),
+        )
+        .await
+        .unwrap();
+    store
+        .record(
+            "ledger",
+            "usage",
+            json!({"run_id":"r1","step":1,
+                   "usage":{"inputTokens":4200,"outputTokens":10,"cacheReadInputTokens":0},
+                   "cache":{"read":0,"warm":true,"miss":true,"cause":"prefix-change","expectedRebuild":false}}),
+        )
+        .await
+        .unwrap();
+    store
+        .record(
+            "ledger",
+            "usage",
+            json!({"run_id":"r1","step":2,
+                   "usage":{"inputTokens":1000,"outputTokens":10,"cacheWriteInputTokens":1000},
+                   "cache":{"read":0,"write":1000,"warm":false,"miss":true,"cause":"rebuild","expectedRebuild":true}}),
+        )
+        .await
+        .unwrap();
+
+    let report = store.usage_report("ledger").await.unwrap();
+    let diagnostics = &report["cacheDiagnostics"];
+    assert_eq!(diagnostics["misses"]["turns"], json!(2));
+    assert_eq!(diagnostics["misses"]["byCause"]["none"], json!(1));
+    assert_eq!(diagnostics["misses"]["byCause"]["prefix-change"], json!(1));
+    assert_eq!(diagnostics["misses"]["byCause"]["rebuild"], json!(1));
+    // Only the missing turns' prompts count: 4200 + 1000.
+    assert_eq!(diagnostics["misses"]["tokens"], json!(5200));
+    assert_eq!(diagnostics["misses"]["last"]["cause"], json!("rebuild"));
+    assert_eq!(diagnostics["misses"]["last"]["tokens"], json!(1000));
+    assert_eq!(diagnostics["expectedRebuilds"], json!(1));
+    assert_eq!(diagnostics["warmTurns"], json!(2));
+    assert!(
+        codes(&report).contains(&"expectedRebuilds".to_string()),
+        "{report}"
+    );
+}

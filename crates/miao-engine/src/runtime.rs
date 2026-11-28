@@ -273,6 +273,21 @@ pub struct Controller {
     runtime_id: String,
 }
 
+/// How long a Session's previous turn keeps this process calling the next one
+/// warm. The provider may still have evicted the prefix; the report says
+/// "warm" (local), never "hit".
+const CACHE_WARM_WINDOW_MS: u64 = 5 * 60_000;
+
+/// What the last settled provider turn left behind, per Session: when it
+/// settled, which model served it, and whether a compaction has rewritten the
+/// prefix since. `/usage` classifies the next miss against this.
+#[derive(Clone, Debug, Default)]
+struct CacheTurn {
+    at_ms: u64,
+    model: Option<String>,
+    after_compaction: bool,
+}
+
 struct Inner {
     id: String,
     _lease: RuntimeLease,
@@ -388,6 +403,9 @@ struct Inner {
     /// restore budget note. Process-local and request-scoped, like the host
     /// runner's `turns` map.
     restore_pending: Mutex<std::collections::HashSet<String>>,
+    /// Per-Session heat and rebuild state for the cache outcome written beside
+    /// each settled turn's billed axes.
+    cache_turns: Mutex<std::collections::HashMap<String, CacheTurn>>,
 }
 
 struct Actor {
@@ -1246,6 +1264,7 @@ impl Runtime {
                 breakers: Mutex::new(std::collections::HashMap::new()),
                 learned_window: Mutex::new(std::collections::BTreeMap::new()),
                 restore_pending: Mutex::new(std::collections::HashSet::new()),
+                cache_turns: Mutex::new(std::collections::HashMap::new()),
             }),
         };
         if let Some(agent) = &runtime.inner.default_agent {
@@ -5700,6 +5719,29 @@ command: None,
             budgets.advance(&reply.usage, cost.as_ref());
         }
         let prompt_tokens = reply.usage["inputTokens"].clone();
+        // Classify this turn's cache outcome beside the billed axes. Warm is
+        // local heat — a recent settled turn on the same model — and a
+        // compaction since the last turn makes this read the rebuild we asked
+        // for. Neither claim reaches the provider's own cache state.
+        let cache = {
+            let mut turns = inner.cache_turns.lock().await;
+            let now = crate::approval::now_ms();
+            let served = model.clone();
+            let prior = turns.get(session).cloned();
+            let warm = prior.as_ref().is_some_and(|prior| {
+                now.saturating_sub(prior.at_ms) < CACHE_WARM_WINDOW_MS && prior.model == served
+            });
+            let expected_rebuild = prior.as_ref().is_some_and(|prior| prior.after_compaction);
+            turns.insert(
+                session.to_owned(),
+                CacheTurn {
+                    at_ms: now,
+                    model: served,
+                    after_compaction: false,
+                },
+            );
+            crate::usage::cache_ledger(&reply.usage, warm, expected_rebuild)
+        };
         inner
             .store
             .record(
@@ -5711,7 +5753,7 @@ command: None,
                 // estimate: right after a compaction the estimate still holds
                 // the pre-pass history, and a client showing it read as though
                 // the pass had freed nothing.
-                json!({"run_id":run,"step":step,"usage":reply.usage,"model":model.as_deref(),"route":route,"cost":cost,"cache":crate::usage::cache_lineage(&reply.usage),"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":context_window,"context_tokens":prompt_tokens}),
+                json!({"run_id":run,"step":step,"usage":reply.usage,"model":model.as_deref(),"route":route,"cost":cost,"cache":cache,"context_message_seq":inner.store.max_message_seq(session).await?,"context_window":context_window,"context_tokens":prompt_tokens}),
             )
             .await?;
         billed_tokens_spent =
@@ -6799,6 +6841,13 @@ command: None,
                     .lock()
                     .await
                     .insert(session.to_owned());
+                // The pass rewrote the prefix, so the next read is a rebuild we
+                // asked for, not a miss to investigate.
+                let mut turns = inner.cache_turns.lock().await;
+                turns
+                    .entry(session.to_owned())
+                    .or_default()
+                    .after_compaction = true;
             }
             if let Some(request) = requested {
                 // One attempt answers the request either way, so a summarizer the

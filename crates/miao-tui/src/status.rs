@@ -280,6 +280,9 @@ pub struct UsageSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Settled turns whose prompt missed the provider cache, and which prefix
+    /// moved. `None` causes belong to turns recorded before the ledger existed.
+    pub cache_misses: CacheMisses,
     pub tool_calls: u64,
     pub tool_failures: u64,
     /// Average time to first token in milliseconds; `None` when the engine has
@@ -337,6 +340,16 @@ pub struct UsageSummary {
     pub context_tokens: Option<u64>,
 }
 
+/// The cache ledger's per-Session rollup: how many turns missed, what those
+/// prompts cost, and how many misses were rebuilds we asked for by compacting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheMisses {
+    pub turns: u64,
+    pub tokens: u64,
+    pub rebuilds: u64,
+    pub last_cause: Option<String>,
+}
+
 /// One settled turn's timing, as the engine recorded it beside the receipt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnTiming {
@@ -373,6 +386,18 @@ impl UsageSummary {
             input_tokens: u64_at(value, &["tokens", "input"]).unwrap_or(0),
             output_tokens: u64_at(value, &["tokens", "output"]).unwrap_or(0),
             cache_read_tokens: u64_at(value, &["tokens", "cacheRead"]).unwrap_or(0),
+            cache_misses: CacheMisses {
+                turns: u64_at(value, &["cacheDiagnostics", "misses", "turns"]).unwrap_or(0),
+                tokens: u64_at(value, &["cacheDiagnostics", "misses", "tokens"]).unwrap_or(0),
+                rebuilds: u64_at(value, &["cacheDiagnostics", "expectedRebuilds"]).unwrap_or(0),
+                last_cause: value
+                    .get("cacheDiagnostics")
+                    .and_then(|diagnostics| diagnostics.get("misses"))
+                    .and_then(|misses| misses.get("last"))
+                    .and_then(|last| last.get("cause"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
             tool_calls: u64_at(value, &["tools", "calls"]).unwrap_or(0),
             tool_failures: u64_at(value, &["tools", "failures"]).unwrap_or(0),
             ttft_avg_ms: u64_at(value, &["ttftMs", "avg"]),

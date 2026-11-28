@@ -5498,6 +5498,11 @@ impl Store {
             let mut requests = 0u64;
             let mut invalid_cache_rows = 0u64;
             let mut changes = std::collections::BTreeMap::<String,u64>::new();
+            // The same observations rolled up by what they mean, plus the most
+            // recent one: `observedChanges` stays the precise field-level
+            // record, this is the row a person can read.
+            let mut invalidation_causes = std::collections::BTreeMap::<String,u64>::new();
+            let mut last_invalidation: Option<(u64,String)> = None;
             let mut histories = std::collections::BTreeMap::<String,u64>::new();
             let turn_ms: std::collections::HashMap<(String, String), u64> = {
                 let mut stmt = conn.prepare(
@@ -5579,6 +5584,10 @@ impl Store {
             // opinions: each one is an event the engine already records.
             let mut approvals = 0u64;
             let mut allow_alls = 0u64;
+            // Reviewer outcomes: how many asks were settled without a person,
+            // and why the rest still needed one.
+            let mut auto_allowed = 0u64;
+            let mut review_reasons = std::collections::BTreeMap::<String, u64>::new();
             let mut answers = 0u64;
             let mut rejections = 0u64;
             let mut cancels = 0u64;
@@ -5612,6 +5621,14 @@ impl Store {
             let mut last_usage_ms: Option<u64> = None;
             let mut gaps_cold: Vec<u64> = Vec::new();
             let mut gaps_read: Vec<u64> = Vec::new();
+            // Cache outcomes written beside each settled turn. Turns recorded
+            // before the ledger existed carry no `cause`, so they stay out of
+            // these counts instead of reading as hits.
+            let mut cache_causes = std::collections::BTreeMap::<String, u64>::new();
+            let mut miss_tokens = 0u64;
+            let mut last_miss: Option<(u64, String, u64)> = None;
+            let mut rebuilds = 0u64;
+            let mut warm_turns = 0u64;
             while let Some(row) = rows.next()? {
                 let kind: String = row.get(1)?;
                 let data: Value = serde_json::from_str(&row.get::<_, String>(2)?)?;
@@ -5633,6 +5650,17 @@ impl Store {
                     }
                     "permission.approved" => approvals += 1,
                     "permission.saved_allowed" => allow_alls += 1,
+                    "permission.auto_allowed" => {
+                        auto_allowed += 1;
+                        if let Some(reason) = data["review"]["reason"].as_str() {
+                            *review_reasons.entry(reason.to_owned()).or_default() += 1;
+                        }
+                    }
+                    "product.permission.requested" => {
+                        if let Some(reason) = data["review"]["reason"].as_str() {
+                            *review_reasons.entry(reason.to_owned()).or_default() += 1;
+                        }
+                    }
                     "question.resolved" => match data["state"].as_str() {
                         Some("answered") => answers += 1,
                         Some("rejected") => rejections += 1,
@@ -5677,6 +5705,11 @@ impl Store {
                         }
                         for reason in diagnostic["changes"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                             *changes.entry(reason.to_owned()).or_default() += 1;
+                            let cause = crate::usage::invalidation_cause(reason);
+                            *invalidation_causes.entry(cause.to_owned()).or_default() += 1;
+                            if let Some(at) = row.get::<_, Option<u64>>(3)? {
+                                last_invalidation = Some((at, cause.to_owned()));
+                            }
                         }
                     }
                     "provider.started" => {
@@ -5730,6 +5763,24 @@ impl Store {
                             }
                         }
                         last_usage_ms = at.or(last_usage_ms);
+                        if let Some(cache) = data.get("cache").and_then(Value::as_object) {
+                            if let Some(cause) = cache.get("cause").and_then(Value::as_str) {
+                                *cache_causes.entry(cause.to_owned()).or_default() += 1;
+                                if cause != "none" {
+                                    let billed = usage["inputTokens"].as_u64().unwrap_or(0);
+                                    miss_tokens = miss_tokens.saturating_add(billed);
+                                    if let (Some(at), true) = (at, billed > 0) {
+                                        last_miss = Some((at, cause.to_owned(), billed));
+                                    }
+                                }
+                            }
+                            if cache.get("warm").and_then(Value::as_bool) == Some(true) {
+                                warm_turns += 1;
+                            }
+                            if cache.get("expectedRebuild").and_then(Value::as_bool) == Some(true) {
+                                rebuilds += 1;
+                            }
+                        }
                         provider_usage.observe(usage);
                         if usage["inputTokens"].as_u64().is_some_and(|input| {
                             usage["cacheReadInputTokens"].as_u64().unwrap_or(0)
@@ -5966,6 +6017,20 @@ impl Store {
                     "message": format!("no cache reads across {measured} turns; a route that supports prompt caching needs a stable prompt prefix and a supported cache key (prompt_cache_key)"),
                 }));
             }
+            if rebuilds > 0 {
+                cache_recommendations.push(json!({
+                    "code": "expectedRebuilds",
+                    "message": format!("compaction rewrote this Session's prefix {rebuilds} time(s); those reads were billed fresh on purpose, and a later compaction lets one prefix survive longer"),
+                }));
+            }
+            let prefix_changes = cache_causes.get("prefix-change").copied().unwrap_or(0);
+            if prefix_changes >= 3 {
+                cache_recommendations.push(json!({
+                    "code": "prefixChanges",
+                    "message": format!("{prefix_changes} turns missed inside the warm window with an unchanged model; something in the prefix (system context, tool set, or a mid-session switch) keeps moving"),
+                    "action": {"kind":"command","command":"/model"},
+                }));
+            }
             // An explicit clear checkpoints the history without deleting it, and
             // the newest usage event still describes the conversation that clear
             // removed. Once the clear is newer than that report, the Session's
@@ -5999,8 +6064,18 @@ impl Store {
                 "cacheDiagnostics": {
                     "observedRequests":requests, "usageObservations":turns + partial_turns,
                     "coverage":coverage, "observedChanges":changes, "historyStates":histories,
+                    "invalidationCauses":invalidation_causes,
+                    "lastInvalidation": last_invalidation.map(|(at,cause)| json!({"at_ms":at,"cause":cause})),
                     "invalidBreakdowns":invalid_cache_rows,
                     "serverCacheState":"unknown",
+                    "misses": {
+                        "turns": cache_causes.iter().filter(|(cause,_)| cause.as_str()!="none").map(|(_,count)| *count).sum::<u64>(),
+                        "tokens": miss_tokens,
+                        "byCause": cache_causes,
+                        "last": last_miss.map(|(at,cause,tokens)| json!({"at_ms":at,"cause":cause,"tokens":tokens})),
+                    },
+                    "expectedRebuilds": rebuilds,
+                    "warmTurns": warm_turns,
                     "recommendations":cache_recommendations,
                     "gaps": {
                         "coldTurns": gaps_cold.len(),
@@ -6036,6 +6111,8 @@ impl Store {
                 "interventions": {
                     "approvals": approvals,
                     "allowAll": allow_alls,
+                    "autoAllowed": auto_allowed,
+                    "reviewReasons": review_reasons,
                     "answers": answers,
                     "rejections": rejections,
                     "cancels": cancels,
