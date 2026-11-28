@@ -1715,18 +1715,31 @@ fn worktree_remove_plan(
         }
     ));
 
-    let branch_tip = git(&["rev-parse", "--verify", &format!("refs/heads/{name}")])?;
-    if success(&branch_tip) {
-        // `branch -D` discards every commit the branch holds that HEAD cannot
-        // reach; the count is what an operator needs before agreeing to that.
-        let ahead = git(&["rev-list", "--count", &format!("HEAD..refs/heads/{name}")])?;
-        let commits = String::from_utf8_lossy(&ahead.stdout).trim().to_string();
-        plan.push(format!(
-            "branch {name} · {} commit(s) not reachable from HEAD will be discarded",
-            if commits.is_empty() { "0" } else { &commits }
-        ));
-    } else {
-        plan.push(format!("branch {name} · absent"));
+    // An entered worktree is on `miao/<name>`, a created one on `<name>`, and a
+    // detached one on no branch at all. Plan against the branch the tree really
+    // holds, or a removal would silently leave `miao/<name>` behind.
+    let branch = miao_engine::worktree::list(std::path::Path::new(root))
+        .ok()
+        .and_then(|trees| trees.into_iter().find(|tree| tree.name == name))
+        .and_then(|tree| tree.branch);
+    match branch.as_deref() {
+        Some(branch) => {
+            let branch_tip = git(&["rev-parse", "--verify", &format!("refs/heads/{branch}")])?;
+            if success(&branch_tip) {
+                // `branch -D` discards every commit the branch holds that HEAD
+                // cannot reach; the count is what an operator needs before
+                // agreeing to that.
+                let ahead = git(&["rev-list", "--count", &format!("HEAD..refs/heads/{branch}")])?;
+                let commits = String::from_utf8_lossy(&ahead.stdout).trim().to_string();
+                plan.push(format!(
+                    "branch {branch} · {} commit(s) not reachable from HEAD will be discarded",
+                    if commits.is_empty() { "0" } else { &commits }
+                ));
+            } else {
+                plan.push(format!("branch {branch} · absent"));
+            }
+        }
+        None => plan.push("branch · detached HEAD (no branch to discard)".into()),
     }
 
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

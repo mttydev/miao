@@ -2701,90 +2701,46 @@ impl Runtime {
     }
 
     pub async fn initialize(&self, session: &str, title: &str) -> Result<Value, Error> {
-        // Placement is the one place that decides which checkout a Session
-        // writes. It runs under a process lock so two New Session requests
-        // cannot both see a free lease and both take the main checkout.
+        // Placement follows the checkout the operator launched in, as Claude
+        // Code's local sessions do: a file a Session writes is where the
+        // operator looks for it. Concurrent Sessions may share that checkout;
+        // isolation is the explicit `worktree_enter` move, which puts the
+        // Session on a real branch so its commits stay reachable and mergeable.
+        //
+        // The lock still serializes initialization, so a Session's recorded
+        // root and its registered tools settle in one ordered step.
         let _placement = self.inner.placement.lock().await;
-        if let Some(root) = self.inner.store.session_root(session).await? {
-            let engine_root = self.inner.tools.engine_root().to_string_lossy().to_string();
-            // A resumed Session keeps its worktree. A Session recorded at the
-            // engine root may have lost the checkout while it was closed; it
-            // must be re-placed before its next turn can write, or it would
-            // resume into a checkout another Session now owns.
-            let root = if root == engine_root {
-                if self
-                    .inner
-                    .store
-                    .acquire_checkout_lease(&engine_root, session)
-                    .await?
-                {
-                    root
-                } else {
-                    let checkout = crate::worktree::checkout(std::path::Path::new(&engine_root))?;
-                    let tree = Self::session_worktree(session, &checkout)?;
-                    self.inner.store.set_session_root(session, &tree).await?;
-                    tree
-                }
-            } else {
-                root
-            };
-            self.inner
-                .tools
-                .register_session_root(session, &root)
-                .await
-                .map_err(|error| Error::Invalid(error.to_string()))?;
-            self.record_project(session, &root).await;
-            return self.inner.store.initialize(session, title, &root).await;
-        }
-        let engine_root = self.inner.tools.engine_root().to_path_buf();
-        let engine_root = engine_root.to_string_lossy().to_string();
-        let checkout = match crate::worktree::checkout(std::path::Path::new(&engine_root)) {
-            Ok(checkout) => checkout,
-            // A non-git workspace has no shared HEAD to protect, so every
-            // Session stays in the directory the operator launched.
-            Err(_) => {
-                let root = engine_root.clone();
-                let value = self.inner.store.initialize(session, title, &root).await?;
-                self.inner
-                    .tools
-                    .register_session_root(session, &root)
-                    .await
-                    .map_err(|error| Error::Invalid(error.to_string()))?;
-                self.record_project(session, &root).await;
-                return Ok(value);
-            }
-        };
-        let root = if self
+        let engine_root = self.inner.tools.engine_root().to_string_lossy().to_string();
+        let root = self
             .inner
             .store
-            .acquire_checkout_lease(&engine_root, session)
+            .session_root(session)
             .await?
-        {
-            engine_root.clone()
+            .unwrap_or_else(|| engine_root.clone());
+        // A worktree removed outside miao must not strand a resumed Session at
+        // a dead directory. Re-home it before registering the root, on its real
+        // branch, exactly as startup reconciliation does.
+        let root = if root != engine_root && !std::path::Path::new(&root).is_dir() {
+            match crate::worktree::checkout(std::path::Path::new(&engine_root)) {
+                Ok(checkout) => match Self::session_worktree(session, &checkout) {
+                    Ok(tree) => {
+                        let _ = self.inner.store.set_session_root(session, &tree).await;
+                        tree
+                    }
+                    Err(_) => root,
+                },
+                Err(_) => root,
+            }
         } else {
-            // Another Session owns this checkout. Give the new Session its own
-            // detached worktree so neither Session's HEAD or index can move
-            // under the other.
-            Self::session_worktree(session, &checkout)?
+            root
         };
-        let result = self.inner.store.initialize(session, title, &root).await;
-        match result {
-            Ok(value) => {
-                self.inner
-                    .tools
-                    .register_session_root(session, &root)
-                    .await
-                    .map_err(|error| Error::Invalid(error.to_string()))?;
-                self.record_project(session, &root).await;
-                Ok(value)
-            }
-            Err(error) => {
-                // The lease belongs to an identity that was never created;
-                // leaving it behind would strand the checkout forever.
-                let _ = self.inner.store.release_checkout_lease(session).await;
-                Err(error)
-            }
-        }
+        self.inner
+            .tools
+            .register_session_root(session, &root)
+            .await
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        self.record_project(session, &root).await;
+        self.inner.store.initialize(session, title, &root).await
     }
 
     /// Record the project identity peer mail and the Session list use. Best
@@ -2804,17 +2760,22 @@ impl Runtime {
     /// really a directory, never fall back to the shared checkout.
     fn session_worktree(session: &str, checkout: &std::path::Path) -> Result<String, Error> {
         let name = session.strip_prefix("ses_").unwrap_or(session);
-        match crate::worktree::create_detached(checkout, name) {
+        // A re-homed Session lands on its real branch when possible, so the
+        // replacement tree does not fall back to the detached shape this
+        // placement change just removed. An existing branch is checked out,
+        // not reset, so commits recovered from a removed tree survive.
+        match crate::worktree::create_branch(checkout, name, &format!("miao/{name}")) {
             Ok(tree) => Ok(tree.path),
             Err(error) => {
                 let path = crate::placement::canonical(
                     &checkout.join(crate::worktree::DIRECTORY).join(name),
                 );
                 if path.is_dir() {
-                    Ok(path.display().to_string())
-                } else {
-                    Err(error)
+                    return Ok(path.display().to_string());
                 }
+                crate::worktree::create_detached(checkout, name)
+                    .map(|tree| tree.path)
+                    .map_err(|_| error)
             }
         }
     }
@@ -4792,7 +4753,7 @@ async fn execute(
         let engine_root = inner.tools.location().to_owned();
         if session_root != engine_root {
             tail.push_str(&format!(
-                "\n\n<worktree root=\"{session_root}\">\nThis Session works in its own git worktree. Resolve paths against this root and never run git in the checkout it was separated from ({engine_root}); that checkout belongs to another Session.\n</worktree>"
+                "\n\n<worktree root=\"{session_root}\">\nThis Session works in its own git worktree on a real branch. Resolve paths against this root and never run git in the checkout it was separated from ({engine_root}); work here, and report the branch and root so the operator can review or merge it.\n</worktree>"
             ));
         }
         let mut bundle = match crate::context::assemble_for_agent(

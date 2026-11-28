@@ -1735,6 +1735,21 @@ impl App {
                 // transcript is read.
                 let switched = self.session.as_ref().map(|session| session.id.as_str())
                     != summary.as_ref().map(|session| session.id.as_str());
+                // A Session may live outside the launched checkout (an explicit
+                // worktree), and two Sessions may share the checkout now that
+                // placement is local by default. Name whichever the operator
+                // just opened, instead of leaving the launch path on screen as
+                // the only clue.
+                let placement = summary
+                    .as_ref()
+                    .and_then(|session| session.directory.clone());
+                let shared = summary.as_ref().is_some_and(|session| {
+                    self.catalog.iter().any(|row| {
+                        row.id != session.id
+                            && row.directory.is_some()
+                            && row.directory == session.directory
+                    })
+                });
                 // The job rows belong to the Session that was open. Carrying
                 // them across a switch let a finished job from the last
                 // Session keep drawing its wait under the next one, and no
@@ -1905,6 +1920,17 @@ impl App {
                 self.screen = Screen::Session;
                 self.sync_panel();
                 self.update_status();
+                if switched {
+                    self.shell.composer.notice = None;
+                    if let Some(root) = placement {
+                        if std::path::Path::new(&root) != self.workspace.as_path() {
+                            let text = self.shell.lang().tf("notice.worktree_root", &[&root]);
+                            self.notice(&text);
+                        } else if shared {
+                            self.notice(self.shell.lang().t("notice.shared_checkout"));
+                        }
+                    }
+                }
                 self.continue_prompt();
             }
             AppEvent::RevertPreview {
@@ -7364,6 +7390,38 @@ mod tests {
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
         AppEvent::Key(KeyEvent::new(code, modifiers))
+    }
+
+    /// Placement is local by default, so the launch path is usually the
+    /// Session's root. An explicit worktree must name its real root, and a
+    /// second Session on the same checkout must say that the checkout is
+    /// shared instead of leaving the operator to discover it after a collision.
+    #[test]
+    fn opening_a_session_names_a_worktree_root_or_a_shared_checkout() {
+        let mut app = app_with(Startup::default());
+        let opened = |id: &str, directory: &str| AppEvent::SessionOpened {
+            summary: Some(SessionSummary {
+                directory: Some(directory.to_string()),
+                ..summary(id, 1)
+            }),
+            transcript: Box::new(Transcript::default()),
+            state: Box::new(SessionState::default()),
+        };
+        app.handle(opened("ses_w", "/repo/.miao-worktrees/w"));
+        assert_eq!(
+            app.shell.composer.notice.as_deref(),
+            Some("working in /repo/.miao-worktrees/w")
+        );
+        app.handle(opened("ses_a", "."));
+        assert_eq!(
+            app.shell.composer.notice, None,
+            "a local Session must not keep the previous worktree's notice"
+        );
+        app.handle(opened("ses_b", "."));
+        assert_eq!(
+            app.shell.composer.notice.as_deref(),
+            Some("another Session is also using this checkout; worktree_enter isolates")
+        );
     }
 
     /// End-to-end: the exact frame shapes the engine publishes must reach the

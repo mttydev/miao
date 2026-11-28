@@ -64,8 +64,30 @@ fn canonical(path: &Path) -> PathBuf {
     miao_engine::placement::canonical(path)
 }
 
+/// Move `session` into a branch-backed worktree, the way `worktree_enter`
+/// does, without needing the tool's ledger plumbing.
+async fn isolate(
+    store: &Store,
+    tools: &Tools,
+    checkout: &Path,
+    session: &str,
+    name: &str,
+) -> String {
+    let tree = miao_engine::worktree::create_branch(checkout, name, &format!("miao/{name}"))
+        .expect("worktree");
+    tools
+        .register_session_root(session, &tree.path)
+        .await
+        .expect("register root");
+    store
+        .set_session_root(session, &tree.path)
+        .await
+        .expect("record root");
+    tree.path
+}
+
 #[tokio::test]
-async fn a_second_session_is_placed_in_its_own_worktree() {
+async fn sessions_start_in_the_checkout_they_were_launched_in() {
     let dir = tempfile::tempdir().unwrap();
     repository(dir.path());
     let before_head = git(dir.path(), &["rev-parse", "HEAD"]);
@@ -85,27 +107,51 @@ async fn a_second_session_is_placed_in_its_own_worktree() {
         store.session_root("ses_one").await.unwrap(),
         Some(checkout.clone())
     );
-
-    let second = store.session_root("ses_two").await.unwrap().unwrap();
-    assert_ne!(second, checkout);
-    assert!(
-        Path::new(&second).starts_with(canonical(dir.path()).join(".miao-worktrees")),
-        "second Session must be under .miao-worktrees, got {second}"
+    assert_eq!(
+        store.session_root("ses_two").await.unwrap(),
+        Some(checkout.clone()),
+        "a Session starts where the operator launched it, not in a hidden worktree"
     );
-    assert!(Path::new(&second).is_dir());
-    assert!(git(dir.path(), &["worktree", "list", "--porcelain"]).contains(&second));
+    assert!(
+        !canonical(dir.path()).join(".miao-worktrees").exists(),
+        "placement must not create a worktree on its own"
+    );
 
-    // The first Session's checkout is not disturbed by placing the second.
+    // Neither Session moved the checkout's HEAD or left work behind.
     assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), before_head);
     assert_eq!(git(dir.path(), &["status", "--porcelain"]), "");
 
-    // Every later tool call resolves paths against the Session's own root.
+    // Every later tool call resolves paths against the checkout.
     assert_eq!(
         tools.clone().with_read_scope("ses_two").location(),
-        second.as_str()
+        checkout.as_str()
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_worktree_is_a_real_branch_and_stays_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    repository(dir.path());
+    let state = tempfile::tempdir().unwrap();
+    let store = Store::open(state.path().join("engine.db")).await.unwrap();
+    let tools = Tools::new(dir.path()).await.unwrap();
+    let runtime = Runtime::new(store.clone(), Arc::new(Idle), tools.clone())
+        .await
+        .unwrap();
+
+    runtime.initialize("ses_one", "one").await.unwrap();
+    runtime.initialize("ses_two", "two").await.unwrap();
+    let second = isolate(&store, &tools, &canonical(dir.path()), "ses_two", "ses_two").await;
+    assert!(
+        Path::new(&second).starts_with(canonical(dir.path()).join(".miao-worktrees")),
+        "the explicit worktree lives under .miao-worktrees, got {second}"
+    );
+    assert_eq!(
+        git(Path::new(&second), &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "miao/ses_two"
     );
 
-    // A write that names a file in the main checkout is outside the worktree.
+    // A write that names a file in the checkout is outside the worktree.
     let prepared = tools
         .clone()
         .with_writes(true)
@@ -139,6 +185,14 @@ async fn a_second_session_is_placed_in_its_own_worktree() {
         redirected.is_err(),
         "git redirected at the main checkout must be refused"
     );
+
+    // The branch is reachable from the checkout, so the work can be reviewed
+    // and merged instead of being stranded in a detached tree.
+    std::fs::write(Path::new(&second).join("work.txt"), "work\n").unwrap();
+    git(Path::new(&second), &["add", "work.txt"]);
+    git(Path::new(&second), &["commit", "-q", "-m", "work"]);
+    let tip = git(Path::new(&second), &["rev-parse", "HEAD"]);
+    assert_eq!(git(dir.path(), &["rev-parse", "miao/ses_two"]), tip);
 }
 
 #[tokio::test]
@@ -185,13 +239,13 @@ async fn a_worktree_session_can_change_its_model_and_account() {
     let state = tempfile::tempdir().unwrap();
     let store = Store::open(state.path().join("engine.db")).await.unwrap();
     let tools = Tools::new(dir.path()).await.unwrap();
-    let runtime = Runtime::new(store.clone(), Arc::new(Idle), tools)
+    let runtime = Runtime::new(store.clone(), Arc::new(Idle), tools.clone())
         .await
         .unwrap();
 
     runtime.initialize("ses_one", "one").await.unwrap();
     runtime.initialize("ses_two", "two").await.unwrap();
-    let second = store.session_root("ses_two").await.unwrap().unwrap();
+    let second = isolate(&store, &tools, &canonical(dir.path()), "ses_two", "ses_two").await;
     assert_ne!(
         second,
         canonical(dir.path()).to_string_lossy(),
