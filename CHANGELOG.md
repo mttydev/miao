@@ -16,6 +16,12 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.17] - 2026-11-28
+
+### Fixed
+- **engine**: compact a tool continuation at its settled boundary (#3442) (`e65170dd8b`)
+- **tui**: keep an idle prompt out of the queue band (#3443) (`898aa34d4a`)
+
 ## [0.5.16] - 2026-11-28
 
 ### Fixed
