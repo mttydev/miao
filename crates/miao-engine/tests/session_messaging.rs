@@ -60,6 +60,17 @@ fn prompt(session: &str, id: &str) -> Input {
     }
 }
 
+fn peer_input(to: &str, id: &str, message: &str) -> Input {
+    Input {
+        agent_references: Default::default(),
+        command: None,
+        session_id: to.into(),
+        input_id: id.into(),
+        prompt: format!("Message from Session a:\n{message}"),
+        delivery: Delivery::Steer,
+    }
+}
+
 async fn wait_for_turn(store: &Store, session: &str) {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
@@ -363,9 +374,9 @@ async fn a_denied_target_receives_nothing() {
     runtime.shutdown().await;
 }
 
-/// Same-project identity is the shared location root: a Session anchored to
-/// another project is not addressable, and the store refuses the send even
-/// when a caller skips the tool's own resolution.
+/// Same-project identity is the checkout every worktree of a repository
+/// shares: a Session of another project is not addressable, and the store
+/// refuses the send even when a caller skips the tool's own resolution.
 #[tokio::test]
 async fn a_peer_outside_the_project_is_not_addressable() {
     let (_dir, store, runtime, _turns) = setup(json!({
@@ -452,6 +463,104 @@ async fn a_peer_outside_the_project_is_not_addressable() {
             .iter()
             .any(|row| row["session_id"] == "never-initialized"),
         "a refused send must not create the recipient"
+    );
+    runtime.shutdown().await;
+}
+
+/// One project spans every worktree of a checkout: two Sessions placed in
+/// different worktrees can address each other even though their placement
+/// roots differ, while a worktree of another project stays out.
+#[tokio::test]
+async fn peer_mail_spans_the_worktrees_of_one_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store
+        .initialize("a", "Sender", "/repo/.miao-worktrees/a")
+        .await
+        .unwrap();
+    store
+        .initialize("b", "Peer", "/repo/.miao-worktrees/b")
+        .await
+        .unwrap();
+    store.set_session_project("a", "/repo").await.unwrap();
+    store.set_session_project("b", "/repo").await.unwrap();
+
+    store
+        .admit_peer_message("a", None, peer_input("b", "msg_same", "same project"))
+        .await
+        .expect("a worktree of the same checkout is a peer");
+    assert_eq!(pending(&store, "b").await.len(), 1);
+
+    store
+        .initialize("c", "Other", "/other/.miao-worktrees/c")
+        .await
+        .unwrap();
+    store.set_session_project("c", "/other").await.unwrap();
+    let refused = store
+        .admit_peer_message("a", None, peer_input("c", "msg_other", "other project"))
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("does not share this Session's project"),
+        "{refused}"
+    );
+    assert!(
+        pending(&store, "c").await.is_empty(),
+        "nothing crossed the project boundary"
+    );
+}
+
+/// Discovery follows the project too, not the tree a Session was placed in:
+/// the catalog a caller reads must name a peer in another worktree of the same
+/// checkout.
+#[tokio::test]
+async fn the_session_list_spans_the_worktrees_of_one_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("engine.db")).await.unwrap();
+    store
+        .initialize("a", "Sender", "/repo/.miao-worktrees/a")
+        .await
+        .unwrap();
+    store
+        .initialize("b", "Peer in another worktree", "/repo/.miao-worktrees/b")
+        .await
+        .unwrap();
+    store.set_session_project("a", "/repo").await.unwrap();
+    store.set_session_project("b", "/repo").await.unwrap();
+    let (turns, _receive) = mpsc::channel(10);
+    let runtime = Runtime::new(
+        store.clone(),
+        Arc::new(Calls {
+            tool: json!({
+                "type": "tool_use",
+                "id": "call_list",
+                "name": "list_sessions",
+                "input": {"includeHistory": true}
+            }),
+            turns,
+        }),
+        Tools::new(dir.path()).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime.admit(prompt("a", "list"), true).await.unwrap();
+    wait_for_turn(&store, "a").await;
+
+    let events = store.events("a", 0, 1000).await.unwrap();
+    let completed = events
+        .iter()
+        .find(|event| event.kind == "tool.completed")
+        .expect("list_sessions ran");
+    let listed = completed.data.to_string();
+    assert!(
+        listed.contains("Peer in another worktree"),
+        "a peer in another worktree of the project is listed: {listed}"
+    );
+    assert!(
+        !listed.contains("No peer sessions in this project"),
+        "the project was not treated as empty: {listed}"
     );
     runtime.shutdown().await;
 }
