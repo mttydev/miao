@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.20] - 2026-11-28
+
+### Fixed
+- **engine**: start Sessions in the launch checkout (#3449) (`c2f532985e`)
+
 ## [0.5.19] - 2026-11-28
 
 ### Fixed
