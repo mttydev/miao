@@ -16,6 +16,11 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.16] - 2026-11-28
+
+### Fixed
+- **cli**: resolve a cached Session from its own ledger (#3440) (`7dc2b66719`)
+
 ## [0.5.15] - 2026-11-28
 
 ### Fixed
