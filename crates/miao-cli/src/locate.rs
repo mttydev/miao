@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 /// One ledger that holds at least one Session, with the directory it serves.
@@ -91,8 +92,79 @@ pub fn locate_under(storage: &Path, needle: &str) -> Result<Option<Found>, Strin
     if needle.is_empty() {
         return Ok(None);
     }
+    // A cached hit is verified against the one ledger that claims it instead of
+    // validating every ledger stamp first. That validation opened all 523
+    // databases — and a busy ledger is always one write behind the cache — so
+    // `miao -s` waited about a second before the UI could start.
+    if let Some(found) = locate_cached(storage, needle) {
+        return Ok(Some(found));
+    }
     let entries = entries(storage)?;
     Ok(match_needle(&entries, needle))
+}
+
+/// How many cached entries a prefix may match before the lookup falls back to
+/// the full list; verifying dozens of ledgers costs more than a scan.
+const CACHED_CANDIDATES: usize = 16;
+
+/// Resolve `needle` from the cache alone, verifying each candidate ledger.
+///
+/// `None` means the cache cannot answer (no index, a version it does not know,
+/// no candidate, or a candidate that no longer holds the Session). The caller
+/// then takes the scan path, so a stale cache costs time but never correctness.
+fn locate_cached(storage: &Path, needle: &str) -> Option<Found> {
+    let index = read_index(&storage.join(INDEX_FILE))?;
+    if index.version != INDEX_VERSION {
+        return None;
+    }
+    let matches: Vec<&Entry> = index
+        .entries
+        .iter()
+        .filter(|entry| entry.session.starts_with(needle))
+        .collect();
+    if matches.is_empty() || matches.len() > CACHED_CANDIDATES {
+        return None;
+    }
+    if let Some(entry) = matches.iter().find(|entry| entry.session == needle) {
+        return Some(Found {
+            entry: verify(entry)?,
+            ambiguous: false,
+        });
+    }
+    let mut verified = Vec::with_capacity(matches.len());
+    for entry in matches {
+        verified.push(verify(entry)?);
+    }
+    let first = verified.first()?.clone();
+    Some(Found {
+        entry: first,
+        ambiguous: verified.len() > 1,
+    })
+}
+
+/// The cached entry as the ledger describes it now: the Session must still be
+/// there, and its root is read fresh so a re-homed placement is not opened at
+/// the old tree.
+fn verify(entry: &Entry) -> Option<Entry> {
+    let connection = rusqlite::Connection::open_with_flags(
+        &entry.database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let root = connection
+        .query_row(
+            "SELECT COALESCE(l.root, '') FROM engine_session s \
+             LEFT JOIN engine_location l ON l.session_id = s.id WHERE s.id=?1",
+            [&entry.session],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()??;
+    Some(Entry {
+        session: entry.session.clone(),
+        root,
+        database: entry.database.clone(),
+    })
 }
 
 /// Every Session in every ledger, newest first by ID.
@@ -310,6 +382,53 @@ mod tests {
         assert_eq!(found.entry.root, "/work/two");
         assert_eq!(found.entry.database, dir.join("b.db"));
         assert!(!found.ambiguous);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_ledger_changed_behind_the_cache_still_resolves_the_exact_id() {
+        let dir = scratch("cached-ledger-changed");
+        ledger(&dir.join("a.db"), &[("ses_aaa", "/work/one")]);
+        ledger(&dir.join("b.db"), &[("ses_bbb", "/work/two")]);
+        // Prime the cache, then write a ledger so its change counter no longer
+        // matches the stamp the cache recorded.
+        locate_under(&dir, "ses_aaa").unwrap();
+        ledger(&dir.join("b.db"), &[("ses_ccc", "/work/three")]);
+        let found = locate_under(&dir, "ses_bbb").unwrap().unwrap();
+        assert_eq!(found.entry.root, "/work/two");
+        assert_eq!(found.entry.database, dir.join("b.db"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_rehomed_session_answers_with_its_current_root() {
+        let dir = scratch("rehome");
+        ledger(&dir.join("a.db"), &[("ses_aaa", "/work/old")]);
+        locate_under(&dir, "ses_aaa").unwrap();
+        let connection = rusqlite::Connection::open(dir.join("a.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE engine_location SET root='/work/new' WHERE session_id='ses_aaa'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let found = locate_under(&dir, "ses_aaa").unwrap().unwrap();
+        assert_eq!(found.entry.root, "/work/new");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_session_deleted_behind_the_cache_falls_back_to_the_scan() {
+        let dir = scratch("deleted");
+        ledger(&dir.join("a.db"), &[("ses_aaa", "/work/one")]);
+        locate_under(&dir, "ses_aaa").expect("prime the cache");
+        let connection = rusqlite::Connection::open(dir.join("a.db")).unwrap();
+        connection
+            .execute("DELETE FROM engine_session WHERE id='ses_aaa'", [])
+            .unwrap();
+        drop(connection);
+        assert!(locate_under(&dir, "ses_aaa").unwrap().is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 
