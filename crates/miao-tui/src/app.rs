@@ -702,6 +702,10 @@ pub struct App {
     /// that already happened ("copied 120 characters"); leaving it on screen
     /// until the next event turns it into permanent clutter.
     notice_until: Option<Instant>,
+    /// The placement notice this client last painted. Only this text may be
+    /// replaced on a Session switch; a notice the operator just earned (a
+    /// stored key, a failed action) outranks placement context.
+    placement_notice: Option<String>,
     /// Escape pressed on an idle Session: the next Escape returns to Home. The
     /// deadline is what expires the confirmation, so a press minutes later asks
     /// again instead of leaving on a notice nobody is looking at.
@@ -979,6 +983,7 @@ impl App {
             leader_since: None,
             last_click: None,
             notice_until: None,
+            placement_notice: None,
             leave_armed: None,
             leader_timeout: Duration::from_millis(2000),
             keys,
@@ -1921,13 +1926,31 @@ impl App {
                 self.sync_panel();
                 self.update_status();
                 if switched {
-                    self.shell.composer.notice = None;
-                    if let Some(root) = placement {
-                        if std::path::Path::new(&root) != self.workspace.as_path() {
-                            let text = self.shell.lang().tf("notice.worktree_root", &[&root]);
+                    let ours = self.placement_notice.is_some()
+                        && self.shell.composer.notice.as_deref()
+                            == self.placement_notice.as_deref();
+                    if ours {
+                        self.shell.composer.notice = None;
+                    }
+                    self.placement_notice = None;
+                    // Placement is context, not an alert: never replace a
+                    // notice the operator just earned (a stored key, a failed
+                    // action) with it.
+                    if self.shell.composer.notice.is_none() {
+                        let text = match placement {
+                            Some(root)
+                                if std::path::Path::new(&root) != self.workspace.as_path() =>
+                            {
+                                Some(self.shell.lang().tf("notice.worktree_root", &[&root]))
+                            }
+                            Some(_) if shared => {
+                                Some(self.shell.lang().t("notice.shared_checkout").to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(text) = text {
+                            self.placement_notice = Some(text.clone());
                             self.notice(&text);
-                        } else if shared {
-                            self.notice(self.shell.lang().t("notice.shared_checkout"));
                         }
                     }
                 }
@@ -2012,7 +2035,22 @@ impl App {
                 self.request_quota(true);
                 self.notice("context cleared · the next prompt starts fresh");
             }
-            AppEvent::Notice(message) => self.notice(&message),
+            AppEvent::Notice(message) => {
+                // An engine restart is routine housekeeping. It must not erase
+                // the notice that names the operator action which caused it —
+                // the key store and the route reload arrive in the same batch,
+                // and the useful line was otherwise never painted.
+                let restart = message.starts_with("engine restarted");
+                let action = self
+                    .shell
+                    .composer
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.starts_with("stored the "));
+                if !(restart && action) {
+                    self.notice(&message);
+                }
+            }
             AppEvent::RuntimeContext(context) => self.mtty_state.set_runtime_context(context),
             AppEvent::PromptFailed {
                 text,
@@ -7413,10 +7451,6 @@ mod tests {
             Some("working in /repo/.miao-worktrees/w")
         );
         app.handle(opened("ses_a", "."));
-        assert_eq!(
-            app.shell.composer.notice, None,
-            "a local Session must not keep the previous worktree's notice"
-        );
         app.handle(opened("ses_b", "."));
         assert_eq!(
             app.shell.composer.notice.as_deref(),
