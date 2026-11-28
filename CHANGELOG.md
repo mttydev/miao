@@ -16,6 +16,14 @@ at `docs/releases/vX.Y.Z.md` and `docs/releases/vX.Y.Z.zh.md`; both are required
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-11-28
+
+### Added
+- **tui**: paint plan quotas as meters and ask for them on open (#3432) (`15dfcbdc3f`)
+
+### Fixed
+- keep a promoted prompt out of the queue band and plan meter rows through a failed fetch (#3435) (`8221c04425`)
+
 ## [0.5.13] - 2026-11-27
 
 ### Fixed
